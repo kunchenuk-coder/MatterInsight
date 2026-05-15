@@ -109,12 +109,13 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
           </p>
           
           {!isWaiting ? (
-            <form onSubmit={handleVerificationSubmit} className="space-y-6 text-left">
+            <form onSubmit={handleVerificationSubmit} autoComplete="off" className="space-y-6 text-left">
               <div>
                 <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">联系手机号</label>
                 <input 
                   required
-                  type="tel" 
+                  type="tel"
+                  autoComplete="off"
                   value={verificationForm.phone}
                   onChange={e => setVerificationForm({...verificationForm, phone: e.target.value})}
                   placeholder="请输入您的联系电话"
@@ -133,7 +134,8 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                     </>
                   )}
                   <input 
-                    type="file" 
+                    type="file"
+                    autoComplete="off"
                     accept="image/*" 
                     onChange={async (e) => {
                       const file = e.target.files?.[0];
@@ -696,7 +698,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
               <button onClick={() => setIsPublishing(false)} className="text-gray-400 hover:text-black text-2xl">✕</button>
             </div>
 
-            <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-10">
+            <form onSubmit={handleSubmit} autoComplete="off" className="grid grid-cols-1 md:grid-cols-2 gap-10">
               {/* Form Left: Basic Info */}
               <div className="space-y-6">
                 {isProcessing && (
@@ -711,7 +713,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                 )}
                 <div>
                   <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">材料名称</label>
-                  <input required value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} type="text" className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all" placeholder="例如: 意式极简大理石" />
+                  <input required autoComplete="off" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} type="text" className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all" placeholder="例如: 意式极简大理石" />
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
@@ -768,7 +770,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                         <span className="text-xs text-gray-400 font-bold">点击上传材料主图</span>
                       </>
                     )}
-                    <input type="file" accept="image/*" onChange={e => handleFileChange(e, 'image')} className="absolute inset-0 opacity-0 cursor-pointer" disabled={isProcessing} />
+                    <input type="file" autoComplete="off" accept="image/*" onChange={e => handleFileChange(e, 'image')} className="absolute inset-0 opacity-0 cursor-pointer" disabled={isProcessing} />
                   </div>
                 </div>
 

@@ -759,7 +759,8 @@ const App: React.FC = () => {
               <h3 className="text-2xl font-black mb-6">运营控制中心</h3>
               <input 
                 type="password" 
-                autoComplete="off"
+                autoComplete="new-password"
+                name="admin-access-token"
                 placeholder="请输入管理员访问密码"
                 className="w-full p-4 bg-gray-50 rounded-2xl mb-4 border-none outline-none focus:ring-2 focus:ring-black"
                 value={adminPass}
@@ -767,8 +768,8 @@ const App: React.FC = () => {
                 onKeyDown={(e) => e.key === 'Enter' && handleAdminAuth()}
               />
               <div className="flex gap-4">
-                <button onClick={() => setShowAdminLogin(false)} className="flex-1 py-4 font-bold text-gray-400">取消</button>
-                <button onClick={handleAdminAuth} className="flex-1 py-4 bg-black text-white rounded-2xl font-bold">进入后台</button>
+                <button type="button" onClick={() => setShowAdminLogin(false)} className="flex-1 py-4 font-bold text-gray-400">取消</button>
+                <button type="button" onClick={handleAdminAuth} className="flex-1 py-4 bg-black text-white rounded-2xl font-bold">进入后台</button>
               </div>
             </div>
           </div>

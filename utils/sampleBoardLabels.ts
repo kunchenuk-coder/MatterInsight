@@ -1,10 +1,10 @@
 import {
-  analyzeWithGemini,
-  analyzeWithQwen,
+  analyzeWithVisionProviderChain,
   getGeminiApiKey,
   getQwenApiKey,
+  getDeepSeekApiKey,
+  getDeepSeekVisionModelName,
   parseMaterialAnalysisText,
-  shouldFallbackToQwen,
 } from "./aiMaterialAnalysis";
 
 const LABEL_PROMPT =
@@ -22,7 +22,9 @@ export async function recognizeSampleLabels(
 ): Promise<string[] | null> {
   const geminiKey = getGeminiApiKey();
   const qwenKey = getQwenApiKey();
-  if (!geminiKey && !qwenKey) return null;
+  const dsKey = getDeepSeekApiKey();
+  const dsModel = getDeepSeekVisionModelName();
+  if (!geminiKey && !qwenKey && !(dsKey && dsModel)) return null;
 
   const mimeMatch = stripJpegDataUrl.match(/^data:(image\/[\w+.-]+);base64,/);
   const mimeType = mimeMatch?.[1] || "image/jpeg";
@@ -33,18 +35,12 @@ export async function recognizeSampleLabels(
   const prompt = `${LABEL_PROMPT}\ntotal=${totalCells}。`;
 
   try {
-    let text: string;
-    if (geminiKey) {
-      try {
-        text = await analyzeWithGemini(geminiKey, prompt, base64Part, mimeType);
-      } catch (e) {
-        if (qwenKey && shouldFallbackToQwen(e)) {
-          text = await analyzeWithQwen(qwenKey, stripJpegDataUrl, prompt);
-        } else throw e;
-      }
-    } else {
-      text = await analyzeWithQwen(qwenKey!, stripJpegDataUrl, prompt);
-    }
+    const text = await analyzeWithVisionProviderChain(
+      stripJpegDataUrl,
+      prompt,
+      base64Part,
+      mimeType
+    );
 
     const raw = parseMaterialAnalysisText(text);
     const arr = raw.filter((x): x is string => typeof x === "string");

@@ -1,23 +1,25 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import html2canvas from 'html2canvas';
 // 检查下面这一行，确保包含 MoodBoardProps 里面用到的所有类型
 import { User, Material, MoodBoard, MoodBoardItem, Category } from '../types';
 import {
   MATERIAL_ANALYSIS_PROMPT,
-  analyzeWithGemini,
-  analyzeWithQwen,
+  analyzeWithVisionFallback,
+  getDeepSeekApiKey,
+  getDeepSeekVisionModelName,
   getGeminiApiKey,
   getQwenApiKey,
   parseMaterialAnalysisText,
-  shouldFallbackToQwen,
+  type VisionSampleAnchor,
 } from '../utils/aiMaterialAnalysis';
 import {
   compressFileToDataUrl,
   compressDataUrl,
   measureDataUrlContainedBox,
+  reencodeDataUrlSameDimensions,
+  reencodeFileToDataUrl,
   MOODBOARD_IMAGE_MAX_WIDTH,
   MOODBOARD_IMAGE_QUALITY,
-  AI_MODAL_IMAGE_MAX_WIDTH,
   AI_MODAL_IMAGE_QUALITY,
 } from '../utils/imageCompression';
 
@@ -31,6 +33,21 @@ type AIAnnotationPayload = {
 };
 
 const DRAG_MATERIAL_MIME = 'application/x-matter-material-id';
+
+/** 画布逻辑坐标系（与内层 scale 配套）；外层滚动尺寸为 base × zoom */
+const MOODBOARD_CONTENT_W = 2000;
+const MOODBOARD_CONTENT_H = 1400;
+const MOODBOARD_ZOOM_MIN = 0.5;
+const MOODBOARD_ZOOM_MAX = 3;
+
+/** 将裁切矩形限制在逻辑画布内，避免 html2canvas 截到画布外空白 */
+function clampCropRectToBoard(r: { x: number; y: number; w: number; h: number }) {
+  const x0 = Math.max(0, Math.min(MOODBOARD_CONTENT_W, r.x));
+  const y0 = Math.max(0, Math.min(MOODBOARD_CONTENT_H, r.y));
+  const x1 = Math.max(0, Math.min(MOODBOARD_CONTENT_W, r.x + r.w));
+  const y1 = Math.max(0, Math.min(MOODBOARD_CONTENT_H, r.y + r.h));
+  return { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
+}
 
 /** 同一区域 / 同名过近的 AI 标注合并，避免叠两个标签 */
 function dedupeAIAnnotations(items: AIAnnotationPayload[], spaceDist = 7): AIAnnotationPayload[] {
@@ -46,6 +63,38 @@ function dedupeAIAnnotations(items: AIAnnotationPayload[], spaceDist = 7): AIAnn
     if (!dup) out.push(a);
   }
   return out;
+}
+
+/** AI 弹窗预览图（object-contain）点击 → 原图百分比坐标，供千问 RGB 前置采样（与画布 canvasZoom 无关，仅相对上传图自然像素） */
+function previewImageClickToVisionAnchor(e: React.MouseEvent<HTMLImageElement>): VisionSampleAnchor {
+  const el = e.currentTarget;
+  const nw = el.naturalWidth;
+  const nh = el.naturalHeight;
+  if (nw < 1 || nh < 1) {
+    return { xPercent: 50, yPercent: 50, source: "user" };
+  }
+  const cw = el.clientWidth;
+  const ch = el.clientHeight;
+  const scale = Math.min(cw / nw, ch / nh);
+  const dw = nw * scale;
+  const dh = nh * scale;
+  const ox = (cw - dw) / 2;
+  const oy = (ch - dh) / 2;
+  const rect = el.getBoundingClientRect();
+  const ne = e.nativeEvent;
+  const lx =
+    typeof ne.offsetX === "number" && !Number.isNaN(ne.offsetX)
+      ? ne.offsetX
+      : e.clientX - rect.left;
+  const ly =
+    typeof ne.offsetY === "number" && !Number.isNaN(ne.offsetY)
+      ? ne.offsetY
+      : e.clientY - rect.top;
+  let nx = (lx - ox) / scale;
+  let ny = (ly - oy) / scale;
+  nx = Math.max(0, Math.min(nw - 1, nx));
+  ny = Math.max(0, Math.min(nh - 1, ny));
+  return { xPercent: (nx / nw) * 100, yPercent: (ny / nh) * 100, source: "user" };
 }
 
 interface MoodBoardProps {
@@ -90,6 +139,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   const [analysisStep, setAnalysisStep] = useState<1 | 2 | 3>(1); // 1 上传 2 识别中 3 已写入画布
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [aiImage, setAiImage] = useState<string | null>(null);
+  /** 未点击预览图时为 null，千问 RGB 前置用几何中心；点击后映射到原图百分比 */
+  const [aiVisionAnchor, setAiVisionAnchor] = useState<VisionSampleAnchor | null>(null);
   const [isPreviewingImage, setIsPreviewingImage] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<Category | 'ALL'>('ALL');
   const [matchResults, setMatchResults] = useState<{ material: Material; remark: string; coords: {x: number, y: number}, logic: string }[] | null>(null);
@@ -100,6 +151,203 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   const [creatingBoardForMaterialId, setCreatingBoardForMaterialId] = useState<string | null>(null);
   const [aiUploadHint, setAiUploadHint] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
+
+  const [canvasZoom, setCanvasZoom] = useState(1);
+  const canvasZoomRef = useRef(1);
+  useEffect(() => {
+    canvasZoomRef.current = canvasZoom;
+  }, [canvasZoom]);
+
+  const zoomCanvas = useCallback((factor: number) => {
+    setCanvasZoom((z) => {
+      const n = Math.min(MOODBOARD_ZOOM_MAX, Math.max(MOODBOARD_ZOOM_MIN, z * factor));
+      return Math.round(n * 10000) / 10000;
+    });
+  }, []);
+
+  const spaceDownRef = useRef(false);
+  const middleDownRef = useRef(false);
+  const [canvasPanArmed, setCanvasPanArmed] = useState(false);
+  const [isCanvasPanDragging, setIsCanvasPanDragging] = useState(false);
+  const canvasPanSessionRef = useRef<{
+    startClientX: number;
+    startClientY: number;
+    startScrollLeft: number;
+    startScrollTop: number;
+  } | null>(null);
+
+  const panArmed = () => spaceDownRef.current || middleDownRef.current;
+
+  const clientToBoard = useCallback((clientX: number, clientY: number) => {
+    const host = canvasRef.current;
+    if (!host) return { x: 0, y: 0 };
+    const scaleEl = host.querySelector("[data-moodboard-scale]") as HTMLElement | null;
+    if (scaleEl) {
+      const r = scaleEl.getBoundingClientRect();
+      const rw = Math.max(1e-6, r.width);
+      const rh = Math.max(1e-6, r.height);
+      return {
+        x: ((clientX - r.left) / rw) * MOODBOARD_CONTENT_W,
+        y: ((clientY - r.top) / rh) * MOODBOARD_CONTENT_H,
+      };
+    }
+    const z = canvasZoomRef.current || 1;
+    const rect = host.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left + host.scrollLeft) / z,
+      y: (clientY - rect.top + host.scrollTop) / z,
+    };
+  }, []);
+
+  /** 逻辑裁切框 → 视口像素（与 clientToBoard 一致，用于导出蒙层与蓝框） */
+  const cropBoxToScreenRect = useCallback(
+    (cb: { x: number; y: number; w: number; h: number }) => {
+      const host = canvasRef.current;
+      const scaleEl = host?.querySelector("[data-moodboard-scale]") as HTMLElement | null;
+      if (!host || !scaleEl) return null;
+      const sr = scaleEl.getBoundingClientRect();
+      const sx = sr.width / MOODBOARD_CONTENT_W;
+      const sy = sr.height / MOODBOARD_CONTENT_H;
+      return {
+        left: sr.left + cb.x * sx,
+        top: sr.top + cb.y * sy,
+        width: cb.w * sx,
+        height: cb.h * sy,
+      };
+    },
+    []
+  );
+
+  const [exportOverlayTick, setExportOverlayTick] = useState(0);
+  useEffect(() => {
+    if (!isFinalMode || !canvasRef.current) return;
+    const el = canvasRef.current;
+    const bump = () => setExportOverlayTick((t) => t + 1);
+    el.addEventListener("scroll", bump, { passive: true });
+    window.addEventListener("resize", bump);
+    bump();
+    return () => {
+      el.removeEventListener("scroll", bump);
+      window.removeEventListener("resize", bump);
+    };
+  }, [isFinalMode, canvasZoom, cropBox]);
+
+  /** 框选拖出视口时仍用 document 更新 cropBox（逻辑坐标 + 夹紧画布） */
+  useEffect(() => {
+    if (!isFinalMode || !isSelectingCrop || !cropStart) return;
+    const start = cropStart;
+    const onMove = (ev: MouseEvent | TouchEvent) => {
+      const cx = "touches" in ev ? ev.touches[0]!.clientX : (ev as MouseEvent).clientX;
+      const cy = "touches" in ev ? ev.touches[0]!.clientY : (ev as MouseEvent).clientY;
+      const p = clientToBoard(cx, cy);
+      setCropBox(
+        clampCropRectToBoard({
+          x: Math.min(start.x, p.x),
+          y: Math.min(start.y, p.y),
+          w: Math.abs(p.x - start.x),
+          h: Math.abs(p.y - start.y),
+        })
+      );
+    };
+    const onUp = () => {
+      setIsSelectingCrop(false);
+      setCropStart(null);
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("touchmove", onMove as EventListener);
+      document.removeEventListener("touchend", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    document.addEventListener("touchmove", onMove as EventListener, { passive: false });
+    document.addEventListener("touchend", onUp);
+    return () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("touchmove", onMove as EventListener);
+      document.removeEventListener("touchend", onUp);
+    };
+  }, [isFinalMode, isSelectingCrop, cropStart, clientToBoard]);
+
+  useEffect(() => {
+    const onBlur = () => {
+      spaceDownRef.current = false;
+      middleDownRef.current = false;
+      setCanvasPanArmed(false);
+      if (canvasPanSessionRef.current) {
+        canvasPanSessionRef.current = null;
+        setIsCanvasPanDragging(false);
+      }
+    };
+    window.addEventListener('blur', onBlur);
+    return () => window.removeEventListener('blur', onBlur);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.code !== 'Space' || ev.repeat) return;
+      const t = ev.target as HTMLElement | null;
+      if (t?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+      if (isAIModalOpen || isExporting || isFinalMode) return;
+      ev.preventDefault();
+      spaceDownRef.current = true;
+      setCanvasPanArmed(true);
+    };
+    const onKeyUp = (ev: KeyboardEvent) => {
+      if (ev.code !== 'Space') return;
+      spaceDownRef.current = false;
+      setCanvasPanArmed(middleDownRef.current);
+      if (canvasPanSessionRef.current) {
+        canvasPanSessionRef.current = null;
+        setIsCanvasPanDragging(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('keyup', onKeyUp, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('keyup', onKeyUp, true);
+    };
+  }, [isAIModalOpen, isExporting, isFinalMode]);
+
+  useEffect(() => {
+    const onDown = (ev: MouseEvent) => {
+      if (ev.button !== 1) return;
+      if (isAIModalOpen || isExporting) return;
+      ev.preventDefault();
+      middleDownRef.current = true;
+      setCanvasPanArmed(true);
+    };
+    const onUp = (ev: MouseEvent) => {
+      if (ev.button !== 1) return;
+      middleDownRef.current = false;
+      setCanvasPanArmed(spaceDownRef.current);
+      if (canvasPanSessionRef.current) {
+        canvasPanSessionRef.current = null;
+        setIsCanvasPanDragging(false);
+      }
+    };
+    window.addEventListener('mousedown', onDown, true);
+    window.addEventListener('mouseup', onUp, true);
+    return () => {
+      window.removeEventListener('mousedown', onDown, true);
+      window.removeEventListener('mouseup', onUp, true);
+    };
+  }, [isAIModalOpen, isExporting]);
+
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const onWheel = (ev: WheelEvent) => {
+      if (!ev.ctrlKey) return;
+      if (isFinalMode || isAIModalOpen || isExporting || isPreviewingCapturedImage || isPreviewingImage) return;
+      ev.preventDefault();
+      const dir = ev.deltaY < 0 ? 1.1 : 0.9;
+      zoomCanvas(dir);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [isFinalMode, isAIModalOpen, isExporting, isPreviewingCapturedImage, isPreviewingImage, zoomCanvas]);
 
   const activeBoard = moodboards.find(b => b.id === activeMoodboardId) || moodboards[0];
   const savedMaterials = materials.filter(m => savedIds.includes(m.id));
@@ -291,9 +539,9 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
   const handleStartAction = (e: React.MouseEvent | React.TouchEvent, id: string, type: 'move' | 'resize') => {
     if (isFinalMode) return;
+    if (panArmed()) return;
     const item = activeBoard.items.find(i => i.id === id);
     if (!item || !canvasRef.current) return;
-    const rect = canvasRef.current.getBoundingClientRect();
 
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
@@ -301,7 +549,11 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     if (type === 'resize') {
       setResizingItem({ id, startWidth: item.width, startHeight: item.height, startX: clientX, startY: clientY });
     } else {
-      setDraggingItem({ id, offsetX: clientX - rect.left - item.x, offsetY: clientY - rect.top - item.y });
+      const el = canvasRef.current;
+      const pb = clientToBoard(clientX, clientY);
+      const contentX = pb.x;
+      const contentY = pb.y;
+      setDraggingItem({ id, offsetX: contentX - item.x, offsetY: contentY - item.y });
     }
     // Bring to front, but keep markers/lines logically above
     const maxZ = Math.max(...activeBoard.items.map(x => x.zIndex), 0);
@@ -319,24 +571,23 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
 
     if (isExporting || isPreviewingCapturedImage) return;
-    
+
+    const p = clientToBoard(clientX, clientY);
+    const curX = p.x;
+    const curY = p.y;
+
     if (isFinalMode && isMovingCropBox && cropBox && movingCropOffset && canvasRef.current) {
-      const rect = canvasRef.current.getBoundingClientRect();
-      const curX = clientX - rect.left + canvasRef.current.scrollLeft;
-      const curY = clientY - rect.top + canvasRef.current.scrollTop;
-      setCropBox({
-        ...cropBox,
-        x: curX - movingCropOffset.x,
-        y: curY - movingCropOffset.y
-      });
+      setCropBox(
+        clampCropRectToBoard({
+          ...cropBox,
+          x: curX - movingCropOffset.x,
+          y: curY - movingCropOffset.y,
+        })
+      );
       return;
     }
 
     if (isFinalMode && resizingCropHandle && cropBox && canvasRef.current) {
-      const rect = canvasRef.current.getBoundingClientRect();
-      const curX = clientX - rect.left + canvasRef.current.scrollLeft;
-      const curY = clientY - rect.top + canvasRef.current.scrollTop;
-      
       let newBox = { ...cropBox };
       if (resizingCropHandle === 'tl') {
         const deltaX = curX - cropBox.x;
@@ -359,30 +610,15 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         newBox.w = Math.max(50, curX - cropBox.x);
         newBox.h = Math.max(50, curY - cropBox.y);
       }
-      
-      setCropBox(newBox);
-      return;
-    }
 
-    if (isFinalMode && isSelectingCrop && cropStart && canvasRef.current) {
-      const rect = canvasRef.current.getBoundingClientRect();
-      const curX = clientX - rect.left + canvasRef.current.scrollLeft;
-      const curY = clientY - rect.top + canvasRef.current.scrollTop;
-      setCropBox({
-        x: Math.min(cropStart.x, curX),
-        y: Math.min(cropStart.y, curY),
-        w: Math.abs(curX - cropStart.x),
-        h: Math.abs(curY - cropStart.y)
-      });
+      setCropBox(clampCropRectToBoard(newBox));
       return;
     }
 
     if (connectingFromId && canvasRef.current) {
-      const rect = canvasRef.current.getBoundingClientRect();
-      const el = canvasRef.current;
       setTempPointerPos({
-        x: clientX - rect.left + el.scrollLeft,
-        y: clientY - rect.top + el.scrollTop,
+        x: curX,
+        y: curY,
       });
       return;
     }
@@ -412,9 +648,10 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         return i;
       }));
     } else if (draggingItem && canvasRef.current) {
-      const rect = canvasRef.current.getBoundingClientRect();
-      const newX = clientX - rect.left - draggingItem.offsetX;
-      const newY = clientY - rect.top - draggingItem.offsetY;
+      const contentX = curX;
+      const contentY = curY;
+      const newX = contentX - draggingItem.offsetX;
+      const newY = contentY - draggingItem.offsetY;
       
       const draggedItem = activeBoard.items.find(i => i.id === draggingItem.id);
       
@@ -449,6 +686,10 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   };
 
   const handlePointerUp = (e: React.MouseEvent | React.TouchEvent) => {
+    if (canvasPanSessionRef.current) {
+      canvasPanSessionRef.current = null;
+      setIsCanvasPanDragging(false);
+    }
     if (isFinalMode && (isSelectingCrop || resizingCropHandle || isMovingCropBox)) {
       setIsSelectingCrop(false);
       setResizingCropHandle(null);
@@ -537,61 +778,115 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     // Auto-set crop box for mobile
     if (window.innerWidth < 768) {
       const rect = canvasRef.current?.getBoundingClientRect();
-      if (rect) {
-        setCropBox({
-          x: canvasRef.current!.scrollLeft + rect.width * 0.1,
-          y: canvasRef.current!.scrollTop + rect.height * 0.2,
-          w: rect.width * 0.8,
-          h: rect.height * 0.5
-        });
+      if (rect && canvasRef.current) {
+        const z = canvasZoomRef.current || 1;
+        setCropBox(
+          clampCropRectToBoard({
+            x: (canvasRef.current.scrollLeft + rect.width * 0.1) / z,
+            y: (canvasRef.current.scrollTop + rect.height * 0.2) / z,
+            w: (rect.width * 0.8) / z,
+            h: (rect.height * 0.5) / z,
+          })
+        );
       }
     }
   };
 
   const handleExportToImage = async () => {
     if (!cropBox || !canvasRef.current || isExporting) return;
-    
+
+    const host = canvasRef.current;
+    const capturedCrop = { ...cropBox };
     setIsExporting(true);
-    
-    // Hide selection UI and ensure clarity
-    const overlay = document.querySelector('.selection-overlay-root') as HTMLElement;
-    if (overlay) overlay.style.display = 'none';
 
-    try {
-      // Ensure the container is fully opaque during capture to avoid grey/faded look
-      const originalOpacity = canvasRef.current.style.opacity;
-      canvasRef.current.style.opacity = '1';
-      
-      // Calculate coordinates relative to the MOODBOARD CONTAINER
-      // Note: cropBox.x/y already calculated relative to the content (includes scroll)
-      const { x, y, w, h } = cropBox;
-      
-      const canvas = await html2canvas(canvasRef.current, {
-        x,
-        y,
-        width: w,
-        height: h,
-        useCORS: true,
-        scale: 3, 
-        backgroundColor: null, 
-        logging: false,
-        scrollX: -window.scrollX,
-        scrollY: -window.scrollY,
-        windowWidth: canvasRef.current.scrollWidth,
-        windowHeight: canvasRef.current.scrollHeight
-      });
+    const overlay = document.querySelector(".selection-overlay-root") as HTMLElement | null;
+    if (overlay) overlay.style.display = "none";
 
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+    const originalOpacity = host.style.opacity;
+
+    /** 大图导出：逻辑坐标 + scale(1) 克隆根节点，避免 scroll/zoom 与视口混算导致黑边偏移 */
+    const generateLargeImage = async (): Promise<void> => {
+      const clamped = clampCropRectToBoard(capturedCrop);
+      const scaleRoot = host.querySelector("[data-moodboard-scale]") as HTMLElement | null;
+
+      let canvas: HTMLCanvasElement;
+
+      if (scaleRoot) {
+        let clone: HTMLElement | null = null;
+        try {
+          clone = scaleRoot.cloneNode(true) as HTMLElement;
+          clone.style.position = "fixed";
+          clone.style.left = "-20000px";
+          clone.style.top = "0";
+          clone.style.transform = "none";
+          clone.style.transformOrigin = "0 0";
+          clone.style.width = `${MOODBOARD_CONTENT_W}px`;
+          clone.style.height = `${MOODBOARD_CONTENT_H}px`;
+          clone.style.margin = "0";
+          clone.style.pointerEvents = "none";
+          document.body.appendChild(clone);
+
+          await Promise.all(
+            Array.from(clone.querySelectorAll("img")).map(
+              (img) =>
+                new Promise<void>((resolve) => {
+                  if (img.complete) resolve();
+                  else {
+                    img.onload = () => resolve();
+                    img.onerror = () => resolve();
+                  }
+                })
+            )
+          );
+          await new Promise<void>((r) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => r()))
+          );
+
+          canvas = await html2canvas(clone, {
+            x: clamped.x,
+            y: clamped.y,
+            width: clamped.w,
+            height: clamped.h,
+            useCORS: true,
+            scale: 3,
+            backgroundColor: "#ffffff",
+            logging: false,
+          });
+        } finally {
+          if (clone?.parentNode) clone.parentNode.removeChild(clone);
+        }
+      } else {
+        const z = canvasZoomRef.current || 1;
+        const sl = host.scrollLeft;
+        const st = host.scrollTop;
+        canvas = await html2canvas(host, {
+          x: clamped.x * z - sl,
+          y: clamped.y * z - st,
+          width: clamped.w * z,
+          height: clamped.h * z,
+          useCORS: true,
+          scale: 3,
+          backgroundColor: "#ffffff",
+          logging: false,
+          scrollX: 0,
+          scrollY: 0,
+        });
+      }
+
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.95);
       setCapturedImageData(dataUrl);
       setIsPreviewingCapturedImage(true);
-      
-      // Cleanup
-      canvasRef.current.style.opacity = originalOpacity;
-      if (overlay) overlay.style.display = 'block';
+    };
+
+    try {
+      host.style.opacity = "1";
+      await generateLargeImage();
     } catch (error) {
-      console.error('Export error:', error);
-      alert('生成预览失败，请尝试刷新页面。');
+      console.error("Export error:", error);
+      alert("生成预览失败，请尝试刷新页面。");
     } finally {
+      host.style.opacity = originalOpacity;
+      if (overlay) overlay.style.display = "";
       setIsExporting(false);
     }
   };
@@ -659,8 +954,19 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     main_name?: string;
     parameter?: string;
   }): Material | undefined => {
+    const main = (item.main_name || "").trim();
+    const mainLower = main.toLowerCase();
+    if (mainLower) {
+      for (const m of savedMaterials) {
+        const nl = (m.name || "").trim().toLowerCase();
+        if (!nl) continue;
+        if (nl === mainLower || nl.includes(mainLower) || mainLower.includes(nl)) {
+          return m;
+        }
+      }
+    }
     if (item.matched_material_id) {
-      const byId = materials.find(m => m.id === item.matched_material_id);
+      const byId = materials.find((m) => m.id === item.matched_material_id);
       if (byId) return byId;
     }
     const q = `${item.main_name || ""} ${item.parameter || ""}`.trim().toLowerCase();
@@ -670,7 +976,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     for (const m of pool) {
       const name = m.name.toLowerCase();
       const spec = (m.specifications || "").toLowerCase();
-      if (name.includes(q) || q.includes(name) || spec && q.includes(spec)) {
+      if (name.includes(q) || q.includes(name) || (spec && q.includes(spec))) {
         best = m;
         break;
       }
@@ -683,15 +989,12 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
   const EFFECT_DRAWING_MAX_W = 720;
   const EFFECT_DRAWING_MAX_H = 560;
+  const EFFECT_VIEW_PAD = 64;
 
   /** 仅中央导入效果图（AI 失败或手动跳过），可缩放、可标点、可引线连材质 */
   const placeEffectImageOnly = (effectImageDataUrl: string, remark = "空间效果图") => {
     void (async () => {
-      const img = await compressDataUrl(
-        effectImageDataUrl,
-        MOODBOARD_IMAGE_MAX_WIDTH,
-        MOODBOARD_IMAGE_QUALITY
-      );
+      const img = await reencodeDataUrlSameDimensions(effectImageDataUrl, MOODBOARD_IMAGE_QUALITY);
       const { width: dw, height: dh } = await measureDataUrlContainedBox(img, EFFECT_DRAWING_MAX_W, EFFECT_DRAWING_MAX_H);
       setMoodboards((prev) => {
         const board = prev.find((b) => b.id === activeMoodboardId) ?? prev[0];
@@ -699,18 +1002,17 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         const container = canvasRef.current;
         const sl = container?.scrollLeft ?? 0;
         const st = container?.scrollTop ?? 0;
-        const vw = container?.clientWidth ?? 800;
-        const vh = container?.clientHeight ?? 600;
-        const canvasCenterX = sl + (vw - dw) / 2;
-        const canvasCenterY = st + (vh - dh) / 2;
+        const z = canvasZoomRef.current || 1;
+        const vx = (sl + EFFECT_VIEW_PAD) / z;
+        const vy = (st + EFFECT_VIEW_PAD) / z;
         const baseZ = board.items.length;
         const drawingId = `drawing_${Date.now()}`;
         const mainDrawing: MoodBoardItem = {
           id: drawingId,
           imageUrl: img,
           type: "drawing",
-          x: canvasCenterX,
-          y: canvasCenterY,
+          x: vx,
+          y: vy,
           width: dw,
           height: dh,
           zIndex: baseZ + 1,
@@ -728,11 +1030,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     if (!annotations.length) return;
 
     void (async () => {
-      const compressedEffect = await compressDataUrl(
-        effectImageDataUrl,
-        MOODBOARD_IMAGE_MAX_WIDTH,
-        MOODBOARD_IMAGE_QUALITY
-      );
+      const compressedEffect = await reencodeDataUrlSameDimensions(effectImageDataUrl, MOODBOARD_IMAGE_QUALITY);
       const { width: dw, height: dh } = await measureDataUrlContainedBox(
         compressedEffect,
         EFFECT_DRAWING_MAX_W,
@@ -745,10 +1043,9 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
       const container = canvasRef.current;
       const sl = container?.scrollLeft ?? 0;
       const st = container?.scrollTop ?? 0;
-      const vw = container?.clientWidth ?? 800;
-      const vh = container?.clientHeight ?? 600;
-      const canvasCenterX = sl + (vw - dw) / 2;
-      const canvasCenterY = st + (vh - dh) / 2;
+      const z = canvasZoomRef.current || 1;
+      const vx = (sl + EFFECT_VIEW_PAD) / z;
+      const vy = (st + EFFECT_VIEW_PAD) / z;
       const baseZ = board.items.length;
 
       const drawingId = `drawing_${Date.now()}`;
@@ -756,8 +1053,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         id: drawingId,
         imageUrl: compressedEffect,
         type: "drawing",
-        x: canvasCenterX,
-        y: canvasCenterY,
+        x: vx,
+        y: vy,
         width: dw,
         height: dh,
         zIndex: baseZ + 1,
@@ -769,9 +1066,11 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
       annotations.forEach((anno, idx) => {
         const markerId = `marker_${idx}_${Date.now()}`;
         const sampleId = `sample_${idx}_${Date.now()}`;
-        const mat = anno.matched_material_id
-          ? materials.find((m) => m.id === anno.matched_material_id)
-          : undefined;
+        const mat = resolveMaterialFromAnnotation({
+          matched_material_id: anno.matched_material_id,
+          main_name: anno.main_name,
+          parameter: anno.parameter,
+        });
         const isLeft = anno.x < 50;
 
         newItems.push({
@@ -781,8 +1080,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
           targetId: sampleId,
           relX: anno.x,
           relY: anno.y,
-          x: canvasCenterX + (anno.x * dw) / 100,
-          y: canvasCenterY + (anno.y * dh) / 100,
+          x: vx + (anno.x * dw) / 100,
+          y: vy + (anno.y * dh) / 100,
           width: 16,
           height: 16,
           zIndex: baseZ + 100 + idx,
@@ -795,8 +1094,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
             materialId: mat.id,
             type: "sample",
             parentId: drawingId,
-            x: isLeft ? canvasCenterX - 250 : canvasCenterX + dw + 50,
-            y: canvasCenterY + (idx % 4) * 180,
+            x: isLeft ? vx - 250 : vx + dw + 50,
+            y: vy + (idx % 4) * 180,
             width: 180,
             height: 180,
             zIndex: baseZ + 50 + idx,
@@ -807,8 +1106,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
             id: sampleId,
             type: "sample",
             parentId: drawingId,
-            x: isLeft ? canvasCenterX - 250 : canvasCenterX + dw + 50,
-            y: canvasCenterY + (idx % 4) * 180,
+            x: isLeft ? vx - 250 : vx + dw + 50,
+            y: vy + (idx % 4) * 180,
             width: 180,
             height: 180,
             zIndex: baseZ + 50 + idx,
@@ -825,6 +1124,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   };
 
   const handleAIAnalysis = async () => {
+    if (isAnalyzing) return;
     if (!aiImage) {
       alert("请先上传空间效果图");
       return;
@@ -832,15 +1132,16 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
     const geminiKey = getGeminiApiKey();
     const qwenKey = getQwenApiKey();
+    const dsOk = !!(getDeepSeekApiKey() && getDeepSeekVisionModelName());
 
-    if (!geminiKey && !qwenKey) {
+    if (!geminiKey && !qwenKey && !dsOk) {
       alert("未配置识别服务，请稍后再试。");
       return;
     }
 
     let imageForApi = aiImage;
     try {
-      imageForApi = await compressDataUrl(aiImage, AI_MODAL_IMAGE_MAX_WIDTH, AI_MODAL_IMAGE_QUALITY);
+      imageForApi = await reencodeDataUrlSameDimensions(aiImage, AI_MODAL_IMAGE_QUALITY);
     } catch {
       /* 使用原图 */
     }
@@ -852,25 +1153,13 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     setIsAnalyzing(true);
     setAnalysisStep(2);
     try {
-      let modelText: string;
-
-      if (geminiKey) {
-        try {
-          modelText = await analyzeWithGemini(geminiKey, MATERIAL_ANALYSIS_PROMPT, base64Part, mimeType);
-        } catch (gemErr) {
-          if (qwenKey && shouldFallbackToQwen(gemErr)) {
-            console.warn("[AI] Gemini 请求失败，已切换千问:", gemErr);
-            modelText = await analyzeWithQwen(qwenKey, imageForApi, MATERIAL_ANALYSIS_PROMPT);
-          } else {
-            throw gemErr;
-          }
-        }
-      } else {
-        if (!qwenKey) {
-          throw new Error("仅配置了无效密钥，请检查 VITE_QWEN_API_KEY");
-        }
-        modelText = await analyzeWithQwen(qwenKey, imageForApi, MATERIAL_ANALYSIS_PROMPT);
-      }
+      const modelText = await analyzeWithVisionFallback(
+        MATERIAL_ANALYSIS_PROMPT,
+        imageForApi,
+        base64Part,
+        mimeType,
+        { sampleAnchor: aiVisionAnchor ?? undefined }
+      );
 
       let annotationsRaw: unknown[];
       try {
@@ -883,7 +1172,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         setAnalysisStep(3);
         setIsAIModalOpen(false);
         setAiImage(null);
-        alert("识别结果无法解析，效果图已放入画布，可手动标点。");
+        setAiVisionAnchor(null);
         return;
       }
 
@@ -915,7 +1204,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         setAnalysisStep(3);
         setIsAIModalOpen(false);
         setAiImage(null);
-        alert("未识别到材质区域，效果图已放入画布。");
+        setAiVisionAnchor(null);
         return;
       }
 
@@ -946,6 +1235,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
       setAnalysisStep(3);
       setIsAIModalOpen(false);
       setAiImage(null);
+      setAiVisionAnchor(null);
     } catch (err) {
       console.error("AI Analysis failed:", err);
       if (aiImage) {
@@ -955,14 +1245,15 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         setAnalysisStep(3);
         setIsAIModalOpen(false);
         setAiImage(null);
+        setAiVisionAnchor(null);
       }
-      alert("识别暂不可用，效果图已放入画布，可手动标点。");
     } finally {
       setIsAnalyzing(false);
     }
   };
 
   const skipAIToManualPlacement = () => {
+    setIsAnalyzing(false);
     if (!aiImage) {
       alert("请先上传效果图");
       return;
@@ -973,6 +1264,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     setAnalysisStep(3);
     setIsAIModalOpen(false);
     setAiImage(null);
+    setAiVisionAnchor(null);
   };
   /** 手动再次应用（若仍保留预览数据时使用） */
   const confirmAIMatch = () => {
@@ -983,6 +1275,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     setAnalysisStep(3);
     setIsAIModalOpen(false);
     setAiImage(null);
+    setAiVisionAnchor(null);
   };
 
   return (
@@ -1233,16 +1526,72 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
           </div>
         </div>
 
+        <div className="absolute bottom-6 right-6 z-[70] flex flex-col gap-1.5 pointer-events-auto" style={{ display: isFinalMode ? "none" : undefined }}>
+          <button
+            type="button"
+            title="放大（Ctrl+滚轮上）"
+            onClick={() => zoomCanvas(1.1)}
+            disabled={isFinalMode || canvasZoom >= MOODBOARD_ZOOM_MAX - 0.001}
+            className="w-10 h-10 rounded-xl bg-white border border-gray-200 shadow-md text-lg font-black text-black hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            +
+          </button>
+          <button
+            type="button"
+            title="缩小（Ctrl+滚轮下）"
+            onClick={() => zoomCanvas(1 / 1.1)}
+            disabled={isFinalMode || canvasZoom <= MOODBOARD_ZOOM_MIN + 0.001}
+            className="w-10 h-10 rounded-xl bg-white border border-gray-200 shadow-md text-lg font-black text-black hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            −
+          </button>
+        </div>
+
         <div 
-          className={`flex-1 relative moodboard-canvas overflow-x-auto overflow-y-auto p-40 transition-all duration-500 bg-[#fafafa] flex items-center justify-center min-h-[1400px] min-w-[2000px] scroll-smooth ${isFinalMode ? 'cursor-crosshair' : ''} ${isExporting ? 'pointer-events-none' : ''}`} 
+          className={`flex-1 relative moodboard-canvas overflow-x-auto overflow-y-auto p-40 transition-all duration-500 bg-[#fafafa] flex items-center justify-center scroll-smooth select-none ${
+            isFinalMode ? 'cursor-crosshair' : isCanvasPanDragging ? 'cursor-grabbing' : canvasPanArmed ? 'cursor-grab' : ''
+          } ${isExporting ? 'pointer-events-none' : ''}`} 
           ref={canvasRef}
           onMouseDown={(e) => {
             if (isExporting || isPreviewingCapturedImage || isPreviewingImage || isAIModalOpen || connectingFromId) return;
+            if (!isFinalMode && e.button === 0 && panArmed()) {
+              const host = canvasRef.current;
+              if (host) {
+                e.preventDefault();
+                canvasPanSessionRef.current = {
+                  startClientX: e.clientX,
+                  startClientY: e.clientY,
+                  startScrollLeft: host.scrollLeft,
+                  startScrollTop: host.scrollTop,
+                };
+                setIsCanvasPanDragging(true);
+                const onMove = (ev: MouseEvent) => {
+                  const s = canvasPanSessionRef.current;
+                  const h = canvasRef.current;
+                  if (!s || !h) return;
+                  const dx = ev.clientX - s.startClientX;
+                  const dy = ev.clientY - s.startClientY;
+                  h.scrollLeft = s.startScrollLeft - dx;
+                  h.scrollTop = s.startScrollTop - dy;
+                };
+                const onUp = () => {
+                  document.removeEventListener('mousemove', onMove);
+                  document.removeEventListener('mouseup', onUp);
+                  canvasPanSessionRef.current = null;
+                  setIsCanvasPanDragging(false);
+                };
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+              }
+              return;
+            }
             if (isFinalMode) {
-              const rect = canvasRef.current?.getBoundingClientRect();
-              if (rect && canvasRef.current) {
-                const x = e.clientX - rect.left + canvasRef.current.scrollLeft;
-                const y = e.clientY - rect.top + canvasRef.current.scrollTop;
+              const host = canvasRef.current;
+              const rect = host?.getBoundingClientRect();
+              if (rect && host) {
+                const b = clientToBoard(e.clientX, e.clientY);
+                const x = b.x;
+                const y = b.y;
                 
                 // 1. Check for resize handles FIRST
                 if (cropBox) {
@@ -1285,7 +1634,27 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
           onTouchMove={handleMoveAction}
           onTouchEnd={handlePointerUp}
         >
-          <div className="absolute inset-0 bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] [background-size:16px_16px] opacity-50" />
+          <div
+            className="relative shrink-0"
+            style={{
+              width: MOODBOARD_CONTENT_W * canvasZoom,
+              height: MOODBOARD_CONTENT_H * canvasZoom,
+            }}
+          >
+            <div
+              data-moodboard-scale
+              className="absolute left-0 top-0 origin-top-left will-change-transform"
+              style={{
+                width: MOODBOARD_CONTENT_W,
+                height: MOODBOARD_CONTENT_H,
+                transform: `scale(${canvasZoom})`,
+                transformOrigin: '0 0',
+              }}
+            >
+          <div
+            data-moodboard-bg-hit
+            className="absolute inset-0 bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] [background-size:16px_16px] opacity-50 pointer-events-none"
+          />
           
           {activeBoard.items.sort((a, b) => a.zIndex - b.zIndex).map(item => {
             const mat = item.materialId ? materials.find(m => m.id === item.materialId) : null;
@@ -1303,93 +1672,32 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                   top: item.y, 
                   width: item.width, 
                   zIndex: isMarker ? 3000 : item.zIndex,
-                  pointerEvents: 'auto',
-                  cursor: isFinalMode ? 'default' : (isMarker ? 'move' : 'move')
+                  pointerEvents: isFinalMode ? "none" : "auto",
+                  cursor: isFinalMode
+                    ? 'default'
+                    : isCanvasPanDragging
+                      ? 'grabbing'
+                      : canvasPanArmed
+                        ? 'grab'
+                        : isMarker
+                          ? 'move'
+                          : 'move',
                 }}
                 onDragOver={item.type === 'sample' && !isFinalMode ? handleSampleDragOver : undefined}
                 onDrop={item.type === 'sample' && !isFinalMode ? (e) => handleSampleDrop(e, item.id) : undefined}
               >
                 <div 
                   onMouseDown={(e) => {
-                    if (!isFinalMode && isDrawing && canvasRef.current) {
-                      e.stopPropagation();
-                      const rect = canvasRef.current.getBoundingClientRect();
-                      const cx = e.clientX - rect.left + canvasRef.current.scrollLeft;
-                      const cy = e.clientY - rect.top + canvasRef.current.scrollTop;
-                      const dw = item.width;
-                      const dh = item.height;
-                      if (
-                        cx >= item.x &&
-                        cx <= item.x + dw &&
-                        cy >= item.y &&
-                        cy <= item.y + dh
-                      ) {
-                        const relX = ((cx - item.x) / dw) * 100;
-                        const relY = ((cy - item.y) / dh) * 100;
-                        const markerId = `marker_click_${Date.now()}`;
-                        const maxZ = Math.max(...activeBoard.items.map((x) => x.zIndex), 0);
-                        updateBoardItems([
-                          ...activeBoard.items,
-                          {
-                            id: markerId,
-                            type: "marker",
-                            parentId: item.id,
-                            relX,
-                            relY,
-                            x: cx - 8,
-                            y: cy - 8,
-                            width: 16,
-                            height: 16,
-                            zIndex: maxZ + 500,
-                            remark: "标注点",
-                          },
-                        ]);
-                      }
-                      return;
-                    }
+                    if (isFinalMode) return;
+                    if (isDrawing && !panArmed()) e.stopPropagation();
                     handleStartAction(e, item.id, "move");
                   }}
                   onTouchStart={(e) => {
-                    if (!isFinalMode && isDrawing && canvasRef.current && e.touches[0]) {
-                      e.stopPropagation();
-                      const t = e.touches[0];
-                      const rect = canvasRef.current.getBoundingClientRect();
-                      const cx = t.clientX - rect.left + canvasRef.current.scrollLeft;
-                      const cy = t.clientY - rect.top + canvasRef.current.scrollTop;
-                      const dw = item.width;
-                      const dh = item.height;
-                      if (
-                        cx >= item.x &&
-                        cx <= item.x + dw &&
-                        cy >= item.y &&
-                        cy <= item.y + dh
-                      ) {
-                        const relX = ((cx - item.x) / dw) * 100;
-                        const relY = ((cy - item.y) / dh) * 100;
-                        const markerId = `marker_touch_${Date.now()}`;
-                        const maxZ = Math.max(...activeBoard.items.map((x) => x.zIndex), 0);
-                        updateBoardItems([
-                          ...activeBoard.items,
-                          {
-                            id: markerId,
-                            type: "marker",
-                            parentId: item.id,
-                            relX,
-                            relY,
-                            x: cx - 8,
-                            y: cy - 8,
-                            width: 16,
-                            height: 16,
-                            zIndex: maxZ + 500,
-                            remark: "标注点",
-                          },
-                        ]);
-                      }
-                      return;
-                    }
+                    if (isFinalMode) return;
+                    if (isDrawing && !panArmed()) e.stopPropagation();
                     handleStartAction(e, item.id, "move");
                   }}
-                  className={`relative ${isDrawing ? "cursor-crosshair" : ""}`}
+                  className={`relative ${isDrawing ? "cursor-move" : ""}`}
                 >
                   {isMarker ? (
                     <div className="w-5 h-5 bg-black border-2 border-white rounded-full shadow-2xl flex items-center justify-center cursor-move transition-transform active:scale-90 ring-4 ring-white/20">
@@ -1401,7 +1709,43 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                         <img
                           src={item.imageUrl}
                           alt=""
-                          className="w-full h-auto rounded-2xl shadow-xl cursor-move pointer-events-none select-none transition-all"
+                          className="w-full h-auto rounded-2xl shadow-xl cursor-move pointer-events-auto select-none transition-all"
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                            if (isFinalMode || !canvasRef.current) return;
+                            if (panArmed()) return;
+                            const { x: cx, y: cy } = clientToBoard(e.clientX, e.clientY);
+                            const dw = item.width;
+                            const dh = item.height;
+                            if (
+                              cx < item.x ||
+                              cx > item.x + dw ||
+                              cy < item.y ||
+                              cy > item.y + dh
+                            ) {
+                              return;
+                            }
+                            const relX = ((cx - item.x) / dw) * 100;
+                            const relY = ((cy - item.y) / dh) * 100;
+                            const markerId = `marker_click_${Date.now()}`;
+                            const maxZ = Math.max(...activeBoard.items.map((x) => x.zIndex), 0);
+                            updateBoardItems([
+                              ...activeBoard.items,
+                              {
+                                id: markerId,
+                                type: "marker",
+                                parentId: item.id,
+                                relX,
+                                relY,
+                                x: cx - 8,
+                                y: cy - 8,
+                                width: 16,
+                                height: 16,
+                                zIndex: maxZ + 500,
+                                remark: "标注点",
+                              },
+                            ]);
+                          }}
                         />
                       ) : mat || item.imageUrl ? (
                         <div className="relative w-full">
@@ -1484,17 +1828,12 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                             <div 
                               onMouseDown={(e) => {
                                 e.stopPropagation();
+                                if (panArmed()) return;
                                 const el = canvasRef.current;
-                                const rect = el?.getBoundingClientRect();
-                                if (rect && el) {
-                                  setConnectingFromId(item.id);
-                                  const clientX = 'touches' in e ? (e as any).touches[0].clientX : (e as any).clientX;
-                                  const clientY = 'touches' in e ? (e as any).touches[0].clientY : (e as any).clientY;
-                                  setTempPointerPos({
-                                    x: clientX - rect.left + el.scrollLeft,
-                                    y: clientY - rect.top + el.scrollTop,
-                                  });
-                                }
+                                if (!el) return;
+                                setConnectingFromId(item.id);
+                                const p = clientToBoard(e.clientX, e.clientY);
+                                setTempPointerPos({ x: p.x, y: p.y });
                               }}
                               className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-black rounded-full border-2 border-white shadow-lg scale-0 group-hover/label:scale-100 transition-all cursor-crosshair z-[110]" 
                               title="按住并拖动以连接标注点"
@@ -1622,6 +1961,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                       </div>
                     )}
                   <button 
+                    type="button"
                     onClick={() => removeBoardItemCascade(item.id)}
                     className="p-1.5 hover:bg-red-50 text-red-500 rounded-full"
                   >
@@ -1685,25 +2025,34 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
             </svg>
           )}
 
-          {/* Export Header Overlay (Baked into the JPG) */}
+          {/* Export Header Overlay（随克隆导出；名称左上放大，Logo 缩小置角，少挡材质） */}
           {isFinalMode && cropBox && (
-            <div 
+            <div
               className="absolute pointer-events-none z-[6000]"
               style={{
-                left: cropBox.x + 35,
-                top: cropBox.y + 35
+                left: cropBox.x,
+                top: cropBox.y,
+                width: cropBox.w,
+                height: cropBox.h,
               }}
             >
-              <div className="flex flex-col items-start gap-4">
-                <div className="bg-black text-white px-8 py-3 tracking-tighter flex items-center justify-center shadow-2xl">
-                  <span className="text-[20px] md:text-[28px] font-black whitespace-nowrap">物见 <span className="text-gray-400 font-light mx-2">|</span> MATTER INSIGHT</span>
-                </div>
-                <div className="bg-white/95 backdrop-blur-sm px-5 py-2 border-l-8 border-black shadow-xl">
-                  <p className="text-[14px] md:text-[20px] font-black text-black uppercase tracking-[0.2em]">{activeBoard.name}</p>
+              {/* 纯色衬底，禁止渐变/阴影，避免 html2canvas 把半透明带渲成顶部灰条 */}
+              <div className="absolute left-3 top-3 max-w-[85%] pointer-events-none bg-white pt-1 pr-2 pb-2">
+                <p className="text-[26px] sm:text-[34px] font-black text-black tracking-tight leading-tight break-words">
+                  {activeBoard.name}
+                </p>
+              </div>
+              <div className="absolute bottom-3 right-3 pointer-events-none">
+                <div className="bg-black text-white px-3.5 py-2 border border-white/10">
+                  <span className="text-[11px] font-black tracking-tight leading-snug whitespace-nowrap">
+                    物见 <span className="text-gray-500 font-light mx-1">|</span> MATTER INSIGHT
+                  </span>
                 </div>
               </div>
             </div>
           )}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1717,22 +2066,35 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                 className="absolute inset-0 backdrop-blur-md transition-all duration-75 z-[8001]"
                 style={{
                   clipPath: (() => {
-                    const rect = canvasRef.current!.getBoundingClientRect();
-                    const x = cropBox.x - canvasRef.current!.scrollLeft + rect.left;
-                    const y = cropBox.y - canvasRef.current!.scrollTop + rect.top;
-                    return `polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%, ${x}px ${y}px, ${x}px ${y + cropBox.h}px, ${x + cropBox.w}px ${y + cropBox.h}px, ${x + cropBox.w}px ${y}px, ${x}px ${y}px)`;
-                  })()
+                    void exportOverlayTick;
+                    const scr = cropBoxToScreenRect(cropBox);
+                    if (!scr) return "none";
+                    const { left: x, top: y, width: cw, height: ch } = scr;
+                    return `polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%, ${x}px ${y}px, ${x}px ${y + ch}px, ${x + cw}px ${y + ch}px, ${x + cw}px ${y}px, ${x}px ${y}px)`;
+                  })(),
                 }}
               />
               {/* Darkness Mask */}
               <div 
                 className="absolute transition-all duration-75 z-[8002]"
                 style={{
-                  left: cropBox.x - canvasRef.current!.scrollLeft + canvasRef.current!.getBoundingClientRect().left,
-                  top: cropBox.y - canvasRef.current!.scrollTop + canvasRef.current!.getBoundingClientRect().top,
-                  width: cropBox.w,
-                  height: cropBox.h,
-                  boxShadow: '0 0 0 9999px rgba(0,0,0,0.5)',
+                  left: (() => {
+                    void exportOverlayTick;
+                    return cropBoxToScreenRect(cropBox)?.left ?? 0;
+                  })(),
+                  top: (() => {
+                    void exportOverlayTick;
+                    return cropBoxToScreenRect(cropBox)?.top ?? 0;
+                  })(),
+                  width: (() => {
+                    void exportOverlayTick;
+                    return cropBoxToScreenRect(cropBox)?.width ?? 0;
+                  })(),
+                  height: (() => {
+                    void exportOverlayTick;
+                    return cropBoxToScreenRect(cropBox)?.height ?? 0;
+                  })(),
+                  boxShadow: "0 0 0 9999px rgba(0,0,0,0.5)",
                 }}
               />
             </>
@@ -1744,17 +2106,30 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               <div 
                 className={`absolute border-2 border-blue-500 z-[8003] pointer-events-auto overflow-hidden bg-transparent ${isMovingCropBox ? 'cursor-move' : 'cursor-default'}`}
                 style={{
-                  left: cropBox.x - canvasRef.current!.scrollLeft + canvasRef.current!.getBoundingClientRect().left,
-                  top: cropBox.y - canvasRef.current!.scrollTop + canvasRef.current!.getBoundingClientRect().top,
-                  width: cropBox.w,
-                  height: cropBox.h,
-                  boxShadow: '0 0 0 4px rgba(59, 130, 246, 0.2), inset 0 0 0 1px rgba(255,255,255,0.5)',
+                  left: (() => {
+                    void exportOverlayTick;
+                    return cropBoxToScreenRect(cropBox)?.left ?? 0;
+                  })(),
+                  top: (() => {
+                    void exportOverlayTick;
+                    return cropBoxToScreenRect(cropBox)?.top ?? 0;
+                  })(),
+                  width: (() => {
+                    void exportOverlayTick;
+                    return cropBoxToScreenRect(cropBox)?.width ?? 0;
+                  })(),
+                  height: (() => {
+                    void exportOverlayTick;
+                    return cropBoxToScreenRect(cropBox)?.height ?? 0;
+                  })(),
+                  boxShadow:
+                    '0 0 0 4px rgba(59, 130, 246, 0.2), inset 0 0 0 1px rgba(255,255,255,0.5)',
                 }}
                 onClick={(e) => {
                   e.stopPropagation();
                   // For better UX, a single click confirms if it hasn't just been moved/resized
                   if (!isMovingCropBox && !resizingCropHandle) {
-                     handleExportToImage();
+                     void handleExportToImage();
                   }
                 }}
               >
@@ -1790,7 +2165,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               放弃导出
             </button>
             <button 
-              onClick={handleExportToImage} 
+              type="button"
+              onClick={() => void handleExportToImage()} 
               disabled={!cropBox || isExporting} 
               className={`px-12 py-3 rounded-full text-xs font-black shadow-xl transition-all flex items-center gap-2 active:scale-95 ${!cropBox ? 'bg-gray-100 text-gray-300' : 'bg-blue-600 text-white hover:bg-blue-700 hover:scale-105 hover:shadow-blue-500/40'}`}
             >
@@ -1801,7 +2177,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         </div>
       )}
 
-      {/* AI Floating Button */}
+      {/* AI Floating Button — 导出模式下隐藏，避免误触 */}
+      <div style={{ display: isFinalMode ? "none" : undefined }}>
 <button 
   onClick={() => {
     setIsAIModalOpen(true);
@@ -1814,6 +2191,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   <span className="text-xl group-hover:rotate-12 transition-transform">✨</span>
   <span className="text-sm font-black tracking-widest">智能匹配</span>
 </button>
+      </div>
 
    
 
@@ -1943,7 +2321,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
             <div className="flex-1 overflow-auto p-4 md:p-8 bg-[#f5f5f7] flex items-center justify-center">
               <img 
                 src={capturedImageData} 
-                className="max-w-full max-h-[70vh] shadow-[0_30px_60px_rgba(0,0,0,0.1)] border border-white rounded-sm"
+                className="max-w-full max-h-[70vh] rounded-sm bg-white shadow-none ring-0"
                 alt="Captured Moodboard"
               />
             </div>
@@ -1994,12 +2372,17 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               </div>
             </div>
 
-            <div className="w-full md:w-1/2 p-12 bg-gray-50 flex flex-col items-center justify-center relative">
+            <form
+              autoComplete="off"
+              onSubmit={(e) => e.preventDefault()}
+              className="w-full md:w-1/2 p-12 bg-gray-50 flex flex-col items-center justify-center relative"
+            >
               <button
                 type="button"
                 onClick={() => {
                   setIsAIModalOpen(false);
                   setAiImage(null);
+                  setAiVisionAnchor(null);
                   setAnalysisStep(1);
                   setVisualAnnotations(null);
                   setMatchResults(null);
@@ -2012,7 +2395,16 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               <div className="w-full max-w-[300px] aspect-square rounded-3xl border-2 border-dashed border-gray-200 flex flex-col items-center justify-center overflow-hidden bg-white shadow-inner relative group">
                 {aiImage ? (
                   <>
-                    <img src={aiImage} alt="" className="w-full h-full object-contain" />
+                    <img
+                      src={aiImage}
+                      alt=""
+                      title="点击图片可指定颜色采样参考点（千问前置 RGB）；未点击则用画面中心"
+                      className="w-full h-full object-contain"
+                      onClick={(ev) => {
+                        if (isAnalyzing) return;
+                        setAiVisionAnchor(previewImageClickToVisionAnchor(ev));
+                      }}
+                    />
                     {isAnalyzing && (
                       <div className="absolute inset-0 bg-black/40 backdrop-blur-sm flex flex-col items-center justify-center text-white p-6 text-center">
                         <div className="w-12 h-12 border-4 border-white/20 border-t-white rounded-full animate-spin mb-4" />
@@ -2023,16 +2415,20 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                   </>
                 ) : (
                   <label className="cursor-pointer flex flex-col items-center">
-                    <input type="file" className="hidden" accept="image/*" onChange={(e) => {
+                    <input type="file" className="hidden" autoComplete="off" accept="image/*" onChange={(e) => {
                       const file = e.target.files?.[0];
                       if (!file) return;
                       void (async () => {
                         try {
-                          const url = await compressFileToDataUrl(file, AI_MODAL_IMAGE_MAX_WIDTH, AI_MODAL_IMAGE_QUALITY);
+                          const url = await reencodeFileToDataUrl(file, AI_MODAL_IMAGE_QUALITY);
+                          setAiVisionAnchor(null);
                           setAiImage(url);
                         } catch {
                           const reader = new FileReader();
-                          reader.onload = (event) => setAiImage(event.target?.result as string);
+                          reader.onload = (event) => {
+                            setAiVisionAnchor(null);
+                            setAiImage(event.target?.result as string);
+                          };
                           reader.readAsDataURL(file);
                         }
                       })();
@@ -2047,7 +2443,12 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
               <button
                 type="button"
-                onClick={() => void handleAIAnalysis()}
+                onClick={(e) => {
+                  console.log('AI识别按钮已点击');
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void handleAIAnalysis();
+                }}
                 disabled={!aiImage || isAnalyzing}
                 className={`mt-10 w-full max-w-[300px] py-4 rounded-2xl font-black text-xs tracking-[0.2em] transition-all ${
                   aiImage && !isAnalyzing
@@ -2061,7 +2462,11 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               <button
                 type="button"
                 disabled={!aiImage || isAnalyzing}
-                onClick={skipAIToManualPlacement}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  skipAIToManualPlacement();
+                }}
                 className={`mt-3 w-full max-w-[300px] py-3 rounded-2xl font-bold text-[10px] tracking-widest transition-all border ${
                   aiImage && !isAnalyzing
                     ? "border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
@@ -2070,7 +2475,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               >
                 跳过 AI
               </button>
-            </div>
+            </form>
           </div>
         </div>
       )}

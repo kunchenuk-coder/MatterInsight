@@ -3,12 +3,12 @@
  */
 
 import {
-  analyzeWithGemini,
-  analyzeWithQwen,
+  analyzeWithVisionProviderChain,
   getGeminiApiKey,
   getQwenApiKey,
+  getDeepSeekApiKey,
+  getDeepSeekVisionModelName,
   parseMaterialAnalysisText,
-  shouldFallbackToQwen,
 } from "./aiMaterialAnalysis";
 
 const BOX_PROMPT =
@@ -62,25 +62,21 @@ function parseBBoxFromModelText(text: string): NormBBox | null {
 export async function inferSubjectBoundingBoxNorm(imageDataUrl: string): Promise<NormBBox | null> {
   const geminiKey = getGeminiApiKey();
   const qwenKey = getQwenApiKey();
-  if (!geminiKey && !qwenKey) return null;
+  const dsKey = getDeepSeekApiKey();
+  const dsModel = getDeepSeekVisionModelName();
+  if (!geminiKey && !qwenKey && !(dsKey && dsModel)) return null;
 
   const mimeMatch = imageDataUrl.match(/^data:(image\/[\w+.-]+);base64,/);
   const mimeType = mimeMatch?.[1] || "image/jpeg";
   const base64Part = imageDataUrl.includes(",") ? imageDataUrl.split(",")[1] : imageDataUrl;
 
   try {
-    let text: string;
-    if (geminiKey) {
-      try {
-        text = await analyzeWithGemini(geminiKey, BOX_PROMPT, base64Part, mimeType);
-      } catch (e) {
-        if (qwenKey && shouldFallbackToQwen(e)) {
-          text = await analyzeWithQwen(qwenKey, imageDataUrl, BOX_PROMPT);
-        } else throw e;
-      }
-    } else {
-      text = await analyzeWithQwen(qwenKey!, imageDataUrl, BOX_PROMPT);
-    }
+    const text = await analyzeWithVisionProviderChain(
+      imageDataUrl,
+      BOX_PROMPT,
+      base64Part,
+      mimeType
+    );
     return parseBBoxFromModelText(text);
   } catch {
     return null;
@@ -123,25 +119,21 @@ export async function cropStripBelowBoxDataUrl(
 export async function recognizeManufacturerCode(stripJpegDataUrl: string): Promise<string | null> {
   const geminiKey = getGeminiApiKey();
   const qwenKey = getQwenApiKey();
-  if (!geminiKey && !qwenKey) return null;
+  const dsKey = getDeepSeekApiKey();
+  const dsModel = getDeepSeekVisionModelName();
+  if (!geminiKey && !qwenKey && !(dsKey && dsModel)) return null;
 
   const mimeMatch = stripJpegDataUrl.match(/^data:(image\/[\w+.-]+);base64,/);
   const mimeType = mimeMatch?.[1] || "image/jpeg";
   const base64Part = stripJpegDataUrl.includes(",") ? stripJpegDataUrl.split(",")[1] : stripJpegDataUrl;
 
   try {
-    let text: string;
-    if (geminiKey) {
-      try {
-        text = await analyzeWithGemini(geminiKey, CODE_PROMPT, base64Part, mimeType);
-      } catch (e) {
-        if (qwenKey && shouldFallbackToQwen(e)) {
-          text = await analyzeWithQwen(qwenKey, stripJpegDataUrl, CODE_PROMPT);
-        } else throw e;
-      }
-    } else {
-      text = await analyzeWithQwen(qwenKey!, stripJpegDataUrl, CODE_PROMPT);
-    }
+    const text = await analyzeWithVisionProviderChain(
+      stripJpegDataUrl,
+      CODE_PROMPT,
+      base64Part,
+      mimeType
+    );
     const t = text.replace(/```[\s\S]*?```/g, "").trim();
     if (!t || /^none$/i.test(t)) return null;
     return t.replace(/^["']|["']$/g, "").slice(0, 120);

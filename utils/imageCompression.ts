@@ -62,6 +62,50 @@ export function compressDataUrl(
   });
 }
 
+/** 仅按质量重编码为 JPEG，不改变像素宽高（用于上传体积压缩） */
+export function reencodeDataUrlSameDimensions(dataUrl: string, quality = 0.72): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      try {
+        const w = Math.round(img.naturalWidth || img.width);
+        const h = Math.round(img.naturalHeight || img.height);
+        if (w < 1 || h < 1) {
+          resolve(dataUrl);
+          return;
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(dataUrl);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      } catch (e) {
+        reject(e);
+      }
+    };
+    img.onerror = () => reject(new Error("图片解码失败"));
+    img.src = dataUrl;
+  });
+}
+
+export function reencodeFileToDataUrl(file: File, quality = 0.78): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (ev) => {
+      const src = ev.target?.result as string;
+      reencodeDataUrlSameDimensions(src, quality).then(resolve).catch(reject);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("读取文件失败"));
+  });
+}
+
 /** 在不超过 maxWidth×maxHeight 的框内按比例缩放，用于画布占位（不裁切原图比例） */
 export function measureDataUrlContainedBox(
   dataUrl: string,

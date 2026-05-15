@@ -1,9 +1,14 @@
 /**
  * 色卡样板：Gemini 视觉检测色块包围盒与厂家编码（0–1000 归一化坐标）
+ *
+ * Gemini 模型名与 `utils/aiMaterialAnalysis.ts` 的 `GEMINI_MODEL` 一致（默认 `gemini-2.5-flash`，可由 `VITE_GEMINI_MODEL` 覆盖）。
+ * 勿在此硬编码已下线名称；视觉请求经 `analyzeWithVisionProviderChain`（Gemini → DeepSeek → 千问；Gemini 内层对 404 会按链换试 2.5/2.0/1.5 等模型名）。
  */
 import {
-  analyzeWithGemini,
   analyzeWithQwen,
+  analyzeWithVisionProviderChain,
+  getDeepSeekApiKey,
+  getDeepSeekVisionModelName,
   getGeminiApiKey,
   getQwenApiKey,
   parseMaterialAnalysisText,
@@ -121,7 +126,7 @@ export async function detectSwatches(
   try {
     let text: string;
     if (provider === "gemini") {
-      text = await analyzeWithGemini(geminiKey!, SWATCH_PROMPT, base64Part, mimeType, {
+      text = await analyzeWithVisionProviderChain(imageDataUrl, SWATCH_PROMPT, base64Part, mimeType, {
         onRateLimitWait: opts?.onRateLimitWait,
       });
     } else {
@@ -155,17 +160,21 @@ function parseSubjectBox(text: string): [number, number, number, number] | null 
   }
 }
 
-/** Gemini：语义主体包围盒 0–1000 */
+/** 语义主体包围盒 0–1000（Gemini → DeepSeek → 千问） */
 export async function detectSemanticSubjectBox(
   imageDataUrl: string,
   opts?: { onRateLimitWait?: (attempt: number, delayMs: number) => void }
 ): Promise<[number, number, number, number] | null> {
   const geminiKey = getGeminiApiKey();
-  if (!geminiKey) throw new Error("未配置 Gemini API Key（VITE_GEMINI_API_KEY）");
+  const qwenKey = getQwenApiKey();
+  const dsOk = !!(getDeepSeekApiKey() && getDeepSeekVisionModelName());
+  if (!geminiKey && !qwenKey && !dsOk) {
+    throw new Error("未配置可用的视觉 API Key（VITE_GEMINI_API_KEY / VITE_QWEN_API_KEY / DeepSeek）");
+  }
   const mimeMatch = imageDataUrl.match(/^data:(image\/[\w+.-]+);base64,/);
   const mimeType = mimeMatch?.[1] || "image/jpeg";
   const base64Part = imageDataUrl.includes(",") ? imageDataUrl.split(",")[1] : imageDataUrl;
-  const text = await analyzeWithGemini(geminiKey, SUBJECT_BOX_PROMPT, base64Part, mimeType, {
+  const text = await analyzeWithVisionProviderChain(imageDataUrl, SUBJECT_BOX_PROMPT, base64Part, mimeType, {
     onRateLimitWait: opts?.onRateLimitWait,
   });
   return parseSubjectBox(text);
@@ -198,8 +207,8 @@ export async function readManufacturerCodeFromImageStrip(
   let text: string;
   if (provider === "gemini") {
     const k = getGeminiApiKey();
-    if (!k) throw new Error("未配置 Gemini API Key");
-    text = await analyzeWithGemini(k, OCR_CODE_PROMPT, base64Part, mimeType, {
+    if (!k) throw new Error("未配置 Gemini API Key（VITE_GEMINI_API_KEY）");
+    text = await analyzeWithVisionProviderChain(imageDataUrl, OCR_CODE_PROMPT, base64Part, mimeType, {
       onRateLimitWait: opts?.onRateLimitWait,
     });
   } else {
