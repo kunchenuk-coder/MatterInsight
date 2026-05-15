@@ -5,7 +5,7 @@ import { Material, MoodBoard } from '../types';
 interface PinterestFeedProps {
   materials: Material[];
   onSelect: (material: Material) => void;
-  onSave: (id: string, moodboardId?: string) => void;
+  onSave: (id: string, moodboardId?: string, newMoodboardName?: string) => void;
   savedIds: string[];
   moodboards?: MoodBoard[];
 }
@@ -33,7 +33,9 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({ materials, onSelect, onSa
 
   return (
     <div className="columns-2 md:columns-3 lg:columns-4 gap-6 space-y-6 pb-20">
-      {materials.map((mat) => (
+      {materials.map((mat) => {
+        const isCollected = savedIds.includes(mat.id);
+        return (
         <div 
           key={mat.id}
           onClick={() => onSelect(mat)}
@@ -96,13 +98,37 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({ materials, onSelect, onSa
                    📢
                  </button>
               </div>
-              <div className="relative">
-                <button 
-                  onClick={(e) => { e.stopPropagation(); setShowSaveMenu(showSaveMenu === mat.id ? null : mat.id); }}
-                  className={`p-2 rounded-full shadow-md transition-colors ${savedIds.includes(mat.id) ? 'bg-black text-white' : 'bg-white text-gray-400 hover:text-black'}`}
+              <div className="relative flex items-center gap-1">
+                <button
+                  type="button"
+                  title={isCollected ? '已收藏，点击取消' : '加入收藏'}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSave(mat.id);
+                  }}
+                  className={`p-2 rounded-full shadow-md transition-colors ${
+                    isCollected
+                      ? 'bg-red-500 text-white ring-2 ring-red-400/90'
+                      : 'bg-white text-gray-400 hover:text-red-500'
+                  }`}
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill={savedIds.includes(mat.id) ? "currentColor" : "none"} viewBox="0 0 24 24" stroke="currentColor">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill={isCollected ? 'currentColor' : 'none'} viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  title="存入情绪板"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowSaveMenu(showSaveMenu === mat.id ? null : mat.id);
+                  }}
+                  className={`p-2 rounded-full shadow-md transition-colors bg-white text-gray-500 hover:text-black ${
+                    showSaveMenu === mat.id ? 'ring-2 ring-gray-300' : ''
+                  }`}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                   </svg>
                 </button>
 
@@ -139,7 +165,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({ materials, onSelect, onSa
                               e.stopPropagation();
                               const name = (e.target as HTMLInputElement).value;
                               if (name) {
-                                (onSave as any)(mat.id, undefined, name); // Modified onSave signature
+                                onSave(mat.id, undefined, name);
                                 setIsCreatingNewFromFeed(null);
                                 setShowSaveMenu(null);
                               }
@@ -166,7 +192,8 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({ materials, onSelect, onSa
             </div>
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 };

@@ -62,6 +62,33 @@ export function compressDataUrl(
   });
 }
 
+/** 在不超过 maxWidth×maxHeight 的框内按比例缩放，用于画布占位（不裁切原图比例） */
+export function measureDataUrlContainedBox(
+  dataUrl: string,
+  maxWidth: number,
+  maxHeight: number
+): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      const w0 = img.naturalWidth || img.width;
+      const h0 = img.naturalHeight || img.height;
+      if (w0 < 1 || h0 < 1) {
+        resolve({ width: Math.min(maxWidth, 600), height: Math.min(maxHeight, 400) });
+        return;
+      }
+      const scale = Math.min(maxWidth / w0, maxHeight / h0, 1);
+      resolve({
+        width: Math.max(1, Math.round(w0 * scale)),
+        height: Math.max(1, Math.round(h0 * scale)),
+      });
+    };
+    img.onerror = () => reject(new Error("图片解码失败"));
+    img.src = dataUrl;
+  });
+}
+
 /** 将 PNG/WebP 等 Blob 压成 JPEG data URL（用于审核流写入 JSON，高清原片可仅存 IndexedDB） */
 export function compressBlobToDataUrl(
   blob: Blob,

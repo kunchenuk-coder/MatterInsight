@@ -14,6 +14,7 @@ import {
 import {
   compressFileToDataUrl,
   compressDataUrl,
+  measureDataUrlContainedBox,
   MOODBOARD_IMAGE_MAX_WIDTH,
   MOODBOARD_IMAGE_QUALITY,
   AI_MODAL_IMAGE_MAX_WIDTH,
@@ -680,29 +681,28 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     return best;
   };
 
-  const getViewportDrawingPlacement = () => {
-    const container = canvasRef.current;
-    const scrollLeft = container?.scrollLeft ?? 0;
-    const scrollTop = container?.scrollTop ?? 0;
-    const viewportWidth = container?.clientWidth ?? 800;
-    const viewportHeight = container?.clientHeight ?? 600;
-    const baseWidth = 600;
-    const baseHeight = 400;
-    return {
-      canvasCenterX: scrollLeft + (viewportWidth - baseWidth) / 2,
-      canvasCenterY: scrollTop + (viewportHeight - baseHeight) / 2,
-      baseWidth,
-      baseHeight,
-    };
-  };
+  const EFFECT_DRAWING_MAX_W = 720;
+  const EFFECT_DRAWING_MAX_H = 560;
 
   /** 仅中央导入效果图（AI 失败或手动跳过），可缩放、可标点、可引线连材质 */
   const placeEffectImageOnly = (effectImageDataUrl: string, remark = "空间效果图") => {
-    void compressDataUrl(effectImageDataUrl, MOODBOARD_IMAGE_MAX_WIDTH, MOODBOARD_IMAGE_QUALITY).then((img) => {
+    void (async () => {
+      const img = await compressDataUrl(
+        effectImageDataUrl,
+        MOODBOARD_IMAGE_MAX_WIDTH,
+        MOODBOARD_IMAGE_QUALITY
+      );
+      const { width: dw, height: dh } = await measureDataUrlContainedBox(img, EFFECT_DRAWING_MAX_W, EFFECT_DRAWING_MAX_H);
       setMoodboards((prev) => {
         const board = prev.find((b) => b.id === activeMoodboardId) ?? prev[0];
         if (!board) return prev;
-        const { canvasCenterX, canvasCenterY, baseWidth, baseHeight } = getViewportDrawingPlacement();
+        const container = canvasRef.current;
+        const sl = container?.scrollLeft ?? 0;
+        const st = container?.scrollTop ?? 0;
+        const vw = container?.clientWidth ?? 800;
+        const vh = container?.clientHeight ?? 600;
+        const canvasCenterX = sl + (vw - dw) / 2;
+        const canvasCenterY = st + (vh - dh) / 2;
         const baseZ = board.items.length;
         const drawingId = `drawing_${Date.now()}`;
         const mainDrawing: MoodBoardItem = {
@@ -711,8 +711,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
           type: "drawing",
           x: canvasCenterX,
           y: canvasCenterY,
-          width: baseWidth,
-          height: baseHeight,
+          width: dw,
+          height: dh,
           zIndex: baseZ + 1,
           remark,
         };
@@ -720,19 +720,35 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
           b.id === board.id ? { ...b, items: [...b.items, mainDrawing] } : b
         );
       });
-    });
+    })();
   };
 
   /** 将 AI 结果写入当前情绪板：中央效果图 + 小圆点 marker + 材质卡 sample，供 SVG 引线使用 */
   const applyAIAnnotationsToCanvas = (annotations: AIAnnotationPayload[], effectImageDataUrl: string) => {
     if (!annotations.length) return;
 
-    void compressDataUrl(effectImageDataUrl, MOODBOARD_IMAGE_MAX_WIDTH, MOODBOARD_IMAGE_QUALITY).then((compressedEffect) => {
+    void (async () => {
+      const compressedEffect = await compressDataUrl(
+        effectImageDataUrl,
+        MOODBOARD_IMAGE_MAX_WIDTH,
+        MOODBOARD_IMAGE_QUALITY
+      );
+      const { width: dw, height: dh } = await measureDataUrlContainedBox(
+        compressedEffect,
+        EFFECT_DRAWING_MAX_W,
+        EFFECT_DRAWING_MAX_H
+      );
       setMoodboards((prev) => {
       const board = prev.find((b) => b.id === activeMoodboardId) ?? prev[0];
       if (!board) return prev;
 
-      const { canvasCenterX, canvasCenterY, baseWidth, baseHeight } = getViewportDrawingPlacement();
+      const container = canvasRef.current;
+      const sl = container?.scrollLeft ?? 0;
+      const st = container?.scrollTop ?? 0;
+      const vw = container?.clientWidth ?? 800;
+      const vh = container?.clientHeight ?? 600;
+      const canvasCenterX = sl + (vw - dw) / 2;
+      const canvasCenterY = st + (vh - dh) / 2;
       const baseZ = board.items.length;
 
       const drawingId = `drawing_${Date.now()}`;
@@ -742,8 +758,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         type: "drawing",
         x: canvasCenterX,
         y: canvasCenterY,
-        width: baseWidth,
-        height: baseHeight,
+        width: dw,
+        height: dh,
         zIndex: baseZ + 1,
         remark: "AI 识别基准方案",
       };
@@ -765,8 +781,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
           targetId: sampleId,
           relX: anno.x,
           relY: anno.y,
-          x: canvasCenterX + (anno.x * baseWidth) / 100,
-          y: canvasCenterY + (anno.y * baseHeight) / 100,
+          x: canvasCenterX + (anno.x * dw) / 100,
+          y: canvasCenterY + (anno.y * dh) / 100,
           width: 16,
           height: 16,
           zIndex: baseZ + 100 + idx,
@@ -779,7 +795,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
             materialId: mat.id,
             type: "sample",
             parentId: drawingId,
-            x: isLeft ? canvasCenterX - 250 : canvasCenterX + baseWidth + 50,
+            x: isLeft ? canvasCenterX - 250 : canvasCenterX + dw + 50,
             y: canvasCenterY + (idx % 4) * 180,
             width: 180,
             height: 180,
@@ -791,7 +807,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
             id: sampleId,
             type: "sample",
             parentId: drawingId,
-            x: isLeft ? canvasCenterX - 250 : canvasCenterX + baseWidth + 50,
+            x: isLeft ? canvasCenterX - 250 : canvasCenterX + dw + 50,
             y: canvasCenterY + (idx % 4) * 180,
             width: 180,
             height: 180,
@@ -805,7 +821,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         b.id === board.id ? { ...b, items: [...b.items, ...newItems] } : b
       );
     });
-  });
+    })();
   };
 
   const handleAIAnalysis = async () => {
@@ -818,9 +834,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     const qwenKey = getQwenApiKey();
 
     if (!geminiKey && !qwenKey) {
-      alert(
-        "未配置 AI 密钥：请在环境变量中设置 VITE_GEMINI_API_KEY（或 GEMINI_API_KEY），并可选用 VITE_QWEN_API_KEY 作为网络降级。"
-      );
+      alert("未配置识别服务，请稍后再试。");
       return;
     }
 
@@ -845,7 +859,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
           modelText = await analyzeWithGemini(geminiKey, MATERIAL_ANALYSIS_PROMPT, base64Part, mimeType);
         } catch (gemErr) {
           if (qwenKey && shouldFallbackToQwen(gemErr)) {
-            console.warn("[AI] Gemini 不可用（多为网络/超时），已切换千问:", gemErr);
+            console.warn("[AI] Gemini 请求失败，已切换千问:", gemErr);
             modelText = await analyzeWithQwen(qwenKey, imageForApi, MATERIAL_ANALYSIS_PROMPT);
           } else {
             throw gemErr;
@@ -869,7 +883,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         setAnalysisStep(3);
         setIsAIModalOpen(false);
         setAiImage(null);
-        alert("模型返回格式无法解析，已将效果图导入画布。在效果图上点击可放置圆点，再从材质卡片底部拖引线连接到圆点。");
+        alert("识别结果无法解析，效果图已放入画布，可手动标点。");
         return;
       }
 
@@ -901,7 +915,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         setAnalysisStep(3);
         setIsAIModalOpen(false);
         setAiImage(null);
-        alert("未识别到材质区域，已将效果图导入画布。在效果图上点击可放置圆点，并从侧边栏拖材质到识别卡虚线框内以指定材料。");
+        alert("未识别到材质区域，效果图已放入画布。");
         return;
       }
 
@@ -934,9 +948,6 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
       setAiImage(null);
     } catch (err) {
       console.error("AI Analysis failed:", err);
-      const raw = err instanceof Error ? err.message : String(err);
-      const short =
-        raw.length > 220 ? `${raw.slice(0, 220)}…` : raw;
       if (aiImage) {
         placeEffectImageOnly(aiImage, "空间效果图（手动标注）");
         setVisualAnnotations(null);
@@ -945,9 +956,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         setIsAIModalOpen(false);
         setAiImage(null);
       }
-      alert(
-        `AI 不可用（${short}）。已将效果图导入情绪板中央。在效果图上点击可放置圆点，并从材质卡片底部拖引线连接到圆点；也可将左侧收藏材质拖到识别卡片的虚线框内替换材料。`
-      );
+      alert("识别暂不可用，效果图已放入画布，可手动标点。");
     } finally {
       setIsAnalyzing(false);
     }
@@ -1283,6 +1292,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
             const isDrawing = item.type === 'drawing';
             const isMarker = item.type === 'marker';
             const isSample = item.type === 'sample' || item.type === 'material';
+            const isCollected = !!(item.materialId && savedIds.includes(item.materialId));
             
             return (
               <div 
@@ -1530,13 +1540,13 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                             setCanvasBookmarkMenuForId((id) => (id === item.id ? null : item.id));
                           }}
                           className={`p-1.5 rounded-full transition-all ${
-                            savedIds.includes(item.materialId)
-                              ? "bg-black text-white"
+                            isCollected
+                              ? "bg-red-500 text-white shadow-sm ring-1 ring-red-400/80"
                               : "hover:bg-gray-100 text-black"
                           }`}
                           title="收藏 / 存入情绪板"
                         >
-                          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill={savedIds.includes(item.materialId) ? "currentColor" : "none"} viewBox="0 0 24 24" stroke="currentColor">
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill={isCollected ? "currentColor" : "none"} viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
                           </svg>
                         </button>
@@ -1598,7 +1608,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                                 + 新建情绪板
                               </button>
                             )}
-                            {savedIds.includes(item.materialId) && onUnsaveMaterial && (
+                            {isCollected && onUnsaveMaterial && (
                               <button
                                 type="button"
                                 className="w-full border-t border-gray-200 px-4 py-3 text-left text-xs font-bold text-red-500 hover:bg-red-50"
@@ -2002,7 +2012,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               <div className="w-full max-w-[300px] aspect-square rounded-3xl border-2 border-dashed border-gray-200 flex flex-col items-center justify-center overflow-hidden bg-white shadow-inner relative group">
                 {aiImage ? (
                   <>
-                    <img src={aiImage} alt="" className="w-full h-full object-cover" />
+                    <img src={aiImage} alt="" className="w-full h-full object-contain" />
                     {isAnalyzing && (
                       <div className="absolute inset-0 bg-black/40 backdrop-blur-sm flex flex-col items-center justify-center text-white p-6 text-center">
                         <div className="w-12 h-12 border-4 border-white/20 border-t-white rounded-full animate-spin mb-4" />
@@ -2015,11 +2025,17 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                   <label className="cursor-pointer flex flex-col items-center">
                     <input type="file" className="hidden" accept="image/*" onChange={(e) => {
                       const file = e.target.files?.[0];
-                      if (file) {
-                        const reader = new FileReader();
-                        reader.onload = (event) => setAiImage(event.target?.result as string);
-                        reader.readAsDataURL(file);
-                      }
+                      if (!file) return;
+                      void (async () => {
+                        try {
+                          const url = await compressFileToDataUrl(file, AI_MODAL_IMAGE_MAX_WIDTH, AI_MODAL_IMAGE_QUALITY);
+                          setAiImage(url);
+                        } catch {
+                          const reader = new FileReader();
+                          reader.onload = (event) => setAiImage(event.target?.result as string);
+                          reader.readAsDataURL(file);
+                        }
+                      })();
                     }} />
                     <div className="w-16 h-16 bg-gray-50 rounded-2xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
                       <svg className="w-8 h-8 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"/></svg>
@@ -2052,11 +2068,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                     : "border-gray-100 bg-gray-100 text-gray-400 cursor-not-allowed"
                 }`}
               >
-                跳过 AI · 仅导入效果图（手动标点与连线）
+                跳过 AI
               </button>
-              <p className="mt-4 max-w-[300px] text-center text-[9px] leading-relaxed text-gray-400">
-                Gemini 免费额度用尽时会自动尝试千问（需配置 VITE_QWEN_API_KEY）。若仍失败，可使用上方按钮跳过识别。
-              </p>
             </div>
           </div>
         </div>

@@ -20,6 +20,8 @@ export interface User {
   isVerified: boolean;
   registeredPhone?: string;
   verificationDoc?: string;
+  /** 我的收藏（材料 ID），与本地 saved_ids 同步 */
+  collections?: string[];
 }
 
 export interface DesignerComment {

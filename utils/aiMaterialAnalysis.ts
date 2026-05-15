@@ -8,11 +8,11 @@ export const MATERIAL_ANALYSIS_PROMPT =
   '{"x":0-100的数字表示区域水平位置百分比,"y":0-100的数字表示垂直位置百分比,"main_name":"材质大类","parameter":"颜色或纹理描述","matched_material_id":"可选，若无法确定则省略"}。' +
   "坐标尽量指向材质所在区域中心。";
 
-/** 默认 gemini-1.5-flash（免费并发更友好）；可通过 VITE_GEMINI_MODEL 覆盖 */
+/** 默认 gemini-2.0-flash（v1beta 下 1.5-flash 易 404）；可通过 VITE_GEMINI_MODEL 覆盖 */
 const GEMINI_MODEL = (() => {
   const m = import.meta.env?.VITE_GEMINI_MODEL;
   if (m && String(m).trim()) return String(m).trim();
-  return "gemini-1.5-flash";
+  return "gemini-2.0-flash";
 })();
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -95,8 +95,9 @@ export function shouldFallbackToQwen(err: unknown): boolean {
   const m = err instanceof Error ? err.message : String(err);
   const s = m.toLowerCase();
 
-  if (/\b404\b/.test(m) && (s.includes("not found") || s.includes("is not found"))) {
-    return false;
+  /** 模型名 / API 版本不匹配等 404 → 改试千问 */
+  if (/\b404\b/.test(m) && (s.includes("not found") || s.includes("is not found") || s.includes("models/"))) {
+    return true;
   }
   if (s.includes("invalid api key") || s.includes("api key not valid")) return false;
 

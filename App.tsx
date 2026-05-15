@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, Component } from 'react';
+import React, { useState, useEffect, useRef, Component } from 'react';
 import { User, UserRole, Material, Category, MoodBoard, PointTransaction, PendingMaterial, Inquiry, SampleRequest, MaterialStatus, AuditLog, Notification } from './types';
 import { MOCK_MATERIALS } from './constants';
 import Navbar from './components/Navbar';
@@ -156,6 +156,17 @@ const App: React.FC = () => {
   const [isRechargeModalOpen, setIsRechargeModalOpen] = useState(false);
   const [showWelcomeBonus, setShowWelcomeBonus] = useState(false);
   const [showFeatureModal, setShowFeatureModal] = useState(false);
+  const savedIdsRef = useRef<string[]>([]);
+  const moodboardsRef = useRef<MoodBoard[]>([]);
+  const libraryRef = useRef<Material[]>([]);
+
+  savedIdsRef.current = savedMaterialIds;
+  moodboardsRef.current = moodboards;
+  libraryRef.current = library;
+
+  useEffect(() => {
+    setUser((u) => (u ? { ...u, collections: savedMaterialIds } : u));
+  }, [savedMaterialIds]);
 
   useEffect(() => {
     // Check for shared material in hash
@@ -245,9 +256,16 @@ const App: React.FC = () => {
     
     // Check if user should be verified based on persisted list
     const isVerified = baseUser.role === 'ADMIN' || verifiedUserIds.includes(baseUser.id) || baseUser.isVerified;
-    const finalUser = { ...baseUser, isVerified, transactions: baseUser.transactions || [] };
-    
+    const persistedCollections: string[] = getFromLocal('saved_ids') || [];
+    const finalUser = {
+      ...baseUser,
+      isVerified,
+      transactions: baseUser.transactions || [],
+      collections: persistedCollections,
+    };
+
     setUser(finalUser);
+    setSavedMaterialIds(persistedCollections);
     setPoints(userData.points);
     
     if ((userData as any).showWelcomeBonus) {
@@ -278,63 +296,93 @@ const App: React.FC = () => {
     }
   };
 
-  const handleSaveMaterial = (matId: string, moodboardId?: string, newMoodboardName?: string) => {
-    setSavedMaterialIds(prev => {
-      const isSaved = prev.includes(matId);
-      const newSaved = isSaved ? prev.filter(id => id !== matId) : [...prev, matId];
-      
-      let targetMbId = moodboardId;
+  /** 仅写入「我的收藏」与 user.collections，不创建或修改情绪板 */
+  const handleToggleCollect = (matId: string) => {
+    const prev = savedIdsRef.current;
+    const removing = prev.includes(matId);
+    const next = removing ? prev.filter((id) => id !== matId) : [...prev, matId];
+    setSavedMaterialIds(next);
+    savedIdsRef.current = next;
+    setLibrary((prevLib) =>
+      prevLib.map((m) =>
+        m.id === matId ? { ...m, saves: Math.max(0, removing ? m.saves - 1 : m.saves + 1) } : m
+      )
+    );
+  };
 
-      if (!targetMbId && newMoodboardName) {
-        const newMb: MoodBoard = {
-          id: `mb_${Date.now()}`,
-          name: newMoodboardName,
-          items: [],
-          maxMaterials: 10,
-          isPaid: false
-        };
-        setMoodboards(prevMbs => [...prevMbs, newMb]);
-        targetMbId = newMb.id;
+  const handleRemoveFromCollect = (matId: string) => {
+    const prev = savedIdsRef.current;
+    if (!prev.includes(matId)) return;
+    const next = prev.filter((id) => id !== matId);
+    setSavedMaterialIds(next);
+    savedIdsRef.current = next;
+    setLibrary((prevLib) =>
+      prevLib.map((m) => (m.id === matId ? { ...m, saves: Math.max(0, m.saves - 1) } : m))
+    );
+  };
+
+  /** 仅将材料加入指定情绪板（或用户显式命名的新板），不写入收藏库 */
+  const handleAddToMoodboard = (matId: string, moodboardId?: string, newMoodboardName?: string) => {
+    if (!moodboardId && !newMoodboardName?.trim()) return;
+
+    let boards = [...moodboardsRef.current];
+    let targetMbId = moodboardId;
+    const trimmedNewName = newMoodboardName?.trim();
+
+    if (!targetMbId && trimmedNewName) {
+      const newMb: MoodBoard = {
+        id: `mb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        name: trimmedNewName,
+        items: [],
+        maxMaterials: 10,
+        isPaid: false,
+      };
+      boards = [...boards, newMb];
+      targetMbId = newMb.id;
+    }
+
+    const mat = libraryRef.current.find((m) => m.id === matId);
+    let duplicate = false;
+    let applied = false;
+
+    boards = boards.map((mb) => {
+      if (mb.id !== targetMbId) return mb;
+      if (mb.items.some((item) => item.materialId === matId)) {
+        duplicate = true;
+        return mb;
       }
-
-      // If a specific moodboard is selected (or newly created), add it there
-      if (targetMbId) {
-        setMoodboards(prevMb => prevMb.map(mb => {
-          if (mb.id === targetMbId) {
-            // Check if already in moodboard
-            if (mb.items.some(item => item.materialId === matId)) {
-              alert('该材料已在情绪板中');
-              return mb;
-            }
-            const mat = library.find(m => m.id === matId);
-            const newItem = {
-              id: `item_${Date.now()}`,
-              materialId: matId,
-              type: 'material' as const,
-              x: 50 + (mb.items.length * 10),
-              y: 50 + (mb.items.length * 10),
-              width: 200,
-              height: 200,
-              zIndex: mb.items.length + 1,
-              remark: mat?.name || ''
-            };
-            if (newMoodboardName) {
-              alert(`已保存并新建情绪板: ${newMoodboardName}`);
-            } else {
-              alert(`已成功存入情绪板: ${mb.name}`);
-            }
-            return { ...mb, items: [...mb.items, newItem] };
-          }
-          return mb;
-        }));
-      }
-
-      // Update library counts for UI simulation
-      setLibrary(prevLib => prevLib.map(m => 
-        m.id === matId ? { ...m, saves: isSaved ? m.saves - 1 : m.saves + 1 } : m
-      ));
-      return newSaved;
+      applied = true;
+      const newItem = {
+        id: `item_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        materialId: matId,
+        type: 'material' as const,
+        x: 50 + mb.items.length * 10,
+        y: 50 + mb.items.length * 10,
+        width: 200,
+        height: 200,
+        zIndex: mb.items.length + 1,
+        remark: mat?.name || '',
+      };
+      return { ...mb, items: [...mb.items, newItem] };
     });
+
+    if (duplicate) {
+      return;
+    }
+    if (!applied) {
+      return;
+    }
+    setMoodboards(boards);
+    moodboardsRef.current = boards;
+  };
+
+  /** 仅 id：切换收藏；带情绪板参数：仅加入情绪板 */
+  const handleSaveMaterial = (matId: string, moodboardId?: string, newMoodboardName?: string) => {
+    if (!moodboardId && !newMoodboardName) {
+      handleToggleCollect(matId);
+      return;
+    }
+    handleAddToMoodboard(matId, moodboardId, newMoodboardName);
   };
 
   const handlePointChange = (amount: number, desc: string) => {
@@ -575,6 +623,8 @@ const App: React.FC = () => {
               activeMoodboardId={activeMoodboardId}
               setActiveMoodboardId={setActiveMoodboardId}
               onDeductPoints={(amt, desc) => handlePointChange(-amt, desc)}
+              onSaveMaterial={handleAddToMoodboard}
+              onUnsaveMaterial={handleRemoveFromCollect}
             />
           )}
 
