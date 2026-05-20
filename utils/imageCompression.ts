@@ -5,6 +5,91 @@ export const MOODBOARD_IMAGE_QUALITY = 0.72;
 export const AI_MODAL_IMAGE_MAX_WIDTH = 1920;
 export const AI_MODAL_IMAGE_QUALITY = 0.78;
 
+/** 情绪板右键「本地材料」：长边上限与 JPEG 质量区间 */
+export const LOCAL_CANVAS_MATERIAL_MAX_LONG_EDGE = 800;
+export const LOCAL_CANVAS_MATERIAL_TARGET_MAX_BYTES = 100 * 1024;
+const LOCAL_CANVAS_MATERIAL_QUALITIES = [0.7, 0.65, 0.6, 0.55] as const;
+
+export function dataUrlByteSize(dataUrl: string): number {
+  const comma = dataUrl.indexOf(",");
+  const base64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+  return Math.ceil((base64.length * 3) / 4);
+}
+
+function scaleToMaxLongEdge(
+  width: number,
+  height: number,
+  maxLongEdge: number
+): { width: number; height: number } {
+  const long = Math.max(width, height);
+  if (long <= maxLongEdge) {
+    return { width: Math.round(width), height: Math.round(height) };
+  }
+  const scale = maxLongEdge / long;
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
+function encodeImageToJpegDataUrl(img: HTMLImageElement, maxLongEdge: number, quality: number): string {
+  const w0 = img.naturalWidth || img.width;
+  const h0 = img.naturalHeight || img.height;
+  if (w0 < 1 || h0 < 1) throw new Error("无效图片尺寸");
+  const { width, height } = scaleToMaxLongEdge(w0, h0, maxLongEdge);
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas 不可用");
+  ctx.drawImage(img, 0, 0, width, height);
+  return canvas.toDataURL("image/jpeg", quality);
+}
+
+/** 按长边缩放并输出 JPEG data URL */
+export function compressFileToDataUrlLongEdge(
+  file: File,
+  maxLongEdge = LOCAL_CANVAS_MATERIAL_MAX_LONG_EDGE,
+  quality = 0.68
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (event) => {
+      const src = event.target?.result as string;
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        try {
+          resolve(encodeImageToJpegDataUrl(img, maxLongEdge, quality));
+        } catch (e) {
+          reject(e);
+        }
+      };
+      img.onerror = () => reject(new Error("图片解码失败"));
+      img.src = src;
+    };
+    reader.onerror = (err) => reject(err);
+  });
+}
+
+/**
+ * 右键上传本地材料专用：长边 ≤800px、JPEG、体积约 50–100KB。
+ */
+export async function compressImage(file: File): Promise<string> {
+  for (const q of LOCAL_CANVAS_MATERIAL_QUALITIES) {
+    const url = await compressFileToDataUrlLongEdge(file, LOCAL_CANVAS_MATERIAL_MAX_LONG_EDGE, q);
+    if (dataUrlByteSize(url) <= LOCAL_CANVAS_MATERIAL_TARGET_MAX_BYTES) {
+      return url;
+    }
+  }
+  const fallback = await compressFileToDataUrlLongEdge(file, 640, 0.55);
+  if (dataUrlByteSize(fallback) > LOCAL_CANVAS_MATERIAL_TARGET_MAX_BYTES * 1.5) {
+    throw new Error("IMAGE_TOO_LARGE_AFTER_COMPRESS");
+  }
+  return fallback;
+}
+
 /** 将 File 压成 JPEG data URL，控制 localStorage / AI 请求体积 */
 export function compressFileToDataUrl(
   file: File,

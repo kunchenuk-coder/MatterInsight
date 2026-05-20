@@ -12,6 +12,12 @@ import SupplierDashboard from './components/SupplierDashboard';
 import DesignerDashboard from './components/DesignerDashboard';
 import AdminDashboard from './components/AdminDashboard';
 import RechargeModal from './components/RechargeModal';
+import {
+  clearMoodboardDraftCaches,
+  isQuotaExceededError,
+  pruneMoodboardsForQuota,
+  stripLargestDrawingImages,
+} from './utils/moodboardStorage';
 
 // Error Boundary Component
 interface ErrorBoundaryProps {
@@ -91,21 +97,51 @@ const App: React.FC = () => {
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [adminPass, setAdminPass] = useState('');
 
-  // Persistence Helpers
-  const saveToLocal = (key: string, data: any) => {
+  // Persistence Helpers（配额告警全局仅一次，避免 useEffect 死循环弹窗）
+  const quotaAlertShownRef = useRef(false);
+
+  const saveToLocal = (key: string, data: unknown) => {
+    const storageKey = `matter_insight_${key}`;
+    const write = (payload: unknown) => {
+      localStorage.setItem(storageKey, JSON.stringify(payload));
+    };
+
     try {
-      localStorage.setItem(`matter_insight_${key}`, JSON.stringify(data));
+      write(data);
+      return;
     } catch (e) {
       console.error(`Failed to save ${key} to local storage:`, e);
-      if (e instanceof Error && e.name === 'QuotaExceededError') {
-        // Try to clear some non-essential data if quota is hit
+      if (!isQuotaExceededError(e)) return;
+
+      try {
+        localStorage.removeItem("matter_insight_notifications");
+        clearMoodboardDraftCaches();
+      } catch {
+        /* ignore */
+      }
+
+      let payload = data;
+      if (key === "moodboards" && Array.isArray(data)) {
+        let boards = pruneMoodboardsForQuota(data as MoodBoard[]);
         try {
-          // Clear notifications as they are less critical
-          localStorage.removeItem('matter_insight_notifications');
-          // Try saving again
-          localStorage.setItem(`matter_insight_${key}`, JSON.stringify(data));
-        } catch (retryError) {
-          alert('本地存储空间已满，且无法通过清理临时数据释放空间。请尝试删除一些旧的情绪板或减少上传的图片数量。');
+          write(boards);
+          return;
+        } catch {
+          boards = stripLargestDrawingImages(boards, 3);
+          payload = boards;
+        }
+      }
+
+      try {
+        write(payload);
+        return;
+      } catch (retryErr) {
+        if (!isQuotaExceededError(retryErr)) return;
+        if (!quotaAlertShownRef.current) {
+          quotaAlertShownRef.current = true;
+          window.alert(
+            "本地存储空间已满。已尝试清理通知与临时草稿；请删除部分情绪板或过大的效果图后再保存。此提示仅显示一次。"
+          );
         }
       }
     }

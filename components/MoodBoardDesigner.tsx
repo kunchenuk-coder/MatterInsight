@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import html2canvas from 'html2canvas';
 // 检查下面这一行，确保包含 MoodBoardProps 里面用到的所有类型
-import { User, Material, MoodBoard, MoodBoardItem, Category } from '../types';
+import { User, Material, MoodBoard, MoodBoardItem, Category, type LocalTemporaryMaterial } from '../types';
 import {
   MATERIAL_ANALYSIS_PROMPT,
   analyzeWithVisionFallback,
@@ -13,15 +13,100 @@ import {
   type VisionSampleAnchor,
 } from '../utils/aiMaterialAnalysis';
 import {
+  compressImage,
   compressFileToDataUrl,
   compressDataUrl,
+  dataUrlByteSize,
   measureDataUrlContainedBox,
   reencodeDataUrlSameDimensions,
   reencodeFileToDataUrl,
+  LOCAL_CANVAS_MATERIAL_TARGET_MAX_BYTES,
   MOODBOARD_IMAGE_MAX_WIDTH,
   MOODBOARD_IMAGE_QUALITY,
   AI_MODAL_IMAGE_QUALITY,
 } from '../utils/imageCompression';
+import {
+  createLocalTemporaryMaterial,
+  loadLocalDesignerMaterials,
+  saveLocalDesignerMaterials,
+  upsertLocalDesignerMaterial,
+  LOCAL_TEMP_DEFAULT_NAME,
+  LOCAL_TEMP_DEFAULT_SPEC,
+} from '../utils/localDesignerMaterials';
+import { isQuotaExceededError } from "../utils/moodboardStorage";
+
+const DRAG_LOCAL_MATERIAL_MIME = "application/x-matter-local-material-id";
+
+type SidebarMaterialFilter = Category | "ALL" | "LOCAL";
+
+const LOCAL_MATERIAL_NAME_PLACEHOLDER = "未命名本地材料";
+
+function isLocalBoardMaterial(item: MoodBoardItem): boolean {
+  return !!(item.isLocalStorageMaterial ?? item.isLocalOnly ?? item.localMaterialId);
+}
+
+function buildLocalBoardItemFromEntry(
+  entry: LocalTemporaryMaterial,
+  boardX: number,
+  boardY: number,
+  zIndex: number
+): MoodBoardItem {
+  const displayName = entry.name || LOCAL_TEMP_DEFAULT_NAME;
+  const displaySpec = entry.spec || LOCAL_TEMP_DEFAULT_SPEC;
+  const imageUrl = entry.imageUrl;
+  return {
+    id: `local_card_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    type: "material",
+    localMaterialId: entry.id,
+    isLocalStorageMaterial: true,
+    isLocalOnly: true,
+    imageUrl,
+    x: boardX - 90,
+    y: boardY - 90,
+    width: 200,
+    height: 200,
+    zIndex,
+    remark: syncCardRemark(displayName, displaySpec),
+    isEditedByUser: true,
+    displayName,
+    displaySpec,
+    specEditWarningAcked: true,
+  };
+}
+
+function applyLocalMaterialEntryToCard(
+  item: MoodBoardItem,
+  entry: LocalTemporaryMaterial
+): MoodBoardItem {
+  const displayName = entry.name || LOCAL_TEMP_DEFAULT_NAME;
+  const displaySpec = entry.spec || LOCAL_TEMP_DEFAULT_SPEC;
+  const imageUrl = entry.imageUrl;
+  return {
+    id: item.id,
+    type: item.type,
+    parentId: item.parentId,
+    targetId: item.targetId,
+    x: item.x,
+    y: item.y,
+    relX: item.relX,
+    relY: item.relY,
+    width: item.width,
+    height: item.height,
+    zIndex: item.zIndex,
+    localMaterialId: entry.id,
+    isLocalStorageMaterial: true,
+    isLocalOnly: true,
+    imageUrl,
+    materialId: undefined,
+    libraryRevisionHash: undefined,
+    snapshotImageUrl: undefined,
+    displayName,
+    displaySpec,
+    remark: syncCardRemark(displayName, displaySpec),
+    isEditedByUser: true,
+    specEditWarningAcked: true,
+  };
+}
 
 type AIAnnotationPayload = {
   matched_material_id?: string;
@@ -33,6 +118,97 @@ type AIAnnotationPayload = {
 };
 
 const DRAG_MATERIAL_MIME = 'application/x-matter-material-id';
+
+const CARD_SIZE_MIN = 48;
+const CARD_SIZE_MAX = 880;
+
+function parseCardRemark(remark?: string): { name: string; spec: string } {
+  const raw = (remark || "").trim();
+  if (!raw) return { name: "", spec: "" };
+  const i = raw.indexOf("\n");
+  if (i < 0) return { name: raw, spec: "" };
+  return { name: raw.slice(0, i).trim(), spec: raw.slice(i + 1).trim() };
+}
+
+function syncCardRemark(name: string, spec: string): string {
+  return `${name}\n${spec || "—"}`;
+}
+
+/** 材料库条目变更检测（名称/规格/图/库存/状态） */
+function materialRevisionFingerprint(m: Material): string {
+  return [m.name, m.specifications, m.image, String(m.stock), m.status].join("\u0001");
+}
+
+function stampLinkedMaterialFields(mat: Material): Pick<
+  MoodBoardItem,
+  "materialId" | "remark" | "libraryRevisionHash" | "isEditedByUser"
+> {
+  return {
+    materialId: mat.id,
+    remark: syncCardRemark(mat.name, mat.specifications || "标准"),
+    libraryRevisionHash: materialRevisionFingerprint(mat),
+    isEditedByUser: false,
+  };
+}
+
+/** 将库材料写回已有卡片并清除用户编辑/本地快照字段（避免 spread undefined 无法删掉旧键） */
+function applyLibraryMaterialToCard(item: MoodBoardItem, mat: Material): MoodBoardItem {
+  const stamped = stampLinkedMaterialFields(mat);
+  const next: MoodBoardItem = {
+    id: item.id,
+    type: item.type,
+    parentId: item.parentId,
+    targetId: item.targetId,
+    x: item.x,
+    y: item.y,
+    relX: item.relX,
+    relY: item.relY,
+    width: item.width,
+    height: item.height,
+    zIndex: item.zIndex,
+    ...stamped,
+  };
+  return next;
+}
+
+function isMaterialCardType(item: MoodBoardItem): boolean {
+  return item.type === "sample" || item.type === "material" || (!item.type && !item.parentId);
+}
+
+function getCardDisplay(
+  item: MoodBoardItem,
+  mat: Material | null | undefined,
+  localEntry?: LocalTemporaryMaterial | null
+): { name: string; spec: string; imageUrl: string | undefined; showUpdateDot: boolean } {
+  const parsed = parseCardRemark(item.remark);
+  const edited = !!item.isEditedByUser;
+
+  const name = isLocalBoardMaterial(item)
+    ? item.displayName ?? parsed.name ?? ""
+    : edited
+      ? (item.displayName ?? parsed.name) || "未命名"
+      : (mat?.name ?? parsed.name ?? item.displayName) || "待匹配材质";
+
+  const spec = edited
+    ? (item.displaySpec ?? parsed.spec) || "—"
+    : (mat?.specifications ?? parsed.spec) || "标准";
+
+  const imageUrl = isLocalBoardMaterial(item)
+    ? item.imageUrl ?? item.snapshotImageUrl ?? localEntry?.imageUrl
+    : edited
+      ? item.snapshotImageUrl ?? item.imageUrl ?? mat?.image
+      : mat?.image ?? item.imageUrl;
+
+  const showUpdateDot =
+    !edited &&
+    !isLocalBoardMaterial(item) &&
+    !!mat &&
+    !!item.materialId &&
+    !!item.libraryRevisionHash &&
+    materialRevisionFingerprint(mat) !== item.libraryRevisionHash;
+
+  return { name, spec, imageUrl, showUpdateDot };
+}
 
 /** 画布逻辑坐标系（与内层 scale 配套）；外层滚动尺寸为 base × zoom */
 const MOODBOARD_CONTENT_W = 2000;
@@ -142,15 +318,27 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   /** 未点击预览图时为 null，千问 RGB 前置用几何中心；点击后映射到原图百分比 */
   const [aiVisionAnchor, setAiVisionAnchor] = useState<VisionSampleAnchor | null>(null);
   const [isPreviewingImage, setIsPreviewingImage] = useState(false);
-  const [selectedCategory, setSelectedCategory] = useState<Category | 'ALL'>('ALL');
+  const [selectedCategory, setSelectedCategory] = useState<SidebarMaterialFilter>("ALL");
+  const [localMaterialsList, setLocalMaterialsList] = useState<LocalTemporaryMaterial[]>(
+    () => loadLocalDesignerMaterials(user.id)
+  );
   const [matchResults, setMatchResults] = useState<{ material: Material; remark: string; coords: {x: number, y: number}, logic: string }[] | null>(null);
   const [visualAnnotations, setVisualAnnotations] = useState<any[] | null>(null);
   const [aiRecommendations, setAiRecommendations] = useState<Material[]>([]);
-  const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
-  const [canvasBookmarkMenuForId, setCanvasBookmarkMenuForId] = useState<string | null>(null);
-  const [creatingBoardForMaterialId, setCreatingBoardForMaterialId] = useState<string | null>(null);
+  const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
+  const [editingSpecId, setEditingSpecId] = useState<string | null>(null);
+  const [specEditModalItemId, setSpecEditModalItemId] = useState<string | null>(null);
+  const storageQuotaAlertShownRef = useRef(false);
+  const [canvasContextMenu, setCanvasContextMenu] = useState<{
+    clientX: number;
+    clientY: number;
+    boardX: number;
+    boardY: number;
+  } | null>(null);
   const [aiUploadHint, setAiUploadHint] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
+  const canvasLocalUploadRef = useRef<HTMLInputElement>(null);
+  const sidebarLocalUploadRef = useRef<HTMLInputElement>(null);
 
   const [canvasZoom, setCanvasZoom] = useState(1);
   const canvasZoomRef = useRef(1);
@@ -350,6 +538,53 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   }, [isFinalMode, isAIModalOpen, isExporting, isPreviewingCapturedImage, isPreviewingImage, zoomCanvas]);
 
   const activeBoard = moodboards.find(b => b.id === activeMoodboardId) || moodboards[0];
+
+  /** 为旧数据补全 libraryRevisionHash，避免无基线时误报红点 */
+  useEffect(() => {
+    setMoodboards((prev) => {
+      const board = prev.find((b) => b.id === activeMoodboardId);
+      if (!board) return prev;
+      let changed = false;
+      const nextItems = board.items.map((item) => {
+        if (
+          item.materialId &&
+          !item.isEditedByUser &&
+          !isLocalBoardMaterial(item) &&
+          !item.libraryRevisionHash
+        ) {
+          const mat = materials.find((m) => m.id === item.materialId);
+          if (mat) {
+            changed = true;
+            return { ...item, libraryRevisionHash: materialRevisionFingerprint(mat) };
+          }
+        }
+        return item;
+      });
+      if (!changed) return prev;
+      return prev.map((b) => (b.id === board.id ? { ...b, items: nextItems } : b));
+    });
+  }, [activeMoodboardId, materials, setMoodboards]);
+
+  useEffect(() => {
+    if (!canvasContextMenu) return;
+    const close = () => setCanvasContextMenu(null);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [canvasContextMenu]);
+
+  useEffect(() => {
+    setLocalMaterialsList(loadLocalDesignerMaterials(user.id));
+  }, [user.id]);
+
+  useEffect(() => {
+    if (!user.id) return;
+    try {
+      saveLocalDesignerMaterials(user.id, localMaterialsList);
+    } catch (e) {
+      if (isQuotaExceededError(e)) showStorageQuotaAlertOnce();
+    }
+  }, [localMaterialsList, user.id]);
+
   const savedMaterials = materials.filter(m => savedIds.includes(m.id));
 
   // Migration: Ensure all boards have the new higher capacity
@@ -368,51 +603,56 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
       setMoodboards(updatedBoards);
     }
   }, [moodboards, setMoodboards]);
-  /** 从收藏库按 materialId 添加材质卡片；去重 + 函数式更新，避免闭包导致不刷新 */
-  const handleAddItem = (materialId: string) => {
-    const material = materials.find(m => m.id === materialId);
-    if (!material) return;
+  /** 从收藏库添加材质卡片（与侧栏 + 号、拖入空白处共用） */
+  const addMaterialCardToBoard = (
+    materialId: string,
+    boardPos?: { x: number; y: number }
+  ): boolean => {
+    const material = materials.find((m) => m.id === materialId);
+    if (!material) return false;
 
-    setMoodboards(prev => {
-      const board = prev.find(b => b.id === activeMoodboardId) ?? prev[0];
+    let added = false;
+    setMoodboards((prev) => {
+      const board = prev.find((b) => b.id === activeMoodboardId) ?? prev[0];
       if (!board) return prev;
 
-      const materialCount = board.items.filter(
-        i => i.type === "material" || i.type === "sample"
-      ).length;
+      const materialCount = board.items.filter((i) => isMaterialCardType(i)).length;
       if (materialCount >= board.maxMaterials) {
+        alert(`当前情绪板材质卡片已达上限 (${board.maxMaterials}款)`);
         return prev;
       }
 
       if (
-        board.items.some(
-          i =>
-            i.materialId === materialId &&
-            (i.type === "material" || i.type === "sample" || !i.type)
-        )
+        board.items.some((i) => i.materialId === materialId && isMaterialCardType(i))
       ) {
+        alert("该材料已在当前情绪板中");
         return prev;
       }
 
-      const maxZ = Math.max(...board.items.map(x => x.zIndex), 0);
-      const canvasWidth = canvasRef.current?.clientWidth || 800;
-      const canvasHeight = canvasRef.current?.clientHeight || 600;
+      const maxZ = Math.max(...board.items.map((x) => x.zIndex), 0);
+      const defaultX = MOODBOARD_CONTENT_W / 2 - 100 + (Math.random() - 0.5) * 40;
+      const defaultY = 150 + Math.random() * 50;
       const newItem: MoodBoardItem = {
         id: Math.random().toString(36).slice(2, 11),
-        materialId: material.id,
         type: "material",
-        x: canvasWidth / 2 - 100 + (Math.random() - 0.5) * 40,
-        y: 150 + Math.random() * 50,
+        x: boardPos ? boardPos.x - 100 : defaultX,
+        y: boardPos ? boardPos.y - 100 : defaultY,
         width: 200,
         height: 200,
         zIndex: maxZ + 1,
-        remark: `${material.name}\n${material.specifications || "标准"}`,
+        ...stampLinkedMaterialFields(material),
       };
 
-      return prev.map(b =>
+      added = true;
+      return prev.map((b) =>
         b.id === board.id ? { ...b, items: [...b.items, newItem] } : b
       );
     });
+    return added;
+  };
+
+  const handleAddItem = (materialId: string) => {
+    addMaterialCardToBoard(materialId);
   };
 
   const handleCreateBoard = () => {
@@ -483,13 +723,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         return {
           ...b,
           items: b.items.map((i) =>
-            i.id === sampleId && (i.type === "sample" || i.type === "material")
-              ? {
-                  ...i,
-                  materialId: mat.id,
-                  imageUrl: undefined,
-                  remark: `${mat.name}\n${mat.specifications || "标准"}`,
-                }
+            i.id === sampleId && isMaterialCardType(i)
+              ? applyLibraryMaterialToCard(i, mat)
               : i
           ),
         };
@@ -497,19 +732,111 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     );
   };
 
-  const handleSampleDragOver = (e: React.DragEvent) => {
+  const readDraggedLocalMaterialId = (e: React.DragEvent): string | null => {
+    const id = e.dataTransfer.getData(DRAG_LOCAL_MATERIAL_MIME);
+    const trimmed = id?.trim();
+    return trimmed || null;
+  };
+
+  const readDraggedLibraryMaterialId = (e: React.DragEvent): string | null => {
+    const id =
+      e.dataTransfer.getData(DRAG_MATERIAL_MIME) ||
+      e.dataTransfer.getData("text/plain");
+    const trimmed = id?.trim();
+    if (!trimmed || trimmed.startsWith("lmat_")) return null;
+    return trimmed;
+  };
+
+  const findMaterialCardIdAtPoint = (clientX: number, clientY: number): string | null => {
+    const hits = document.elementsFromPoint(clientX, clientY);
+    for (const el of hits) {
+      const card = (el as HTMLElement).closest?.("[data-moodboard-card-id]");
+      if (card) {
+        const id = card.getAttribute("data-moodboard-card-id");
+        if (id) return id;
+      }
+    }
+    return null;
+  };
+
+  const handleLibraryMaterialDragOver = (e: React.DragEvent) => {
     const types = Array.from(e.dataTransfer.types || []);
-    if (!types.includes(DRAG_MATERIAL_MIME) && !types.includes("text/plain")) return;
+    if (
+      !types.includes(DRAG_MATERIAL_MIME) &&
+      !types.includes(DRAG_LOCAL_MATERIAL_MIME) &&
+      !types.includes("text/plain")
+    ) {
+      return;
+    }
     e.preventDefault();
     e.dataTransfer.dropEffect = "copy";
   };
 
-  const handleSampleDrop = (e: React.DragEvent, sampleId: string) => {
-    const id = e.dataTransfer.getData(DRAG_MATERIAL_MIME) || e.dataTransfer.getData("text/plain");
-    if (!id?.trim()) return;
+  const applyLocalMaterialToSample = (sampleId: string, localMaterialId: string) => {
+    const entry = localMaterialsList.find((x) => x.id === localMaterialId);
+    if (!entry) return;
+    setMoodboards((prev) =>
+      prev.map((b) => {
+        if (b.id !== activeMoodboardId) return b;
+        return {
+          ...b,
+          items: b.items.map((i) =>
+            i.id === sampleId && isMaterialCardType(i)
+              ? applyLocalMaterialEntryToCard(i, entry)
+              : i
+          ),
+        };
+      })
+    );
+  };
+
+  const handleLibraryMaterialDrop = (e: React.DragEvent) => {
+    if (isFinalMode || isExporting) return;
     e.preventDefault();
     e.stopPropagation();
-    assignMaterialToSample(sampleId, id.trim());
+
+    const localId = readDraggedLocalMaterialId(e);
+    const libraryId = readDraggedLibraryMaterialId(e);
+    const cardId = findMaterialCardIdAtPoint(e.clientX, e.clientY);
+
+    if (localId) {
+      if (cardId) {
+        const target = activeBoard.items.find((i) => i.id === cardId);
+        if (target && isMaterialCardType(target)) {
+          applyLocalMaterialToSample(cardId, localId);
+          return;
+        }
+      }
+      const p = clientToBoard(e.clientX, e.clientY);
+      addLocalMaterialCardFromCatalog(localId, p);
+      return;
+    }
+
+    if (!libraryId) return;
+
+    if (cardId) {
+      const target = activeBoard.items.find((i) => i.id === cardId);
+      if (target && isMaterialCardType(target)) {
+        assignMaterialToSample(cardId, libraryId);
+        return;
+      }
+    }
+
+    const p = clientToBoard(e.clientX, e.clientY);
+    addMaterialCardToBoard(libraryId, p);
+  };
+
+  /** 删除标注点（连线由 marker.targetId 绘制，删点即删线） */
+  const removeMarkerOnly = (markerId: string) => {
+    setMoodboards((prev) =>
+      prev.map((b) => {
+        if (b.id !== activeMoodboardId) return b;
+        return {
+          ...b,
+          items: b.items.filter((i) => i.id !== markerId),
+        };
+      })
+    );
   };
 
   /** 删除画布节点并移除指向该节点的引线锚点 */
@@ -529,12 +856,158 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     );
   };
 
-  const removeMaterialCardAndUnsave = (card: MoodBoardItem) => {
-    if (card.materialId) {
-      onUnsaveMaterial?.(card.materialId);
+  const patchBoardItem = (itemId: string, patch: Partial<MoodBoardItem>) => {
+    setMoodboards((prev) =>
+      prev.map((b) => {
+        if (b.id !== activeMoodboardId) return b;
+        return {
+          ...b,
+          items: b.items.map((i) => (i.id === itemId ? { ...i, ...patch } : i)),
+        };
+      })
+    );
+  };
+
+  const applyLibraryRefreshToCard = (itemId: string) => {
+    setMoodboards((prev) =>
+      prev.map((b) => {
+        if (b.id !== activeMoodboardId) return b;
+        const item = b.items.find((i) => i.id === itemId);
+        if (!item?.materialId || item.isEditedByUser) return b;
+        const mat = materials.find((m) => m.id === item.materialId);
+        if (!mat) return b;
+        return {
+          ...b,
+          items: b.items.map((i) =>
+            i.id === itemId ? applyLibraryMaterialToCard(i, mat) : i
+          ),
+        };
+      })
+    );
+  };
+
+  const showStorageQuotaAlertOnce = () => {
+    if (storageQuotaAlertShownRef.current) return;
+    storageQuotaAlertShownRef.current = true;
+    window.alert(
+      "本地存储空间已满，无法保存新图片。请删除部分情绪板或过大的效果图后重试。此提示仅显示一次。"
+    );
+  };
+
+  const syncLocalCatalogFromCard = (localMaterialId: string, name: string, spec: string) => {
+    setLocalMaterialsList((prev) => {
+      const existing = prev.find((x) => x.id === localMaterialId);
+      if (!existing) return prev;
+      const next = upsertLocalDesignerMaterial(user.id, prev, {
+        ...existing,
+        name: name || LOCAL_TEMP_DEFAULT_NAME,
+        spec: spec || LOCAL_TEMP_DEFAULT_SPEC,
+      });
+      try {
+        saveLocalDesignerMaterials(user.id, next);
+      } catch (e) {
+        if (isQuotaExceededError(e)) showStorageQuotaAlertOnce();
+      }
+      return next;
+    });
+  };
+
+  /** 压缩并生成统一的 LocalTemporaryMaterial */
+  const buildLocalTemporaryFromFile = async (
+    file: File
+  ): Promise<LocalTemporaryMaterial | null> => {
+    const compressedBase64 = await compressImage(file);
+    if (!compressedBase64.startsWith("data:image/jpeg")) {
+      throw new Error("INVALID_COMPRESSED_FORMAT");
     }
-    removeBoardItemCascade(card.id);
-    setCanvasBookmarkMenuForId(null);
+    if (dataUrlByteSize(compressedBase64) > LOCAL_CANVAS_MATERIAL_TARGET_MAX_BYTES * 1.2) {
+      throw new Error("IMAGE_TOO_LARGE_AFTER_COMPRESS");
+    }
+    return createLocalTemporaryMaterial(user.id, compressedBase64);
+  };
+
+  /** 仅写入左侧「本地材料」列表（localStorage + React state） */
+  const commitLocalMaterialToCatalog = (entry: LocalTemporaryMaterial): boolean => {
+    let saved = false;
+    setLocalMaterialsList((prev) => {
+      const next = [...prev, entry];
+      try {
+        saveLocalDesignerMaterials(user.id, next);
+        saved = true;
+        return next;
+      } catch (e) {
+        if (isQuotaExceededError(e)) showStorageQuotaAlertOnce();
+        return prev;
+      }
+    });
+    return saved;
+  };
+
+  const placeLocalMaterialOnBoard = (
+    entry: LocalTemporaryMaterial,
+    boardX: number,
+    boardY: number
+  ) => {
+    setMoodboards((prev) => {
+      const board = prev.find((b) => b.id === activeMoodboardId) ?? prev[0];
+      if (!board) return prev;
+      const materialCount = board.items.filter((i) => isMaterialCardType(i)).length;
+      if (materialCount >= board.maxMaterials) {
+        alert(`当前情绪板材质卡片已达上限 (${board.maxMaterials}款)`);
+        return prev;
+      }
+      const maxZ = Math.max(...board.items.map((x) => x.zIndex), 0);
+      const newItem = buildLocalBoardItemFromEntry(entry, boardX, boardY, maxZ + 1);
+      return prev.map((b) =>
+        b.id === board.id ? { ...b, items: [...b.items, newItem] } : b
+      );
+    });
+  };
+
+  /** 左侧上传：只入库，不直接上画布 */
+  const registerLocalMaterialFromSidebar = async (file: File) => {
+    try {
+      const entry = await buildLocalTemporaryFromFile(file);
+      if (!entry?.imageUrl) return;
+      if (!commitLocalMaterialToCatalog(entry)) return;
+      setSelectedCategory("LOCAL");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "";
+      if (msg.includes("QuotaExceeded") || msg.includes("IMAGE_TOO_LARGE")) {
+        showStorageQuotaAlertOnce();
+      } else {
+        alert("图片处理失败，请换一张较小的图片重试。");
+      }
+    }
+  };
+
+  const addLocalMaterialCardFromCatalog = (
+    localMaterialId: string,
+    boardPos?: { x: number; y: number }
+  ) => {
+    const entry = localMaterialsList.find((x) => x.id === localMaterialId);
+    if (!entry?.imageUrl) return;
+    const px = boardPos?.x ?? MOODBOARD_CONTENT_W / 2;
+    const py = boardPos?.y ?? 200;
+    placeLocalMaterialOnBoard(entry, px, py);
+  };
+
+  /** 画布右键：入库 + 在点击位置生成卡片 */
+  const insertLocalCanvasMaterial = async (file: File, boardX: number, boardY: number) => {
+    try {
+      const entry = await buildLocalTemporaryFromFile(file);
+      if (!entry?.imageUrl) return;
+      if (!commitLocalMaterialToCatalog(entry)) return;
+      setSelectedCategory("LOCAL");
+      placeLocalMaterialOnBoard(entry, boardX, boardY);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "";
+      if (msg.includes("QuotaExceeded") || msg.includes("IMAGE_TOO_LARGE")) {
+        showStorageQuotaAlertOnce();
+      } else {
+        alert("图片处理失败，请换一张较小的图片重试。");
+      }
+    }
   };
 
   const handleStartAction = (e: React.MouseEvent | React.TouchEvent, id: string, type: 'move' | 'resize') => {
@@ -625,11 +1098,29 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
     if (resizingItem) {
       const deltaX = clientX - resizingItem.startX;
-      const scale = (resizingItem.startWidth + deltaX) / resizingItem.startWidth;
-      const newWidth = Math.max(50, resizingItem.startWidth + deltaX);
-      const newHeight = Math.max(50, resizingItem.startHeight * scale);
-      
-      const resizedItem = activeBoard.items.find(i => i.id === resizingItem.id);
+      const deltaY = clientY - resizingItem.startY;
+      const resizedItem = activeBoard.items.find((i) => i.id === resizingItem.id);
+      const isCard =
+        resizedItem?.type === "sample" ||
+        resizedItem?.type === "material" ||
+        (!resizedItem?.type && !resizedItem?.parentId);
+      let newWidth = Math.max(
+        CARD_SIZE_MIN,
+        Math.min(CARD_SIZE_MAX, resizingItem.startWidth + deltaX)
+      );
+      let newHeight: number;
+      if (isCard) {
+        newHeight = Math.max(
+          CARD_SIZE_MIN,
+          Math.min(CARD_SIZE_MAX, resizingItem.startHeight + deltaY)
+        );
+      } else {
+        const scale = newWidth / resizingItem.startWidth;
+        newHeight = Math.max(
+          CARD_SIZE_MIN,
+          Math.min(CARD_SIZE_MAX, resizingItem.startHeight * scale)
+        );
+      }
 
       updateBoardItems(activeBoard.items.map((i: any) => {
         if (i.id === resizingItem.id) {
@@ -745,18 +1236,20 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   };
 
   const handleExport = () => {
-    // Real CSV Generation
     const headers = ['材料名称', '品牌', '规格', '分类', '价格区间'];
-    const rows = activeBoard.items.map(item => {
-      const mat = materials.find(m => m.id === item.materialId);
-      return [
-        mat?.name || '',
-        mat?.brand || '',
-        mat?.specifications || '',
-        mat?.category || '',
-        mat?.priceRange || ''
-      ];
-    });
+    const rows = activeBoard.items
+      .filter((item) => item.type === 'material' || item.type === 'sample' || (!item.type && !item.parentId))
+      .map((item) => {
+        const mat = item.materialId ? materials.find((m) => m.id === item.materialId) : undefined;
+        const { name, spec } = getCardDisplay(item, mat);
+        return [
+          name,
+          isLocalBoardMaterial(item) ? '—' : mat?.brand || '',
+          spec,
+          isLocalBoardMaterial(item) ? '本地临时' : mat?.category || '',
+          isLocalBoardMaterial(item) ? '—' : mat?.priceRange || '',
+        ];
+      });
     
     const csvContent = "\uFEFF" + [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -1091,7 +1584,6 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         if (mat) {
           newItems.push({
             id: sampleId,
-            materialId: mat.id,
             type: "sample",
             parentId: drawingId,
             x: isLeft ? vx - 250 : vx + dw + 50,
@@ -1099,7 +1591,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
             width: 180,
             height: 180,
             zIndex: baseZ + 50 + idx,
-            remark: `${mat.name}\n${mat.specifications || "标准"}`,
+            ...stampLinkedMaterialFields(mat),
           });
         } else {
           newItems.push({
@@ -1377,33 +1869,20 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
             <div className="flex items-center justify-between px-2">
               <h3 className="text-[10px] font-black uppercase text-gray-400 tracking-widest">从收藏库添加</h3>
               <div className="flex items-center gap-2">
-                <label className="cursor-pointer bg-gray-100 p-1.5 rounded-lg hover:bg-black hover:text-white transition-all shadow-sm" title="添加网络图片/自定义图片">
-                  <input 
-                    type="file" 
-                    accept="image/*" 
-                    className="hidden" 
+                <label
+                  className="cursor-pointer bg-gray-100 p-1.5 rounded-lg hover:bg-black hover:text-white transition-all shadow-sm"
+                  title="上传本地材料（仅加入左侧「本地材料」列表）"
+                >
+                  <input
+                    ref={sidebarLocalUploadRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
                     onChange={async (e) => {
                       const file = e.target.files?.[0];
-                      if (file) {
-                        try {
-                          const compressed = await compressFileToDataUrl(
-                            file,
-                            MOODBOARD_IMAGE_MAX_WIDTH,
-                            MOODBOARD_IMAGE_QUALITY
-                          );
-                          const newItem: MoodBoardItem = {
-                            id: `custom_${Date.now()}`,
-                            type: 'material',
-                            imageUrl: compressed,
-                            x: 200, y: 200, width: 200, height: 200,
-                            zIndex: activeBoard.items.length + 1,
-                            remark: '自定义材质'
-                          };
-                          updateBoardItems([...activeBoard.items, newItem]);
-                        } catch {
-                          alert('图片处理失败，请换一张较小的图片重试');
-                        }
-                      }
+                      e.target.value = "";
+                      if (!file) return;
+                      await registerLocalMaterialFromSidebar(file);
                     }}
                   />
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1429,13 +1908,61 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                   {cat.split(' ')[1] || cat}
                 </button>
               ))}
+              <button
+                type="button"
+                onClick={() => setSelectedCategory("LOCAL")}
+                className={`px-2 py-1 rounded-md text-[9px] font-bold transition-all ${selectedCategory === "LOCAL" ? 'bg-black text-white' : 'bg-gray-100 text-gray-400 hover:bg-gray-200'}`}
+              >
+                本地材料
+              </button>
             </div>
 
-                {/* Check if already in moodboard */}
-                {(() => {
-                  const itemsWithThisCategory = savedMaterials.filter(m => selectedCategory === 'ALL' || m.category === selectedCategory);
-                  // Use a Set to avoid duplicate categories in UI filtering logic if any
-                  const uniqueCategories = Array.from(new Set(savedMaterials.map(m => m.category)));
+                {selectedCategory === "LOCAL" ? (
+                  <div className="space-y-4">
+                    {localMaterialsList.length === 0 ? (
+                      <div className="p-8 text-center">
+                        <p className="text-[10px] text-gray-400 font-bold">暂无本地材料</p>
+                        <p className="text-[9px] text-gray-300 mt-1">点击右上角上传或画布右键「上传本地材料」</p>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 gap-2">
+                        {localMaterialsList.map((loc) => (
+                          <div
+                            key={loc.id}
+                            draggable
+                            onDragStart={(e) => {
+                              e.dataTransfer.setData(DRAG_LOCAL_MATERIAL_MIME, loc.id);
+                              e.dataTransfer.effectAllowed = "copy";
+                            }}
+                            onClick={() => addLocalMaterialCardFromCatalog(loc.id)}
+                            className="flex items-center gap-3 p-2 rounded-xl hover:bg-gray-50 border border-amber-100/80 bg-amber-50/30 cursor-pointer group transition-all active:scale-95"
+                          >
+                            <div className="w-12 h-12 rounded-lg overflow-hidden shrink-0 bg-gray-100 ring-1 ring-black/5">
+                              <img src={loc.imageUrl} alt="" className="w-full h-full object-cover" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-[11px] font-black truncate text-black">
+                                {loc.name || LOCAL_MATERIAL_NAME_PLACEHOLDER}
+                              </p>
+                              <p className="text-[9px] text-amber-700/80 font-bold">
+                                规格: {loc.spec || LOCAL_TEMP_DEFAULT_SPEC}
+                              </p>
+                            </div>
+                            <div className="bg-black text-white p-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity">
+                              <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 4v16m8-8H4" />
+                              </svg>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                (() => {
+                  const itemsWithThisCategory = savedMaterials.filter(
+                    (m) => selectedCategory === "ALL" || m.category === selectedCategory
+                  );
                   
                   return (
                     <div className="space-y-4">
@@ -1475,7 +2002,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                       )}
                     </div>
                   );
-                })()}
+                })()
+                )}
               </div>
             </div>
           </div>
@@ -1629,11 +2157,55 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               }
             }
           }}
+          onContextMenu={(e) => {
+            if (isFinalMode || isExporting || isAIModalOpen) return;
+            const t = e.target as HTMLElement;
+            if (t.closest("[data-moodboard-card]")) return;
+            e.preventDefault();
+            const p = clientToBoard(e.clientX, e.clientY);
+            setCanvasContextMenu({
+              clientX: e.clientX,
+              clientY: e.clientY,
+              boardX: p.x,
+              boardY: p.y,
+            });
+          }}
           onMouseMove={handleMoveAction}
           onMouseUp={handlePointerUp}
           onTouchMove={handleMoveAction}
           onTouchEnd={handlePointerUp}
         >
+          <input
+            ref={canvasLocalUploadRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              const menu = canvasContextMenu;
+              e.target.value = "";
+              setCanvasContextMenu(null);
+              if (!file || !menu) return;
+              await insertLocalCanvasMaterial(file, menu.boardX, menu.boardY);
+            }}
+          />
+          {canvasContextMenu && (
+            <div
+              className="fixed z-[300] min-w-[168px] rounded-xl border border-gray-100 bg-white py-1 shadow-2xl"
+              style={{ left: canvasContextMenu.clientX, top: canvasContextMenu.clientY }}
+              onClick={(e) => e.stopPropagation()}
+              onContextMenu={(e) => e.preventDefault()}
+            >
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-xs font-bold text-black hover:bg-gray-50"
+                onClick={() => canvasLocalUploadRef.current?.click()}
+              >
+                <span className="text-base leading-none">+</span>
+                上传本地材料
+              </button>
+            </div>
+          )}
           <div
             className="relative shrink-0"
             style={{
@@ -1650,6 +2222,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                 transform: `scale(${canvasZoom})`,
                 transformOrigin: '0 0',
               }}
+              onDragOver={!isFinalMode ? handleLibraryMaterialDragOver : undefined}
+              onDrop={!isFinalMode ? handleLibraryMaterialDrop : undefined}
             >
           <div
             data-moodboard-bg-hit
@@ -1661,16 +2235,22 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
             const isDrawing = item.type === 'drawing';
             const isMarker = item.type === 'marker';
             const isSample = item.type === 'sample' || item.type === 'material';
-            const isCollected = !!(item.materialId && savedIds.includes(item.materialId));
+            const localCatalogEntry = item.localMaterialId
+              ? localMaterialsList.find((l) => l.id === item.localMaterialId)
+              : null;
+            const display = isSample ? getCardDisplay(item, mat, localCatalogEntry) : null;
             
             return (
               <div 
-                key={item.id} 
-                className={`absolute group ${isMarker ? 'hover:scale-125' : ''} ${(isAIModalOpen || (isMarker && editingLabelId)) ? 'hidden' : ''}`}
+                key={item.id}
+                data-moodboard-card={isSample || isDrawing ? true : undefined}
+                data-moodboard-card-id={isSample ? item.id : undefined}
+                className={`absolute group ${isMarker ? 'hover:scale-125' : ''} ${(isAIModalOpen || (isMarker && editingTitleId)) ? 'hidden' : ''}`}
                 style={{ 
                   left: item.x, 
                   top: item.y, 
-                  width: item.width, 
+                  width: item.width,
+                  height: isMarker ? undefined : item.height,
                   zIndex: isMarker ? 3000 : item.zIndex,
                   pointerEvents: isFinalMode ? "none" : "auto",
                   cursor: isFinalMode
@@ -1683,8 +2263,22 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                           ? 'move'
                           : 'move',
                 }}
-                onDragOver={item.type === 'sample' && !isFinalMode ? handleSampleDragOver : undefined}
-                onDrop={item.type === 'sample' && !isFinalMode ? (e) => handleSampleDrop(e, item.id) : undefined}
+                onDragOver={isSample && !isFinalMode ? handleLibraryMaterialDragOver : undefined}
+                onDrop={
+                  isSample && !isFinalMode
+                    ? (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const localId = readDraggedLocalMaterialId(e);
+                        if (localId) {
+                          applyLocalMaterialToSample(item.id, localId);
+                          return;
+                        }
+                        const libraryId = readDraggedLibraryMaterialId(e);
+                        if (libraryId) assignMaterialToSample(item.id, libraryId);
+                      }
+                    : undefined
+                }
               >
                 <div 
                   onMouseDown={(e) => {
@@ -1700,8 +2294,24 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                   className={`relative ${isDrawing ? "cursor-move" : ""}`}
                 >
                   {isMarker ? (
-                    <div className="w-5 h-5 bg-black border-2 border-white rounded-full shadow-2xl flex items-center justify-center cursor-move transition-transform active:scale-90 ring-4 ring-white/20">
-                      <div className="w-1.5 h-1.5 bg-white rounded-full" />
+                    <div className="relative group/marker flex items-center justify-center">
+                      <div className="w-5 h-5 bg-black border-2 border-white rounded-full shadow-2xl flex items-center justify-center cursor-move transition-transform active:scale-90 ring-4 ring-white/20">
+                        <div className="w-1.5 h-1.5 bg-white rounded-full" />
+                      </div>
+                      {!isFinalMode && (
+                        <button
+                          type="button"
+                          title="删除标注点及连线"
+                          className="absolute -top-2 -right-2 z-[80] w-4 h-4 rounded-full bg-red-500 text-white text-[10px] font-black leading-none shadow-md opacity-0 group-hover/marker:opacity-100 hover:bg-red-600 transition-opacity flex items-center justify-center"
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeMarkerOnly(item.id);
+                          }}
+                        >
+                          ×
+                        </button>
+                      )}
                     </div>
                   ) : (
                     <>
@@ -1747,13 +2357,30 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                             ]);
                           }}
                         />
-                      ) : mat || item.imageUrl ? (
-                        <div className="relative w-full">
+                      ) : (display?.imageUrl ?? item.imageUrl ?? localCatalogEntry?.imageUrl ?? mat?.image) ? (
+                        <div className="relative w-full overflow-hidden rounded-2xl" style={{ height: isSample ? item.height : undefined }}>
                           <img
-                            src={mat?.image || item.imageUrl}
+                            src={
+                              display?.imageUrl ??
+                              item.imageUrl ??
+                              localCatalogEntry?.imageUrl ??
+                              mat?.image
+                            }
                             alt=""
-                            className={`w-full h-auto rounded-2xl shadow-xl cursor-move pointer-events-none select-none transition-all ${isSample ? "border-4 border-white ring-1 ring-black/5" : ""}`}
+                            className={`w-full h-full object-cover rounded-2xl shadow-xl cursor-move pointer-events-none select-none transition-all ${isSample ? "border-4 border-white ring-1 ring-black/5" : ""}`}
                           />
+                          {isSample && display?.showUpdateDot && !isExporting && (
+                            <button
+                              type="button"
+                              title="材料信息已变更，是否更新？"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                applyLibraryRefreshToCard(item.id);
+                              }}
+                              className="absolute top-2 right-2 z-[60] w-3 h-3 rounded-full bg-red-500 ring-2 ring-white shadow-md hover:scale-110 transition-transform moodboard-update-dot"
+                              aria-label="材料信息已变更，点击更新"
+                            />
+                          )}
                           {item.type === "sample" && !isFinalMode && (
                             <div
                               className="pointer-events-none absolute inset-[4px] rounded-xl border-2 border-dashed border-black/25 z-[5]"
@@ -1769,62 +2396,167 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                         </div>
                       )}
                       
-                      {/* Vertical Side Label for Specs - Repositioned to Right */}
-                      {isSample && mat && (
-                        <div className="absolute left-[calc(100%+8px)] top-0 flex flex-col items-start min-w-[120px] max-w-[min(220px,70vw)] pointer-events-none [writing-mode:horizontal-tb]">
-                          <div className="bg-white/90 backdrop-blur-sm border-l-2 border-black pl-3 py-2 shadow-sm rounded-r-lg">
-                            <p className="text-[11px] font-black text-black leading-tight mb-1 break-words">
-                              {mat.name}
+                      {/* 右侧规格条（可双击编辑，与全局库解耦） */}
+                      {isSample && display && (
+                        <div className="absolute left-[calc(100%+8px)] top-0 flex flex-col items-start min-w-[120px] max-w-[min(220px,70vw)] [writing-mode:horizontal-tb] z-[40]">
+                          <div
+                            className={`bg-white/55 backdrop-blur-md border-l-2 pl-3 py-2 shadow-sm rounded-r-lg pointer-events-auto ${
+                              editingSpecId === item.id ? "border-blue-500 ring-1 ring-blue-400/30" : "border-black/70"
+                            }`}
+                          >
+                            <p className="text-[11px] font-black text-black leading-tight mb-1 break-words pointer-events-none">
+                              {display.name}
                             </p>
-                            <p className="text-[9px] font-bold text-gray-500 leading-tight opacity-80">
-                              规格: {mat.specifications || '标准'}
-                            </p>
-                            <p className="text-[8px] font-bold text-gray-400 mt-1 uppercase tracking-tighter">
-                              REF: {mat.id.slice(-6).toUpperCase()}
-                            </p>
-                          </div>
-                        </div>
-                      )}
-                      {isSample && !mat && (
-                        <div className="absolute left-[calc(100%+8px)] top-0 flex flex-col items-start min-w-[100px] max-w-[min(200px,70vw)] pointer-events-none [writing-mode:horizontal-tb]">
-                          <div className="bg-white/90 backdrop-blur-sm border-l-2 border-dashed border-gray-400 pl-3 py-2 shadow-sm rounded-r-lg">
-                            <p className="text-[10px] font-bold text-gray-500 whitespace-pre-wrap break-words">{item.remark}</p>
+                            {editingSpecId === item.id ? (
+                              <input
+                                type="text"
+                                autoFocus
+                                className="w-full text-[9px] font-bold text-gray-700 bg-white/80 rounded px-1 py-0.5 outline-none border border-blue-400"
+                                defaultValue={display.spec}
+                                onBlur={(e) => {
+                                  const spec =
+                                    e.target.value.trim() ||
+                                    (isLocalBoardMaterial(item)
+                                      ? LOCAL_TEMP_DEFAULT_SPEC
+                                      : "—");
+                                  let titleName = item.displayName;
+                                  if (titleName == null || titleName === "") {
+                                    titleName =
+                                      display.name ||
+                                      (isLocalBoardMaterial(item) ? "" : "未命名");
+                                  }
+                                  patchBoardItem(item.id, {
+                                    isEditedByUser: true,
+                                    displaySpec: spec,
+                                    displayName: titleName,
+                                    remark: syncCardRemark(
+                                      titleName || LOCAL_MATERIAL_NAME_PLACEHOLDER,
+                                      spec
+                                    ),
+                                    snapshotImageUrl: isLocalBoardMaterial(item)
+                                      ? item.imageUrl
+                                      : item.snapshotImageUrl ?? item.imageUrl ?? mat?.image,
+                                  });
+                                  if (item.localMaterialId) {
+                                    syncLocalCatalogFromCard(item.localMaterialId, titleName, spec);
+                                  }
+                                  setEditingSpecId(null);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                  if (e.key === "Escape") setEditingSpecId(null);
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                onMouseDown={(e) => e.stopPropagation()}
+                              />
+                            ) : (
+                              <p
+                                className="text-[9px] font-bold text-gray-600 leading-tight cursor-text hover:text-black"
+                                onDoubleClick={(e) => {
+                                  e.stopPropagation();
+                                  if (isFinalMode) return;
+                                  if (
+                                    !isLocalBoardMaterial(item) &&
+                                    !item.specEditWarningAcked &&
+                                    !item.isEditedByUser
+                                  ) {
+                                    setSpecEditModalItemId(item.id);
+                                    return;
+                                  }
+                                  setEditingSpecId(item.id);
+                                }}
+                              >
+                                规格: {display.spec}
+                              </p>
+                            )}
+                            {mat && !isLocalBoardMaterial(item) && (
+                              <p className="text-[8px] font-bold text-gray-400 mt-1 uppercase tracking-tighter pointer-events-none">
+                                REF: {mat.id.slice(-6).toUpperCase()}
+                              </p>
+                            )}
                           </div>
                         </div>
                       )}
 
                       <div 
-                        className={`absolute -bottom-14 left-1/2 -translate-x-1/2 w-full z-[100]`}
+                        className={`absolute -bottom-10 left-1/2 -translate-x-1/2 w-[92%] max-w-[240px] z-[100]`}
                       >
                         <div 
                           onDoubleClick={(e) => {
                             e.stopPropagation();
-                            if (!isFinalMode) setEditingLabelId(item.id);
+                            if (!isFinalMode && isSample) setEditingTitleId(item.id);
+                            if (!isFinalMode && isDrawing) setEditingTitleId(item.id);
                           }}
-                          className={`bg-white/95 backdrop-blur-md border rounded-2xl px-5 py-4 shadow-2xl flex flex-col items-center gap-1.5 group/label transition-all ${editingLabelId === item.id ? 'border-blue-500 ring-2 ring-blue-500/20' : 'border-gray-100 hover:border-black'}`}
+                          className={`bg-white/45 backdrop-blur-md border rounded-xl px-3 py-2 shadow-lg flex flex-col items-center gap-1 group/label transition-all ${editingTitleId === item.id ? 'border-blue-500/80 ring-1 ring-blue-500/25' : 'border-white/60 hover:border-black/20'}`}
                         >
-                          {editingLabelId === item.id ? (
+                          {editingTitleId === item.id ? (
                             <input 
                               type="text"
                               autoFocus
-                              value={item.remark || ''}
-                              onBlur={() => setEditingLabelId(null)}
+                              defaultValue={
+                                isSample && display
+                                  ? display.name || (isLocalBoardMaterial(item) ? "" : display.name)
+                                  : (item.remark || "").split("\n")[0]
+                              }
+                              placeholder={isLocalBoardMaterial(item) ? LOCAL_MATERIAL_NAME_PLACEHOLDER : undefined}
+                              onBlur={(e) => {
+                                const raw = e.target.value.trim();
+                                if (isSample && display) {
+                                  const spec =
+                                    item.displaySpec ??
+                                    display.spec ??
+                                    LOCAL_TEMP_DEFAULT_SPEC;
+                                  const name = isLocalBoardMaterial(item)
+                                    ? raw
+                                    : raw || "未命名";
+                                  patchBoardItem(item.id, {
+                                    isEditedByUser: true,
+                                    displayName: name,
+                                    displaySpec: spec,
+                                    remark: syncCardRemark(
+                                      name || LOCAL_MATERIAL_NAME_PLACEHOLDER,
+                                      spec
+                                    ),
+                                    snapshotImageUrl: isLocalBoardMaterial(item)
+                                      ? item.imageUrl
+                                      : item.snapshotImageUrl ??
+                                        item.imageUrl ??
+                                        mat?.image,
+                                  });
+                                  if (item.localMaterialId) {
+                                    syncLocalCatalogFromCard(item.localMaterialId, name, spec);
+                                  }
+                                } else {
+                                  patchBoardItem(item.id, { remark: raw || "未命名" });
+                                }
+                                setEditingTitleId(null);
+                              }}
                               onKeyDown={(e) => {
-                                if (e.key === 'Enter') setEditingLabelId(null);
+                                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                                if (e.key === 'Escape') setEditingTitleId(null);
                               }}
-                              onChange={(e) => {
-                                updateBoardItems(activeBoard.items.map(i => i.id === item.id ? { ...i, remark: e.target.value } : i));
-                              }}
-                              className={`w-full bg-transparent text-center outline-none transition-all ${isDrawing ? 'text-[10px] font-black text-gray-400 uppercase tracking-widest' : 'text-[13px] font-black text-black'}`}
+                              onClick={(e) => e.stopPropagation()}
+                              onMouseDown={(e) => e.stopPropagation()}
+                              className={`w-full bg-transparent text-center outline-none transition-all ${isDrawing ? 'text-[10px] font-black text-gray-500 uppercase tracking-widest' : 'text-[12px] font-black text-black'}`}
                             />
                           ) : (
-                            <div className={`w-full text-center select-none cursor-text uppercase whitespace-pre-wrap ${isDrawing ? 'text-[10px] font-black text-gray-400 tracking-widest' : 'text-[13px] font-black text-black tracking-tight'}`}>
-                              {item.remark}
+                            <div className={`w-full text-center select-none cursor-text whitespace-pre-wrap ${isDrawing ? 'text-[10px] font-black text-gray-500 tracking-widest' : 'text-[12px] font-black tracking-tight'}`}>
+                              {isSample && display ? (
+                                display.name ? (
+                                  <span className="text-black">{display.name}</span>
+                                ) : isLocalBoardMaterial(item) ? (
+                                  <span className="text-gray-400/85 italic font-medium">{LOCAL_MATERIAL_NAME_PLACEHOLDER}</span>
+                                ) : (
+                                  <span className="text-black">{display.name}</span>
+                                )
+                              ) : (
+                                item.remark
+                              )}
                             </div>
                           )}
                           
                           {/* Connection Handle - ONLY MOVE LOGIC HERE */}
-                          {!isFinalMode && editingLabelId !== item.id && (
+                          {!isFinalMode && editingTitleId !== item.id && (
                             <div 
                               onMouseDown={(e) => {
                                 e.stopPropagation();
@@ -1845,139 +2577,44 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                   )}
                 </div>
                 
-                {/* Controls */}
-                <div className="absolute -top-10 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-white/90 backdrop-blur shadow-xl rounded-full px-2 py-1 opacity-0 group-hover:opacity-100 transition-opacity z-50">
-                  <button onClick={() => changeOrder(item.id, 'up')} className="p-1.5 hover:bg-gray-100 rounded-full text-black">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                {/* 悬停控制：层级 ↑↓ + 删除 */}
+                {!isMarker && (
+                <div className="absolute -top-9 left-1/2 -translate-x-1/2 flex items-center gap-0.5 bg-white/90 backdrop-blur shadow-lg rounded-full px-1.5 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity z-50">
+                  <button type="button" onClick={() => changeOrder(item.id, 'up')} className="p-1 hover:bg-gray-100 rounded-full text-black" title="上移一层">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 15l7-7 7 7" />
                     </svg>
                   </button>
-                  <button onClick={() => changeOrder(item.id, 'down')} className="p-1.5 hover:bg-gray-100 rounded-full text-black">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <button type="button" onClick={() => changeOrder(item.id, 'down')} className="p-1 hover:bg-gray-100 rounded-full text-black" title="下移一层">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 9l-7 7-7-7" />
                     </svg>
                   </button>
-                  <div className="w-px h-3 bg-gray-200 mx-1" />
-                  {item.type === "sample" && (
-                    <div
-                      className="p-1.5 text-gray-500"
-                      title="从左侧收藏拖材质到卡片上的虚线框内，可更换或指定材料"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
-                      </svg>
-                    </div>
-                  )}
-                  {(item.type === "material" || item.type === "sample") &&
-                    onSaveMaterial &&
-                    item.materialId && (
-                      <div className="relative">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setCanvasBookmarkMenuForId((id) => (id === item.id ? null : item.id));
-                          }}
-                          className={`p-1.5 rounded-full transition-all ${
-                            isCollected
-                              ? "bg-red-500 text-white shadow-sm ring-1 ring-red-400/80"
-                              : "hover:bg-gray-100 text-black"
-                          }`}
-                          title="收藏 / 存入情绪板"
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill={isCollected ? "currentColor" : "none"} viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
-                          </svg>
-                        </button>
-                        {canvasBookmarkMenuForId === item.id && (
-                          <div
-                            className="absolute left-1/2 top-full z-[220] mt-1 w-52 -translate-x-1/2 rounded-2xl border border-gray-100 bg-white py-1 shadow-2xl"
-                            onMouseDown={(e) => e.stopPropagation()}
-                          >
-                            <div className="border-b border-gray-50 px-3 py-2">
-                              <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">存入情绪板</p>
-                            </div>
-                            <div className="max-h-40 overflow-y-auto">
-                              {moodboards.map((mb) => (
-                                <button
-                                  key={mb.id}
-                                  type="button"
-                                  className="flex w-full items-center justify-between px-4 py-2.5 text-left text-xs font-bold hover:bg-gray-50"
-                                  onClick={() => {
-                                    onSaveMaterial(item.materialId!, mb.id);
-                                    setCanvasBookmarkMenuForId(null);
-                                  }}
-                                >
-                                  <span className="truncate">{mb.name}</span>
-                                  <span className="opacity-60">+</span>
-                                </button>
-                              ))}
-                            </div>
-                            {creatingBoardForMaterialId === item.id ? (
-                              <div className="flex gap-2 border-t border-gray-100 px-3 py-2">
-                                <input
-                                  autoFocus
-                                  className="flex-1 rounded border px-2 py-1 text-[10px] font-bold outline-none"
-                                  placeholder="新情绪板名称"
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") {
-                                      const name = (e.target as HTMLInputElement).value.trim();
-                                      if (name) {
-                                        onSaveMaterial(item.materialId!, undefined, name);
-                                        setCreatingBoardForMaterialId(null);
-                                        setCanvasBookmarkMenuForId(null);
-                                      }
-                                    }
-                                  }}
-                                />
-                                <button
-                                  type="button"
-                                  className="text-[10px] font-bold text-gray-400"
-                                  onClick={() => setCreatingBoardForMaterialId(null)}
-                                >
-                                  取消
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                type="button"
-                                className="w-full border-t border-gray-100 px-4 py-2.5 text-left text-[10px] font-black uppercase tracking-widest hover:bg-gray-50"
-                                onClick={() => setCreatingBoardForMaterialId(item.id)}
-                              >
-                                + 新建情绪板
-                              </button>
-                            )}
-                            {isCollected && onUnsaveMaterial && (
-                              <button
-                                type="button"
-                                className="w-full border-t border-gray-200 px-4 py-3 text-left text-xs font-bold text-red-500 hover:bg-red-50"
-                                onClick={() => removeMaterialCardAndUnsave(item)}
-                              >
-                                取消收藏
-                              </button>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
+                  <div className="w-px h-2.5 bg-gray-200 mx-0.5" />
                   <button 
                     type="button"
                     onClick={() => removeBoardItemCascade(item.id)}
-                    className="p-1.5 hover:bg-red-50 text-red-500 rounded-full"
+                    className="p-1 hover:bg-red-50 text-red-500 rounded-full"
+                    title="从画布移除"
                   >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
                     </svg>
                   </button>
                 </div>
+                )}
 
                 {!isMarker && (
                   <div 
-                    onMouseDown={(e) => handleStartAction(e, item.id, 'resize')}
-                    onTouchStart={(e) => handleStartAction(e, item.id, 'resize')}
-                    className="absolute bottom-0 right-0 w-8 h-8 bg-black text-white rounded-tl-2xl rounded-br-lg flex items-center justify-center cursor-nwse-resize opacity-0 group-hover:opacity-100 transition-opacity z-50"
+                    onMouseDown={(e) => { e.stopPropagation(); handleStartAction(e, item.id, 'resize'); }}
+                    onTouchStart={(e) => { e.stopPropagation(); handleStartAction(e, item.id, 'resize'); }}
+                    className="absolute bottom-1 right-1 w-4 h-4 rounded-md bg-white/90 border border-black/15 shadow-sm flex items-end justify-end cursor-nwse-resize opacity-0 group-hover:opacity-100 transition-opacity z-50"
+                    title="拖拽缩放"
                   >
-                    <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" /></svg>
+                    <svg className="w-2.5 h-2.5 text-black/45" viewBox="0 0 10 10" aria-hidden>
+                      <path d="M9 1v8H1" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                      <path d="M9 5v4H5" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                    </svg>
                   </div>
                 )}
               </div>
@@ -1985,7 +2622,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
           })}
 
           {/* SVG Overlay for Lines (Placed AFTER items) */}
-          {!isAIModalOpen && !isPreviewingCapturedImage && !editingLabelId && (
+          {!isAIModalOpen && !isPreviewingCapturedImage && !editingTitleId && !editingSpecId && (
             <svg className="absolute inset-0 w-full h-full pointer-events-none z-[5000] overflow-visible text-black">
               {activeBoard.items.filter(i => i.type === 'marker' && i.targetId).map(marker => {
                 const sample = activeBoard.items.find(s => s.id === marker.targetId);
@@ -2339,6 +2976,45 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
                 确认并保存 JPG
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 规格编辑二次确认 */}
+      {specEditModalItemId && (
+        <div
+          className="fixed inset-0 z-[8500] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+          onClick={() => setSpecEditModalItemId(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-sm font-black text-amber-600 mb-2">⚠️ 提示</p>
+            <p className="text-sm text-gray-700 leading-relaxed mb-6">
+              一旦修改参数，材料库规格/库存更新时就无法自动更新了。是否确认修改？
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                className="px-5 py-2 rounded-full text-xs font-bold border border-gray-200 hover:bg-gray-50"
+                onClick={() => setSpecEditModalItemId(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="px-5 py-2 rounded-full text-xs font-bold bg-black text-white hover:bg-gray-800"
+                onClick={() => {
+                  const id = specEditModalItemId;
+                  patchBoardItem(id, { specEditWarningAcked: true });
+                  setSpecEditModalItemId(null);
+                  setEditingSpecId(id);
+                }}
+              >
+                确认修改
               </button>
             </div>
           </div>

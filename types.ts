@@ -138,9 +138,29 @@ export interface Notification {
   type: 'SYSTEM' | 'AUDIT' | 'INQUIRY';
 }
 
+/**
+ * 设计师私有「本地临时材料」（仅存 localStorage，不入探索库 / ST·MT 分类）
+ * 右键上传与左侧「本地材料」列表、拖入画布共用此结构。
+ */
+export interface LocalTemporaryMaterial {
+  id: string;
+  designerId: string;
+  name: string;
+  spec: string;
+  imageUrl: string;
+  createdAt: number;
+  isLocalStorageMaterial: true;
+  isEditedByUser: true;
+}
+
+/** @deprecated 使用 LocalTemporaryMaterial */
+export type LocalDesignerMaterial = LocalTemporaryMaterial;
+
 export interface MoodBoardItem {
   id: string;
   materialId?: string;
+  /** 关联左侧「本地材料」目录条目 */
+  localMaterialId?: string;
   imageUrl?: string;
   type?: 'material' | 'drawing' | 'marker' | 'sample';
   parentId?: string;
@@ -153,6 +173,22 @@ export interface MoodBoardItem {
   height: number;
   zIndex: number;
   remark?: string;
+  /** 情绪板内展示名（用户编辑后与全局库解耦） */
+  displayName?: string;
+  /** 情绪板内规格文案（用户编辑后与全局库解耦） */
+  displaySpec?: string;
+  /** 锁定展示图：本地临时材料或用户编辑后快照 */
+  snapshotImageUrl?: string;
+  /** 用户已改过名称或规格，不再随材料库自动更新 */
+  isEditedByUser?: boolean;
+  /** 关联材料库时的内容指纹，用于「库内已更新」红点 */
+  libraryRevisionHash?: string;
+  /** 仅存在于当前情绪板的本地图片（右键上传），不入全局收藏库 */
+  isLocalOnly?: boolean;
+  /** 与 isLocalOnly 同义；右键「上传本地材料」写入为 true */
+  isLocalStorageMaterial?: boolean;
+  /** 用户已确认「改规格后与库断开」提示（每卡一次） */
+  specEditWarningAcked?: boolean;
 }
 
 export interface MoodBoard {
