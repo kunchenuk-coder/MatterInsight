@@ -23,4 +23,8 @@ dist-ssr
 *.sln
 *.sw?
 .vercel
-.env*
+
+# Secrets — never commit API keys
+.env
+.env.local
+.env.*

@@ -2,6 +2,8 @@
 import React, { useState } from 'react';
 import { User, Category, PendingMaterial, Material, Inquiry, SampleRequest, MaterialStatus, AuditLog, MaterialVariant } from '../types';
 import { CATEGORIES } from '../constants';
+import MaterialVoiceFillButton from './MaterialVoiceFillButton';
+import PublishMaterialMobilePanel from './PublishMaterialMobilePanel';
 
 const COMMON_COLORS = [
   { name: '白色', code: '#FFFFFF' },
@@ -689,9 +691,9 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
         </div>
       )}
 
-      {/* Publishing Modal */}
+      {/* Publishing Modal — Desktop（md 及以上保持原样） */}
       {isPublishing && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-[100] flex items-center justify-center p-4">
+        <div className="hidden md:flex fixed inset-0 bg-black/60 backdrop-blur-md z-[100] items-center justify-center p-4">
           <div className="bg-white w-full max-w-4xl max-h-[90vh] overflow-y-auto p-10 rounded-[40px] shadow-2xl custom-scrollbar">
             <div className="flex justify-between items-center mb-10">
               <h2 className="text-3xl font-bold">发布新材料</h2>
@@ -825,15 +827,35 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                   </div>
                   <p className="text-[10px] text-gray-400 mt-2 font-medium">提示: 真实的高质量项目照片能获得更高的审核评分和推荐位</p>
                 </div>
+              </div>
 
-                <div className="pt-6">
-                  <button type="submit" className="w-full bg-black text-white py-5 rounded-[20px] font-black text-lg shadow-2xl shadow-black/20 hover:scale-[1.02] active:scale-[0.98] transition-all">
-                    提交并进入审核
-                  </button>
-                </div>
+              <div className="md:col-span-2 flex flex-col-reverse sm:flex-row sm:items-stretch sm:justify-between gap-4 pt-8 mt-2 border-t border-gray-100">
+                <MaterialVoiceFillButton setFormData={setFormData} disabled={isProcessing} />
+                <button
+                  type="submit"
+                  disabled={isProcessing}
+                  className="w-full sm:flex-1 sm:max-w-md bg-black text-white py-5 rounded-[20px] font-black text-lg shadow-2xl shadow-black/20 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 disabled:pointer-events-none"
+                >
+                  提交并进入审核
+                </button>
               </div>
             </form>
           </div>
+        </div>
+      )}
+
+      {/* Publishing Modal — Mobile（md 以下专属，PC 不渲染） */}
+      {isPublishing && (
+        <div className="md:hidden">
+          <PublishMaterialMobilePanel
+            formData={formData}
+            setFormData={setFormData}
+            isProcessing={isProcessing}
+            uploadProgress={uploadProgress}
+            onClose={() => setIsPublishing(false)}
+            onSubmit={handleSubmit}
+            onFileChange={handleFileChange}
+          />
         </div>
       )}
     </div>

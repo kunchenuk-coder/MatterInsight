@@ -11,6 +11,10 @@ interface ImportMetaEnv {
   readonly VITE_DEEPSEEK_API_KEY?: string;
   /** 例如支持多模态的 DeepSeek 视觉模型名（以官方文档为准） */
   readonly VITE_DEEPSEEK_VISION_MODEL?: string;
+  /** 纯文本对话模型（语音填表等），默认 deepseek-chat */
+  readonly VITE_DEEPSEEK_CHAT_MODEL?: string;
+  /** 纯文本对话模型（语音填表降级），默认 qwen-turbo */
+  readonly VITE_QWEN_CHAT_MODEL?: string;
   /** 每用户免费视觉识别次数上限（本地计数，ADMIN 不限） */
   readonly VITE_VISION_FREE_LIMIT?: string;
   /** 可选：GET 返回 { remaining?: number } 与后端计费对齐 */

@@ -100,8 +100,10 @@ const App: React.FC = () => {
   // Persistence Helpers（配额告警全局仅一次，避免 useEffect 死循环弹窗）
   const quotaAlertShownRef = useRef(false);
 
-  const saveToLocal = (key: string, data: unknown) => {
-    const storageKey = `matter_insight_${key}`;
+  const designerStorageKey = (userId: string, key: string) => `matter_insight_designer_${userId}_${key}`;
+
+  const saveToLocal = (key: string, data: unknown, designerUserId?: string) => {
+    const storageKey = designerUserId ? designerStorageKey(designerUserId, key) : `matter_insight_${key}`;
     const write = (payload: unknown) => {
       localStorage.setItem(storageKey, JSON.stringify(payload));
     };
@@ -147,9 +149,11 @@ const App: React.FC = () => {
     }
   };
 
-  const getFromLocal = (key: string) => {
+  const getFromLocal = (key: string, designerUserId?: string) => {
     try {
-      const saved = localStorage.getItem(`matter_insight_${key}`);
+      const saved = localStorage.getItem(
+        designerUserId ? designerStorageKey(designerUserId, key) : `matter_insight_${key}`
+      );
       return saved ? JSON.parse(saved) : null;
     } catch (e) {
       console.error(`Failed to load ${key} from local storage:`, e);
@@ -181,12 +185,10 @@ const App: React.FC = () => {
   });
   const [inquiries, setInquiries] = useState<Inquiry[]>(() => getFromLocal('inquiries') || []);
   const [sampleRequests, setSampleRequests] = useState<SampleRequest[]>(() => getFromLocal('samples') || []);
-  const [moodboards, setMoodboards] = useState<MoodBoard[]>(() => getFromLocal('moodboards') || [
-    { id: 'mb_1', name: '默认情绪板', items: [], isPaid: false, maxMaterials: 10 }
-  ]);
+  const [moodboards, setMoodboards] = useState<MoodBoard[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>(() => getFromLocal('notifications') || []);
-  const [activeMoodboardId, setActiveMoodboardId] = useState<string>('mb_1');
-  const [savedMaterialIds, setSavedMaterialIds] = useState<string[]>(() => getFromLocal('saved_ids') || []);
+  const [activeMoodboardId, setActiveMoodboardId] = useState<string>('');
+  const [savedMaterialIds, setSavedMaterialIds] = useState<string[]>([]);
   const [verificationRequests, setVerificationRequests] = useState<User[]>(() => getFromLocal('verifications') || []);
   const [verifiedUserIds, setVerifiedUserIds] = useState<string[]>(() => getFromLocal('verified_ids') || []);
   const [isRechargeModalOpen, setIsRechargeModalOpen] = useState(false);
@@ -205,6 +207,12 @@ const App: React.FC = () => {
   }, [savedMaterialIds]);
 
   useEffect(() => {
+    if (user && currentView === 'MOODBOARD' && user.role !== 'DESIGNER') {
+      setCurrentView('HOME');
+    }
+  }, [user, currentView]);
+
+  useEffect(() => {
     // Check for shared material in hash
     const hash = window.location.hash;
     if (hash.startsWith('#/share/')) {
@@ -219,12 +227,14 @@ const App: React.FC = () => {
     saveToLocal('pending', pendingMaterials);
     saveToLocal('inquiries', inquiries);
     saveToLocal('samples', sampleRequests);
-    saveToLocal('moodboards', moodboards);
     saveToLocal('notifications', notifications);
-    saveToLocal('saved_ids', savedMaterialIds);
+    if (user?.role === 'DESIGNER') {
+      saveToLocal('moodboards', moodboards, user.id);
+      saveToLocal('saved_ids', savedMaterialIds, user.id);
+    }
     saveToLocal('verifications', verificationRequests);
     saveToLocal('verified_ids', verifiedUserIds);
-  }, [library, pendingMaterials, inquiries, sampleRequests, moodboards, notifications, savedMaterialIds, verificationRequests, verifiedUserIds]);
+  }, [library, pendingMaterials, inquiries, sampleRequests, moodboards, notifications, savedMaterialIds, verificationRequests, verifiedUserIds, user]);
 
   const addNotification = (userId: string, title: string, content: string, type: Notification['type'] = 'SYSTEM') => {
     const newNotif: Notification = {
@@ -292,16 +302,33 @@ const App: React.FC = () => {
     
     // Check if user should be verified based on persisted list
     const isVerified = baseUser.role === 'ADMIN' || verifiedUserIds.includes(baseUser.id) || baseUser.isVerified;
-    const persistedCollections: string[] = getFromLocal('saved_ids') || [];
-    const finalUser = {
-      ...baseUser,
-      isVerified,
-      transactions: baseUser.transactions || [],
-      collections: persistedCollections,
-    };
-
-    setUser(finalUser);
-    setSavedMaterialIds(persistedCollections);
+    if (baseUser.role === 'DESIGNER') {
+      const persistedCollections: string[] = getFromLocal('saved_ids', baseUser.id) || [];
+      const persistedBoards: MoodBoard[] = getFromLocal('moodboards', baseUser.id) || [
+        { id: `mb_${baseUser.id}_default`, name: '默认情绪板', items: [], isPaid: false, maxMaterials: 10 },
+      ];
+      const finalUser = {
+        ...baseUser,
+        isVerified,
+        transactions: baseUser.transactions || [],
+        collections: persistedCollections,
+      };
+      setUser(finalUser);
+      setSavedMaterialIds(persistedCollections);
+      setMoodboards(persistedBoards);
+      setActiveMoodboardId(persistedBoards[0]?.id ?? '');
+    } else {
+      const finalUser = {
+        ...baseUser,
+        isVerified,
+        transactions: baseUser.transactions || [],
+        collections: [],
+      };
+      setUser(finalUser);
+      setSavedMaterialIds([]);
+      setMoodboards([]);
+      setActiveMoodboardId('');
+    }
     setPoints(userData.points);
     
     if ((userData as any).showWelcomeBonus) {
@@ -324,6 +351,9 @@ const App: React.FC = () => {
         points: 999999,
         isVerified: true
       });
+      setSavedMaterialIds([]);
+      setMoodboards([]);
+      setActiveMoodboardId('');
       setShowAdminLogin(false);
       setAdminPass('');
       setCurrentView('DASHBOARD');
@@ -334,6 +364,7 @@ const App: React.FC = () => {
 
   /** 仅写入「我的收藏」与 user.collections，不创建或修改情绪板 */
   const handleToggleCollect = (matId: string) => {
+    if (user?.role !== 'DESIGNER') return;
     const prev = savedIdsRef.current;
     const removing = prev.includes(matId);
     const next = removing ? prev.filter((id) => id !== matId) : [...prev, matId];
@@ -414,6 +445,7 @@ const App: React.FC = () => {
 
   /** 仅 id：切换收藏；带情绪板参数：仅加入情绪板 */
   const handleSaveMaterial = (matId: string, moodboardId?: string, newMoodboardName?: string) => {
+    if (user?.role !== 'DESIGNER') return;
     if (!moodboardId && !newMoodboardName) {
       handleToggleCollect(matId);
       return;
@@ -583,7 +615,12 @@ const App: React.FC = () => {
           onLogoClick={() => setCurrentView('HOME')} 
           onProfileClick={() => setCurrentView('DASHBOARD')}
           onMoodboardClick={() => setCurrentView('MOODBOARD')}
-          onLogout={() => setUser(null)}
+          onLogout={() => {
+            setUser(null);
+            setSavedMaterialIds([]);
+            setMoodboards([]);
+            setActiveMoodboardId('');
+          }}
           onRechargeClick={() => setIsRechargeModalOpen(true)}
           notifications={totalNotifications}
           searchTerm={searchTerm}
@@ -629,8 +666,8 @@ const App: React.FC = () => {
                   setLibrary(prev => prev.map(mat => mat.id === m.id ? { ...mat, clicks: mat.clicks + 1 } : mat));
                 }}
                 onSave={handleSaveMaterial}
-                savedIds={savedMaterialIds}
-                moodboards={moodboards}
+                savedIds={user.role === 'DESIGNER' ? savedMaterialIds : []}
+                moodboards={user.role === 'DESIGNER' ? moodboards : []}
               />
             </div>
           )}
@@ -648,7 +685,7 @@ const App: React.FC = () => {
             />
           )}
 
-          {currentView === 'MOODBOARD' && (
+          {currentView === 'MOODBOARD' && user.role === 'DESIGNER' && (
             <MoodBoardDesigner 
               user={user}
               points={points}

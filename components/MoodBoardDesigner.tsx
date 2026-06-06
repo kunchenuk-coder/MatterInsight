@@ -841,19 +841,13 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
   /** 删除画布节点并移除指向该节点的引线锚点 */
   const removeBoardItemCascade = (targetId: string) => {
-    setMoodboards((prev) =>
-      prev.map((b) => {
-        if (b.id !== activeMoodboardId) return b;
-        return {
-          ...b,
-          items: b.items.filter((i) => {
-            if (i.id === targetId) return false;
-            if (i.type === "marker" && i.targetId === targetId) return false;
-            return true;
-          }),
-        };
-      })
-    );
+    if (!activeBoard) return;
+    const nextItems = activeBoard.items.filter((i) => {
+      if (i.id === targetId) return false;
+      if (i.type === "marker" && i.targetId === targetId) return false;
+      return true;
+    });
+    updateBoardItems(nextItems);
   };
 
   const patchBoardItem = (itemId: string, patch: Partial<MoodBoardItem>) => {
@@ -1484,6 +1478,73 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   const EFFECT_DRAWING_MAX_H = 560;
   const EFFECT_VIEW_PAD = 64;
 
+  /** 当前可见视口中心 → 画布逻辑坐标（与 clientToBoard 一致） */
+  const getViewportCenterBoardCoords = () => {
+    const host = canvasRef.current;
+    if (!host) {
+      return { x: MOODBOARD_CONTENT_W / 2, y: MOODBOARD_CONTENT_H / 2 };
+    }
+    const rect = host.getBoundingClientRect();
+    return clientToBoard(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  };
+
+  const boundsFromMoodItems = (items: MoodBoardItem[]) => {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const it of items) {
+      const h = it.height ?? (it.type === "marker" ? 16 : 180);
+      minX = Math.min(minX, it.x);
+      minY = Math.min(minY, it.y);
+      maxX = Math.max(maxX, it.x + it.width);
+      maxY = Math.max(maxY, it.y + h);
+    }
+    return { minX, minY, maxX, maxY };
+  };
+
+  /** 智能匹配成功后：平滑滚动（必要时单次缩小）使新节点群落在视口正中 */
+  const smoothFocusBoardBounds = (bounds: {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  }) => {
+    const host = canvasRef.current;
+    if (!host) return;
+
+    const pad = 56;
+    const cx = (bounds.minX + bounds.maxX) / 2;
+    const cy = (bounds.minY + bounds.maxY) / 2;
+    const bw = Math.max(1, bounds.maxX - bounds.minX + pad * 2);
+    const bh = Math.max(1, bounds.maxY - bounds.minY + pad * 2);
+    const vw = host.clientWidth;
+    const vh = host.clientHeight;
+
+    const runScroll = (z: number) => {
+      const wrapperW = MOODBOARD_CONTENT_W * z;
+      const wrapperH = MOODBOARD_CONTENT_H * z;
+      const sl = Math.max(0, Math.min(Math.max(0, wrapperW - vw), cx * z - vw / 2));
+      const st = Math.max(0, Math.min(Math.max(0, wrapperH - vh), cy * z - vh / 2));
+      host.scrollTo({ left: sl, top: st, behavior: "smooth" });
+    };
+
+    let z = canvasZoomRef.current || 1;
+    if (bw * z > vw * 0.92 || bh * z > vh * 0.92) {
+      const fitZ = Math.min(
+        MOODBOARD_ZOOM_MAX,
+        Math.max(MOODBOARD_ZOOM_MIN, Math.min(vw / bw, vh / bh) * 0.88)
+      );
+      if (fitZ < z - 0.02) {
+        setCanvasZoom(Math.round(fitZ * 10000) / 10000);
+        z = fitZ;
+        window.setTimeout(() => runScroll(z), 90);
+        return;
+      }
+    }
+    requestAnimationFrame(() => requestAnimationFrame(() => runScroll(z)));
+  };
+
   /** 仅中央导入效果图（AI 失败或手动跳过），可缩放、可标点、可引线连材质 */
   const placeEffectImageOnly = (effectImageDataUrl: string, remark = "空间效果图") => {
     void (async () => {
@@ -1529,17 +1590,11 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         EFFECT_DRAWING_MAX_W,
         EFFECT_DRAWING_MAX_H
       );
-      setMoodboards((prev) => {
-      const board = prev.find((b) => b.id === activeMoodboardId) ?? prev[0];
-      if (!board) return prev;
-
-      const container = canvasRef.current;
-      const sl = container?.scrollLeft ?? 0;
-      const st = container?.scrollTop ?? 0;
-      const z = canvasZoomRef.current || 1;
-      const vx = (sl + EFFECT_VIEW_PAD) / z;
-      const vy = (st + EFFECT_VIEW_PAD) / z;
-      const baseZ = board.items.length;
+      const currentBoard = moodboards.find((b) => b.id === activeMoodboardId) ?? moodboards[0];
+      const baseZ = currentBoard?.items.length ?? 0;
+      const { x: centerX, y: centerY } = getViewportCenterBoardCoords();
+      const vx = Math.max(0, Math.min(MOODBOARD_CONTENT_W - dw, centerX - dw / 2));
+      const vy = Math.max(0, Math.min(MOODBOARD_CONTENT_H - dh, centerY - dh / 2));
 
       const drawingId = `drawing_${Date.now()}`;
       const mainDrawing: MoodBoardItem = {
@@ -1608,10 +1663,19 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         }
       });
 
-      return prev.map((b) =>
-        b.id === board.id ? { ...b, items: [...b.items, ...newItems] } : b
-      );
-    });
+      const focusBounds = boundsFromMoodItems(newItems);
+
+      setMoodboards((prev) => {
+        const board = prev.find((b) => b.id === activeMoodboardId) ?? prev[0];
+        if (!board) return prev;
+        return prev.map((b) =>
+          b.id === board.id ? { ...b, items: [...b.items, ...newItems] } : b
+        );
+      });
+
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => smoothFocusBoardBounds(focusBounds));
+      });
     })();
   };
 
@@ -2593,12 +2657,18 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                   <div className="w-px h-2.5 bg-gray-200 mx-0.5" />
                   <button 
                     type="button"
-                    onClick={() => removeBoardItemCascade(item.id)}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onTouchStart={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      removeBoardItemCascade(item.id);
+                    }}
                     className="p-1 hover:bg-red-50 text-red-500 rounded-full"
                     title="从画布移除"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                     </svg>
                   </button>
                 </div>
