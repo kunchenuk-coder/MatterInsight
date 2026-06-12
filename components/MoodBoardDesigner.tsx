@@ -213,8 +213,86 @@ function getCardDisplay(
 /** 画布逻辑坐标系（与内层 scale 配套）；外层滚动尺寸为 base × zoom */
 const MOODBOARD_CONTENT_W = 2000;
 const MOODBOARD_CONTENT_H = 1400;
+
+const isMobileViewport = () =>
+  typeof window !== "undefined" && window.matchMedia("(max-width: 768px)").matches;
+
+/** 统一鼠标/触摸指针坐标：触摸优先 touches[0]，否则回退 clientX/Y */
+function getPointerClientXY(
+  e: MouseEvent | TouchEvent | React.MouseEvent | React.TouchEvent
+): { clientX: number; clientY: number } | null {
+  if ("touches" in e && e.touches.length > 0) {
+    const t = e.touches[0];
+    return t ? { clientX: t.clientX, clientY: t.clientY } : null;
+  }
+  if ("changedTouches" in e && e.changedTouches.length > 0) {
+    const t = e.changedTouches[0];
+    return t ? { clientX: t.clientX, clientY: t.clientY } : null;
+  }
+  const me = e as MouseEvent;
+  if (typeof me.clientX === "number" && typeof me.clientY === "number") {
+    return { clientX: me.clientX, clientY: me.clientY };
+  }
+  return null;
+}
+
+/** 手机端拖拽节点时阻止冒泡；滚动拦截由 touch-action:none + document 非 passive 监听完成 */
+function beginMobileItemTouch(e: React.TouchEvent) {
+  if (!isMobileViewport()) return;
+  e.stopPropagation();
+}
 const MOODBOARD_ZOOM_MIN = 0.5;
 const MOODBOARD_ZOOM_MAX = 3;
+
+/** 标注点连线锚点：优先从父级效果图 relX/relY 实时推算，避免拖拽/缩放时与样块脱节 */
+function getMarkerLineAnchor(marker: MoodBoardItem, items: MoodBoardItem[]): { x: number; y: number } {
+  if (marker.parentId != null && marker.relX != null && marker.relY != null) {
+    const parent = items.find((p) => p.id === marker.parentId);
+    if (parent) {
+      return {
+        x: parent.x + (marker.relX / 100) * parent.width,
+        y: parent.y + (marker.relY / 100) * parent.height,
+      };
+    }
+  }
+  return { x: marker.x + marker.width / 2, y: marker.y + marker.height / 2 };
+}
+
+/** 样块连线落点：标签区中心偏下 */
+function getSampleLineEnd(sample: MoodBoardItem): { x: number; y: number } {
+  return { x: sample.x + sample.width / 2, y: sample.y + sample.height + 28 };
+}
+
+/** 将视口像素位移换算为画布逻辑位移（与 clientToBoard 同一 scale 基准） */
+function screenDeltaToBoardDelta(
+  host: HTMLDivElement | null,
+  deltaClientX: number,
+  deltaClientY: number,
+  zoomFallback = 1
+): { dx: number; dy: number } {
+  if (!host) return { dx: deltaClientX, dy: deltaClientY };
+  const scaleEl = host.querySelector("[data-moodboard-scale]") as HTMLElement | null;
+  if (scaleEl) {
+    const r = scaleEl.getBoundingClientRect();
+    return {
+      dx: deltaClientX * (MOODBOARD_CONTENT_W / Math.max(1e-6, r.width)),
+      dy: deltaClientY * (MOODBOARD_CONTENT_H / Math.max(1e-6, r.height)),
+    };
+  }
+  const z = zoomFallback || 1;
+  return { dx: deltaClientX / z, dy: deltaClientY / z };
+}
+
+/** 根据父级效果图位置同步 marker 视觉坐标（圆心对齐 rel 锚点） */
+function syncMarkerPositionFromParent(marker: MoodBoardItem, parent: MoodBoardItem): { x: number; y: number } {
+  const rx = marker.relX ?? 0;
+  const ry = marker.relY ?? 0;
+  const cx = parent.x + (rx / 100) * parent.width;
+  const cy = parent.y + (ry / 100) * parent.height;
+  const mw = marker.width ?? 16;
+  const mh = marker.height ?? 16;
+  return { x: cx - mw / 2, y: cy - mh / 2 };
+}
 
 /** 将裁切矩形限制在逻辑画布内，避免 html2canvas 截到画布外空白 */
 function clampCropRectToBoard(r: { x: number; y: number; w: number; h: number }) {
@@ -223,6 +301,163 @@ function clampCropRectToBoard(r: { x: number; y: number; w: number; h: number })
   const x1 = Math.max(0, Math.min(MOODBOARD_CONTENT_W, r.x + r.w));
   const y1 = Math.max(0, Math.min(MOODBOARD_CONTENT_H, r.y + r.h));
   return { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
+}
+
+/** 导出专用：等待克隆节点内图片与字体就绪后再截图 */
+async function waitForMoodboardExportReady(root: ParentNode): Promise<void> {
+  const imgs = Array.from(root.querySelectorAll("img"));
+  await Promise.all(
+    imgs.map(
+      (img) =>
+        new Promise<void>((resolve) => {
+          const finish = () => resolve();
+          if (img.complete && img.naturalWidth > 0) {
+            finish();
+            return;
+          }
+          img.addEventListener("load", finish, { once: true });
+          img.addEventListener("error", finish, { once: true });
+          const src = img.getAttribute("src");
+          if (src && !img.complete) {
+            img.src = src;
+          }
+        })
+    )
+  );
+  if (typeof document !== "undefined" && document.fonts?.ready) {
+    await document.fonts.ready.catch(() => undefined);
+  }
+  await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+}
+
+/** 导出专用：克隆逻辑画布（scale=1），置于视口内隐藏容器，避免 H5 离屏渲染空白 */
+function createMoodboardExportClone(scaleRoot: HTMLElement): {
+  wrapper: HTMLDivElement;
+  clone: HTMLElement;
+} {
+  const clone = scaleRoot.cloneNode(true) as HTMLElement;
+  clone.style.position = "absolute";
+  clone.style.left = "0";
+  clone.style.top = "0";
+  clone.style.transform = "none";
+  clone.style.transformOrigin = "0 0";
+  clone.style.width = `${MOODBOARD_CONTENT_W}px`;
+  clone.style.height = `${MOODBOARD_CONTENT_H}px`;
+  clone.style.margin = "0";
+  clone.style.padding = "0";
+  clone.style.pointerEvents = "none";
+  clone.style.willChange = "auto";
+
+  clone.querySelectorAll("img").forEach((img) => {
+    const src = img.getAttribute("src") || "";
+    if (src.startsWith("http://") || src.startsWith("https://")) {
+      img.crossOrigin = "anonymous";
+    }
+  });
+
+  const wrapper = document.createElement("div");
+  wrapper.setAttribute("data-moodboard-export-clone", "true");
+  wrapper.style.position = "fixed";
+  wrapper.style.left = "0";
+  wrapper.style.top = "0";
+  wrapper.style.width = `${MOODBOARD_CONTENT_W}px`;
+  wrapper.style.height = `${MOODBOARD_CONTENT_H}px`;
+  wrapper.style.overflow = "hidden";
+  wrapper.style.zIndex = "-1";
+  wrapper.style.pointerEvents = "none";
+  wrapper.style.opacity = "1";
+  wrapper.appendChild(clone);
+  return { wrapper, clone };
+}
+
+function getMoodboardExportScale(): number {
+  if (isMobileViewport()) {
+    return Math.min(2, Math.max(1, window.devicePixelRatio || 2));
+  }
+  return 3;
+}
+
+/**
+ * 移动端专用：从屏幕上蓝框的实际像素位置反算逻辑裁切区。
+ * getBoundingClientRect 已包含 scale/scroll 的综合结果，避免状态机坐标与所见不一致。
+ */
+function resolveMobileExportCropFromVisual(
+  host: HTMLDivElement,
+  fallback: { x: number; y: number; w: number; h: number }
+): { x: number; y: number; w: number; h: number } {
+  const scaleEl = host.querySelector("[data-moodboard-scale]") as HTMLElement | null;
+  const cropEl = document.querySelector("[data-mobile-crop-box]") as HTMLElement | null;
+  if (!scaleEl || !cropEl) return fallback;
+
+  const sr = scaleEl.getBoundingClientRect();
+  const cr = cropEl.getBoundingClientRect();
+  if (sr.width < 20 || sr.height < 20 || cr.width < 4 || cr.height < 4) return fallback;
+
+  const toBoardX = MOODBOARD_CONTENT_W / sr.width;
+  const toBoardY = MOODBOARD_CONTENT_H / sr.height;
+
+  return clampCropRectToBoard({
+    x: (cr.left - sr.left) * toBoardX,
+    y: (cr.top - sr.top) * toBoardY,
+    w: cr.width * toBoardX,
+    h: cr.height * toBoardY,
+  });
+}
+
+/** 移动端专用：克隆 scale(1) 全画布渲染后，按真实输出尺寸二次裁切，避免 H5 局部截图偏移 */
+async function captureMobileMoodboardExport(
+  scaleRoot: HTMLElement,
+  logicalCrop: { x: number; y: number; w: number; h: number },
+  exportScale: number
+): Promise<HTMLCanvasElement> {
+  const clamped = clampCropRectToBoard(logicalCrop);
+  const { wrapper, clone } = createMoodboardExportClone(scaleRoot);
+  document.body.appendChild(wrapper);
+
+  try {
+    await waitForMoodboardExportReady(clone);
+
+    const fullCanvas = await html2canvas(clone, {
+      useCORS: true,
+      allowTaint: false,
+      backgroundColor: "#ffffff",
+      logging: false,
+      scrollX: 0,
+      scrollY: 0,
+      width: MOODBOARD_CONTENT_W,
+      height: MOODBOARD_CONTENT_H,
+      scale: exportScale,
+      windowWidth: MOODBOARD_CONTENT_W,
+      windowHeight: MOODBOARD_CONTENT_H,
+      onclone: (_doc, el) => {
+        el.querySelectorAll("img").forEach((img) => {
+          const src = img.getAttribute("src") || "";
+          if (src.startsWith("http://") || src.startsWith("https://")) {
+            img.crossOrigin = "anonymous";
+          }
+        });
+      },
+    });
+
+    const scaleX = fullCanvas.width / MOODBOARD_CONTENT_W;
+    const scaleY = fullCanvas.height / MOODBOARD_CONTENT_H;
+    const sx = Math.max(0, Math.min(fullCanvas.width - 1, Math.round(clamped.x * scaleX)));
+    const sy = Math.max(0, Math.min(fullCanvas.height - 1, Math.round(clamped.y * scaleY)));
+    const sw = Math.max(1, Math.min(fullCanvas.width - sx, Math.round(clamped.w * scaleX)));
+    const sh = Math.max(1, Math.min(fullCanvas.height - sy, Math.round(clamped.h * scaleY)));
+
+    const cropCanvas = document.createElement("canvas");
+    cropCanvas.width = sw;
+    cropCanvas.height = sh;
+    const ctx = cropCanvas.getContext("2d");
+    if (!ctx) throw new Error("EXPORT_CTX");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, sw, sh);
+    ctx.drawImage(fullCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+    return cropCanvas;
+  } finally {
+    if (wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+  }
 }
 
 /** 同一区域 / 同名过近的 AI 标注合并，避免叠两个标签 */
@@ -310,7 +545,39 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   const [isMovingCropBox, setIsMovingCropBox] = useState(false);
   const [movingCropOffset, setMovingCropOffset] = useState<{ x: number; y: number } | null>(null);
   const [cropStart, setCropStart] = useState<{ x: number; y: number } | null>(null);
+  const cropPinchRef = useRef<{
+    startDist: number;
+    startBox: { x: number; y: number; w: number; h: number };
+    cx: number;
+    cy: number;
+  } | null>(null);
+  const cropBoxRef = useRef(cropBox);
+  cropBoxRef.current = cropBox;
+  const isMovingCropBoxRef = useRef(isMovingCropBox);
+  isMovingCropBoxRef.current = isMovingCropBox;
+  const resizingCropHandleRef = useRef(resizingCropHandle);
+  resizingCropHandleRef.current = resizingCropHandle;
+  const movingCropOffsetRef = useRef(movingCropOffset);
+  movingCropOffsetRef.current = movingCropOffset;
+  const mobileItemGestureLockRef = useRef(false);
+  const mobileCropGestureLockRef = useRef(false);
+  const draggingItemRef = useRef(draggingItem);
+  draggingItemRef.current = draggingItem;
+  const resizingItemRef = useRef(resizingItem);
+  resizingItemRef.current = resizingItem;
+  const activeMoodboardIdRef = useRef(activeMoodboardId);
+  activeMoodboardIdRef.current = activeMoodboardId;
+  const mobileItemMoveRafRef = useRef<number | null>(null);
+  const pendingMobileItemMoveRef = useRef<{ clientX: number; clientY: number } | null>(null);
+  const mobileExportSnapshotRef = useRef<{
+    cropBox: { x: number; y: number; w: number; h: number };
+    canvasZoom: number;
+    scrollLeft: number;
+    scrollTop: number;
+  } | null>(null);
   const [connectingFromId, setConnectingFromId] = useState<string | null>(null);
+  const connectingFromIdRef = useRef(connectingFromId);
+  connectingFromIdRef.current = connectingFromId;
   const [tempPointerPos, setTempPointerPos] = useState<{x: number, y: number} | null>(null);
   const [analysisStep, setAnalysisStep] = useState<1 | 2 | 3>(1); // 1 上传 2 识别中 3 已写入画布
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -328,6 +595,13 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
   const [editingSpecId, setEditingSpecId] = useState<string | null>(null);
   const [specEditModalItemId, setSpecEditModalItemId] = useState<string | null>(null);
+  type MobileEditSheetState =
+    | { type: "boardName"; draft: string }
+    | { type: "itemTitle"; itemId: string; draft: string }
+    | { type: "itemSpec"; itemId: string; draft: string };
+  const [mobileEditSheet, setMobileEditSheet] = useState<MobileEditSheetState | null>(null);
+  const [smartMatchSucceeded, setSmartMatchSucceeded] = useState(false);
+  const mobileEditInputRef = useRef<HTMLInputElement>(null);
   const storageQuotaAlertShownRef = useRef(false);
   const [canvasContextMenu, setCanvasContextMenu] = useState<{
     clientX: number;
@@ -394,6 +668,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
       const scaleEl = host?.querySelector("[data-moodboard-scale]") as HTMLElement | null;
       if (!host || !scaleEl) return null;
       const sr = scaleEl.getBoundingClientRect();
+      if (sr.width < 20 || sr.height < 20 || cb.w < 1 || cb.h < 1) return null;
       const sx = sr.width / MOODBOARD_CONTENT_W;
       const sy = sr.height / MOODBOARD_CONTENT_H;
       return {
@@ -420,14 +695,218 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     };
   }, [isFinalMode, canvasZoom, cropBox]);
 
+  const handleFinalModeCanvasPointer = useCallback(
+    (clientX: number, clientY: number) => {
+      const host = canvasRef.current;
+      if (!host) return;
+      const b = clientToBoard(clientX, clientY);
+      const x = b.x;
+      const y = b.y;
+
+      if (cropBox) {
+        const threshold = isMobileViewport() ? 48 : 35;
+        const hX = cropBox.x + cropBox.w;
+        const hY = cropBox.y + cropBox.h;
+
+        if (Math.abs(x - cropBox.x) < threshold && Math.abs(y - cropBox.y) < threshold) {
+          if (isMobileViewport()) mobileCropGestureLockRef.current = true;
+          setResizingCropHandle("tl");
+          return;
+        }
+        if (Math.abs(x - hX) < threshold && Math.abs(y - cropBox.y) < threshold) {
+          if (isMobileViewport()) mobileCropGestureLockRef.current = true;
+          setResizingCropHandle("tr");
+          return;
+        }
+        if (Math.abs(x - cropBox.x) < threshold && Math.abs(y - hY) < threshold) {
+          if (isMobileViewport()) mobileCropGestureLockRef.current = true;
+          setResizingCropHandle("bl");
+          return;
+        }
+        if (Math.abs(x - hX) < threshold && Math.abs(y - hY) < threshold) {
+          if (isMobileViewport()) mobileCropGestureLockRef.current = true;
+          setResizingCropHandle("br");
+          return;
+        }
+
+        if (x >= cropBox.x && x <= cropBox.x + cropBox.w && y >= cropBox.y && y <= cropBox.y + cropBox.h) {
+          if (isMobileViewport()) mobileCropGestureLockRef.current = true;
+          setIsMovingCropBox(true);
+          setMovingCropOffset({ x: x - cropBox.x, y: y - cropBox.y });
+          return;
+        }
+      }
+
+      setCropStart({ x, y });
+      setIsSelectingCrop(true);
+      setCropBox(null);
+      setIsMovingCropBox(false);
+      setResizingCropHandle(null);
+    },
+    [clientToBoard, cropBox]
+  );
+
+  /** 预览图框拖拽/缩放：基于 scale 容器 getBoundingClientRect 换算逻辑坐标 */
+  const applyCropBoxPointerMove = useCallback(
+    (clientX: number, clientY: number) => {
+      const host = canvasRef.current;
+      const box = cropBoxRef.current;
+      if (!host || !box) return;
+      const { x: curX, y: curY } = clientToBoard(clientX, clientY);
+
+      if (isMovingCropBoxRef.current && movingCropOffsetRef.current) {
+        const off = movingCropOffsetRef.current;
+        setCropBox(
+          clampCropRectToBoard({
+            ...box,
+            x: curX - off.x,
+            y: curY - off.y,
+          })
+        );
+        return;
+      }
+
+      const handle = resizingCropHandleRef.current;
+      if (!handle) return;
+
+      let newBox = { ...box };
+      if (handle === "tl") {
+        const deltaX = curX - box.x;
+        const deltaY = curY - box.y;
+        newBox.x = curX;
+        newBox.y = curY;
+        newBox.w = Math.max(50, box.w - deltaX);
+        newBox.h = Math.max(50, box.h - deltaY);
+      } else if (handle === "tr") {
+        newBox.w = Math.max(50, curX - box.x);
+        const deltaY = curY - box.y;
+        newBox.y = curY;
+        newBox.h = Math.max(50, box.h - deltaY);
+      } else if (handle === "bl") {
+        const deltaX = curX - box.x;
+        newBox.x = curX;
+        newBox.w = Math.max(50, box.w - deltaX);
+        newBox.h = Math.max(50, curY - box.y);
+      } else if (handle === "br") {
+        newBox.w = Math.max(50, curX - box.x);
+        newBox.h = Math.max(50, curY - box.y);
+      }
+      setCropBox(clampCropRectToBoard(newBox));
+    },
+    [clientToBoard]
+  );
+
+  const endCropGesture = useCallback(() => {
+    mobileCropGestureLockRef.current = false;
+    setIsSelectingCrop(false);
+    setResizingCropHandle(null);
+    setIsMovingCropBox(false);
+    setMovingCropOffset(null);
+    setCropStart(null);
+  }, []);
+
+  /** 预览图框在画布外蒙层上，需 document 级监听才能在拖出图框时持续更新 */
+  useEffect(() => {
+    if (!isFinalMode || (!isMovingCropBox && !resizingCropHandle)) return;
+
+    const onMove = (ev: MouseEvent | TouchEvent) => {
+      const pt = getPointerClientXY(ev);
+      if (!pt) return;
+      if ("touches" in ev && ev.cancelable) ev.preventDefault();
+      applyCropBoxPointerMove(pt.clientX, pt.clientY);
+    };
+
+    const onUp = () => endCropGesture();
+
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    document.addEventListener("touchmove", onMove, { passive: false });
+    document.addEventListener("touchend", onUp);
+    document.addEventListener("touchcancel", onUp);
+    return () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("touchmove", onMove);
+      document.removeEventListener("touchend", onUp);
+      document.removeEventListener("touchcancel", onUp);
+    };
+  }, [isFinalMode, isMovingCropBox, resizingCropHandle, applyCropBoxPointerMove, endCropGesture]);
+
+  /** 手机端双指缩放裁切框 */
+  useEffect(() => {
+    if (!isFinalMode || !isMobileViewport()) return;
+
+    const onTouchStart = (e: TouchEvent) => {
+      const box = cropBoxRef.current;
+      if (e.touches.length !== 2 || !box) return;
+      const t0 = e.touches[0]!;
+      const t1 = e.touches[1]!;
+      const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+      cropPinchRef.current = {
+        startDist: Math.max(dist, 1),
+        startBox: { ...box },
+        cx: box.x + box.w / 2,
+        cy: box.y + box.h / 2,
+      };
+      e.preventDefault();
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      const pinch = cropPinchRef.current;
+      if (!pinch || e.touches.length !== 2) return;
+      const t0 = e.touches[0]!;
+      const t1 = e.touches[1]!;
+      const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+      const scale = dist / pinch.startDist;
+      const newW = Math.max(50, pinch.startBox.w * scale);
+      const newH = Math.max(50, pinch.startBox.h * scale);
+      setCropBox(
+        clampCropRectToBoard({
+          x: pinch.cx - newW / 2,
+          y: pinch.cy - newH / 2,
+          w: newW,
+          h: newH,
+        })
+      );
+      e.preventDefault();
+    };
+
+    const onTouchEnd = () => {
+      cropPinchRef.current = null;
+    };
+
+    document.addEventListener("touchstart", onTouchStart, { passive: false });
+    document.addEventListener("touchmove", onTouchMove, { passive: false });
+    document.addEventListener("touchend", onTouchEnd);
+    document.addEventListener("touchcancel", onTouchEnd);
+    return () => {
+      document.removeEventListener("touchstart", onTouchStart);
+      document.removeEventListener("touchmove", onTouchMove);
+      document.removeEventListener("touchend", onTouchEnd);
+      document.removeEventListener("touchcancel", onTouchEnd);
+    };
+  }, [isFinalMode]);
+
+  /** 手机端：拖拽样块/圆点/连线时禁止画布弹性滚动与整体位移 */
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia("(max-width: 768px)").matches) return;
+    const blockScroll = (e: TouchEvent) => {
+      if (!mobileItemGestureLockRef.current && !mobileCropGestureLockRef.current) return;
+      if (e.cancelable) e.preventDefault();
+    };
+    document.addEventListener("touchmove", blockScroll, { passive: false });
+    return () => document.removeEventListener("touchmove", blockScroll);
+  }, []);
+
   /** 框选拖出视口时仍用 document 更新 cropBox（逻辑坐标 + 夹紧画布） */
   useEffect(() => {
     if (!isFinalMode || !isSelectingCrop || !cropStart) return;
     const start = cropStart;
     const onMove = (ev: MouseEvent | TouchEvent) => {
-      const cx = "touches" in ev ? ev.touches[0]!.clientX : (ev as MouseEvent).clientX;
-      const cy = "touches" in ev ? ev.touches[0]!.clientY : (ev as MouseEvent).clientY;
-      const p = clientToBoard(cx, cy);
+      const pt = getPointerClientXY(ev);
+      if (!pt) return;
+      if ("touches" in ev && ev.cancelable) ev.preventDefault();
+      const p = clientToBoard(pt.clientX, pt.clientY);
       setCropBox(
         clampCropRectToBoard({
           x: Math.min(start.x, p.x),
@@ -714,6 +1193,170 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     setMoodboards(prev => prev.map(b => b.id === activeBoard.id ? { ...b, items } : b));
   };
 
+  const cancelMobileItemMoveRaf = useCallback(() => {
+    if (mobileItemMoveRafRef.current != null) {
+      cancelAnimationFrame(mobileItemMoveRafRef.current);
+      mobileItemMoveRafRef.current = null;
+    }
+    pendingMobileItemMoveRef.current = null;
+  }, []);
+
+  /** 手机端：基于最新 board 状态 + 画布逻辑坐标更新拖拽/缩放/连线，消除闭包滞后与缩放错位 */
+  const applyMobileItemPointerMove = useCallback(
+    (clientX: number, clientY: number) => {
+      const host = canvasRef.current;
+      if (!host) return;
+      const { x: curX, y: curY } = clientToBoard(clientX, clientY);
+
+      if (connectingFromIdRef.current) {
+        setTempPointerPos({ x: curX, y: curY });
+        return;
+      }
+
+      const resizing = resizingItemRef.current;
+      if (resizing) {
+        const { dx, dy } = screenDeltaToBoardDelta(
+          host,
+          clientX - resizing.startX,
+          clientY - resizing.startY,
+          canvasZoomRef.current
+        );
+        setMoodboards((prev) => {
+          const boardId = activeMoodboardIdRef.current;
+          const board = prev.find((b) => b.id === boardId);
+          if (!board) return prev;
+          const resizedItem = board.items.find((i) => i.id === resizing.id);
+          if (!resizedItem) return prev;
+
+          const isCard =
+            resizedItem.type === "sample" ||
+            resizedItem.type === "material" ||
+            (!resizedItem.type && !resizedItem.parentId);
+          let newWidth = Math.max(
+            CARD_SIZE_MIN,
+            Math.min(CARD_SIZE_MAX, resizing.startWidth + dx)
+          );
+          let newHeight: number;
+          if (isCard) {
+            newHeight = Math.max(
+              CARD_SIZE_MIN,
+              Math.min(CARD_SIZE_MAX, resizing.startHeight + dy)
+            );
+          } else {
+            const scale = newWidth / resizing.startWidth;
+            newHeight = Math.max(
+              CARD_SIZE_MIN,
+              Math.min(CARD_SIZE_MAX, resizing.startHeight * scale)
+            );
+          }
+
+          const nextDrawing =
+            resizedItem.type === "drawing"
+              ? { ...resizedItem, width: newWidth, height: newHeight }
+              : null;
+
+          const items = board.items.map((i) => {
+            if (i.id === resizing.id) {
+              return { ...i, width: newWidth, height: newHeight };
+            }
+            if (
+              nextDrawing &&
+              i.parentId === nextDrawing.id &&
+              i.type === "marker"
+            ) {
+              return { ...i, ...syncMarkerPositionFromParent(i, nextDrawing) };
+            }
+            return i;
+          });
+          return prev.map((b) => (b.id === boardId ? { ...b, items } : b));
+        });
+        return;
+      }
+
+      const dragging = draggingItemRef.current;
+      if (!dragging) return;
+
+      const newX = curX - dragging.offsetX;
+      const newY = curY - dragging.offsetY;
+
+      setMoodboards((prev) => {
+        const boardId = activeMoodboardIdRef.current;
+        const board = prev.find((b) => b.id === boardId);
+        if (!board) return prev;
+        const draggedItem = board.items.find((i) => i.id === dragging.id);
+        if (!draggedItem) return prev;
+
+        const nextDrawing =
+          draggedItem.type === "drawing"
+            ? { ...draggedItem, x: newX, y: newY }
+            : null;
+
+        const items = board.items.map((i) => {
+          if (i.id === dragging.id) {
+            if (i.type === "marker" && i.parentId) {
+              const parent = board.items.find((p) => p.id === i.parentId);
+              if (parent) {
+                const relX = ((newX - parent.x) / parent.width) * 100;
+                const relY = ((newY - parent.y) / parent.height) * 100;
+                return { ...i, x: newX, y: newY, relX, relY };
+              }
+            }
+            return { ...i, x: newX, y: newY };
+          }
+          if (
+            nextDrawing &&
+            i.parentId === nextDrawing.id &&
+            i.type === "marker"
+          ) {
+            return { ...i, ...syncMarkerPositionFromParent(i, nextDrawing) };
+          }
+          return i;
+        });
+        return prev.map((b) => (b.id === boardId ? { ...b, items } : b));
+      });
+    },
+    [clientToBoard]
+  );
+
+  const scheduleMobileItemPointerMove = useCallback(
+    (clientX: number, clientY: number) => {
+      pendingMobileItemMoveRef.current = { clientX, clientY };
+      if (mobileItemMoveRafRef.current != null) return;
+      mobileItemMoveRafRef.current = requestAnimationFrame(() => {
+        mobileItemMoveRafRef.current = null;
+        const pending = pendingMobileItemMoveRef.current;
+        pendingMobileItemMoveRef.current = null;
+        if (!pending) return;
+        applyMobileItemPointerMove(pending.clientX, pending.clientY);
+      });
+    },
+    [applyMobileItemPointerMove]
+  );
+
+  /** 手机端：样块/连线拖拽时 document 级 touchmove，避免手指移出节点后脱节 */
+  useEffect(() => {
+    if (!isMobileViewport()) return;
+    if (!draggingItem && !resizingItem && !connectingFromId) return;
+
+    const onMove = (ev: TouchEvent) => {
+      if (
+        !mobileItemGestureLockRef.current &&
+        !draggingItemRef.current &&
+        !resizingItemRef.current &&
+        !connectingFromIdRef.current
+      ) {
+        return;
+      }
+      const pt = getPointerClientXY(ev);
+      if (!pt) return;
+      if (ev.cancelable) ev.preventDefault();
+      scheduleMobileItemPointerMove(pt.clientX, pt.clientY);
+    };
+
+    document.addEventListener("touchmove", onMove, { passive: false });
+    return () => document.removeEventListener("touchmove", onMove);
+  }, [draggingItem, resizingItem, connectingFromId, scheduleMobileItemPointerMove]);
+
   const assignMaterialToSample = (sampleId: string, materialId: string) => {
     const mat = materials.find((m) => m.id === materialId);
     if (!mat) return;
@@ -888,6 +1531,110 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     );
   };
 
+  useEffect(() => {
+    if (analysisStep === 3) setSmartMatchSucceeded(true);
+  }, [analysisStep]);
+
+  useEffect(() => {
+    if (!mobileEditSheet) return;
+    const t = window.setTimeout(() => mobileEditInputRef.current?.focus(), 80);
+    return () => window.clearTimeout(t);
+  }, [mobileEditSheet]);
+
+  const openMobileItemTitleSheet = (itemId: string) => {
+    const item = activeBoard.items.find((i) => i.id === itemId);
+    if (!item) return;
+    const mat = item.materialId ? materials.find((m) => m.id === item.materialId) : null;
+    const localEntry = item.localMaterialId
+      ? localMaterialsList.find((x) => x.id === item.localMaterialId)
+      : null;
+    const display = getCardDisplay(item, mat, localEntry);
+    const isSampleCard = item.type === "sample" || item.type === "material";
+    const draft =
+      isSampleCard && display
+        ? display.name || (isLocalBoardMaterial(item) ? "" : display.name)
+        : (item.remark || "").split("\n")[0];
+    setMobileEditSheet({ type: "itemTitle", itemId, draft });
+  };
+
+  const openMobileItemSpecSheet = (itemId: string) => {
+    const item = activeBoard.items.find((i) => i.id === itemId);
+    if (!item) return;
+    const mat = item.materialId ? materials.find((m) => m.id === item.materialId) : null;
+    const localEntry = item.localMaterialId
+      ? localMaterialsList.find((x) => x.id === item.localMaterialId)
+      : null;
+    const display = getCardDisplay(item, mat, localEntry);
+    setMobileEditSheet({ type: "itemSpec", itemId, draft: display.spec });
+  };
+
+  const commitMobileEditSheet = () => {
+    if (!mobileEditSheet) return;
+    const raw = mobileEditSheet.draft.trim();
+
+    if (mobileEditSheet.type === "boardName") {
+      setMoodboards((prev) =>
+        prev.map((b) =>
+          b.id === activeMoodboardId ? { ...b, name: raw || b.name } : b
+        )
+      );
+      setMobileEditSheet(null);
+      return;
+    }
+
+    const item = activeBoard.items.find((i) => i.id === mobileEditSheet.itemId);
+    if (!item) {
+      setMobileEditSheet(null);
+      return;
+    }
+    const mat = item.materialId ? materials.find((m) => m.id === item.materialId) : null;
+    const localEntry = item.localMaterialId
+      ? localMaterialsList.find((x) => x.id === item.localMaterialId)
+      : null;
+    const display = getCardDisplay(item, mat, localEntry);
+
+    if (mobileEditSheet.type === "itemTitle") {
+      if (item.type === "sample" || item.type === "material") {
+        const spec = item.displaySpec ?? display.spec ?? LOCAL_TEMP_DEFAULT_SPEC;
+        const name = isLocalBoardMaterial(item) ? raw : raw || "未命名";
+        patchBoardItem(item.id, {
+          isEditedByUser: true,
+          displayName: name,
+          displaySpec: spec,
+          remark: syncCardRemark(name || LOCAL_MATERIAL_NAME_PLACEHOLDER, spec),
+          snapshotImageUrl: isLocalBoardMaterial(item)
+            ? item.imageUrl
+            : item.snapshotImageUrl ?? item.imageUrl ?? mat?.image,
+        });
+        if (item.localMaterialId) {
+          syncLocalCatalogFromCard(item.localMaterialId, name, spec);
+        }
+      } else {
+        patchBoardItem(item.id, { remark: raw || "未命名" });
+      }
+    } else {
+      const spec =
+        raw || (isLocalBoardMaterial(item) ? LOCAL_TEMP_DEFAULT_SPEC : "—");
+      let titleName = item.displayName;
+      if (titleName == null || titleName === "") {
+        titleName = display.name || (isLocalBoardMaterial(item) ? "" : "未命名");
+      }
+      patchBoardItem(item.id, {
+        isEditedByUser: true,
+        displaySpec: spec,
+        displayName: titleName,
+        remark: syncCardRemark(titleName || LOCAL_MATERIAL_NAME_PLACEHOLDER, spec),
+        snapshotImageUrl: isLocalBoardMaterial(item)
+          ? item.imageUrl
+          : item.snapshotImageUrl ?? item.imageUrl ?? mat?.image,
+      });
+      if (item.localMaterialId) {
+        syncLocalCatalogFromCard(item.localMaterialId, titleName, spec);
+      }
+    }
+    setMobileEditSheet(null);
+  };
+
   const syncLocalCatalogFromCard = (localMaterialId: string, name: string, spec: string) => {
     setLocalMaterialsList((prev) => {
       const existing = prev.find((x) => x.id === localMaterialId);
@@ -1010,6 +1757,11 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     const item = activeBoard.items.find(i => i.id === id);
     if (!item || !canvasRef.current) return;
 
+    if ("touches" in e && isMobileViewport()) {
+      e.stopPropagation();
+      mobileItemGestureLockRef.current = true;
+    }
+
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
 
@@ -1034,53 +1786,43 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   };
 
   const handleMoveAction = (e: React.MouseEvent | React.TouchEvent) => {
-    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
-    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    const pt = getPointerClientXY(e);
+    if (!pt) return;
+    const { clientX, clientY } = pt;
+
+    if (
+      "touches" in e &&
+      isMobileViewport() &&
+      (draggingItem ||
+        resizingItem ||
+        connectingFromId ||
+        mobileItemGestureLockRef.current ||
+        mobileCropGestureLockRef.current ||
+        isMovingCropBox ||
+        resizingCropHandle)
+    ) {
+      e.stopPropagation();
+      if (e.cancelable) e.preventDefault();
+    }
 
     if (isExporting || isPreviewingCapturedImage) return;
+
+    if (isFinalMode && (isMovingCropBox || resizingCropHandle) && canvasRef.current) {
+      applyCropBoxPointerMove(clientX, clientY);
+      return;
+    }
+
+    if (
+      isMobileViewport() &&
+      (draggingItem || resizingItem || connectingFromId)
+    ) {
+      scheduleMobileItemPointerMove(clientX, clientY);
+      return;
+    }
 
     const p = clientToBoard(clientX, clientY);
     const curX = p.x;
     const curY = p.y;
-
-    if (isFinalMode && isMovingCropBox && cropBox && movingCropOffset && canvasRef.current) {
-      setCropBox(
-        clampCropRectToBoard({
-          ...cropBox,
-          x: curX - movingCropOffset.x,
-          y: curY - movingCropOffset.y,
-        })
-      );
-      return;
-    }
-
-    if (isFinalMode && resizingCropHandle && cropBox && canvasRef.current) {
-      let newBox = { ...cropBox };
-      if (resizingCropHandle === 'tl') {
-        const deltaX = curX - cropBox.x;
-        const deltaY = curY - cropBox.y;
-        newBox.x = curX;
-        newBox.y = curY;
-        newBox.w = Math.max(50, cropBox.w - deltaX);
-        newBox.h = Math.max(50, cropBox.h - deltaY);
-      } else if (resizingCropHandle === 'tr') {
-        newBox.w = Math.max(50, curX - cropBox.x);
-        const deltaY = curY - cropBox.y;
-        newBox.y = curY;
-        newBox.h = Math.max(50, cropBox.h - deltaY);
-      } else if (resizingCropHandle === 'bl') {
-        const deltaX = curX - cropBox.x;
-        newBox.x = curX;
-        newBox.w = Math.max(50, cropBox.w - deltaX);
-        newBox.h = Math.max(50, curY - cropBox.y);
-      } else if (resizingCropHandle === 'br') {
-        newBox.w = Math.max(50, curX - cropBox.x);
-        newBox.h = Math.max(50, curY - cropBox.y);
-      }
-
-      setCropBox(clampCropRectToBoard(newBox));
-      return;
-    }
 
     if (connectingFromId && canvasRef.current) {
       setTempPointerPos({
@@ -1170,19 +1912,20 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     }
   };
 
-  const handlePointerUp = (e: React.MouseEvent | React.TouchEvent) => {
+  const handlePointerUp = (_e: React.MouseEvent | React.TouchEvent) => {
+    if (isMobileViewport()) {
+      cancelMobileItemMoveRaf();
+    }
+    mobileItemGestureLockRef.current = false;
     if (canvasPanSessionRef.current) {
       canvasPanSessionRef.current = null;
       setIsCanvasPanDragging(false);
     }
     if (isFinalMode && (isSelectingCrop || resizingCropHandle || isMovingCropBox)) {
-      setIsSelectingCrop(false);
-      setResizingCropHandle(null);
-      setIsMovingCropBox(false);
-      setMovingCropOffset(null);
-      setCropStart(null);
+      endCropGesture();
       return;
     }
+    mobileCropGestureLockRef.current = false;
 
     if (connectingFromId && tempPointerPos) {
       const markers = activeBoard.items.filter(i => i.type === 'marker');
@@ -1262,86 +2005,140 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     setIsFinalMode(true);
     setCropBox(null);
     
-    // Auto-set crop box for mobile
-    if (window.innerWidth < 768) {
-      const rect = canvasRef.current?.getBoundingClientRect();
-      if (rect && canvasRef.current) {
-        const z = canvasZoomRef.current || 1;
+    if (isMobileViewport()) {
+      requestAnimationFrame(() => {
+        const host = canvasRef.current;
+        const scaleEl = host?.querySelector("[data-moodboard-scale]") as HTMLElement | null;
+        if (!host || !scaleEl) return;
+        const sr = scaleEl.getBoundingClientRect();
+        if (sr.width < 1 || sr.height < 1) return;
+        const margin = 0.1;
+        const boardW = ((window.innerWidth * (1 - margin * 2)) / sr.width) * MOODBOARD_CONTENT_W;
+        const boardH = ((window.innerHeight * 0.52) / sr.height) * MOODBOARD_CONTENT_H;
+        const cx = ((window.innerWidth / 2) - sr.left) / sr.width * MOODBOARD_CONTENT_W;
+        const cy = ((window.innerHeight * 0.42) - sr.top) / sr.height * MOODBOARD_CONTENT_H;
         setCropBox(
           clampCropRectToBoard({
-            x: (canvasRef.current.scrollLeft + rect.width * 0.1) / z,
-            y: (canvasRef.current.scrollTop + rect.height * 0.2) / z,
-            w: (rect.width * 0.8) / z,
-            h: (rect.height * 0.5) / z,
+            x: cx - boardW / 2,
+            y: cy - boardH / 2,
+            w: boardW,
+            h: boardH,
           })
         );
-      }
+      });
     }
   };
+
+  const handleMobileReturnFromPreview = useCallback(() => {
+    setIsPreviewingCapturedImage(false);
+    if (!isMobileViewport()) return;
+    const snap = mobileExportSnapshotRef.current;
+    if (!snap) {
+      requestAnimationFrame(() => setExportOverlayTick((t) => t + 1));
+      return;
+    }
+    setCropBox(clampCropRectToBoard(snap.cropBox));
+    setCanvasZoom(Math.min(MOODBOARD_ZOOM_MAX, Math.max(MOODBOARD_ZOOM_MIN, snap.canvasZoom)));
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const host = canvasRef.current;
+        if (host) {
+          host.scrollLeft = snap.scrollLeft;
+          host.scrollTop = snap.scrollTop;
+        }
+        setExportOverlayTick((t) => t + 1);
+      });
+    });
+  }, []);
 
   const handleExportToImage = async () => {
     if (!cropBox || !canvasRef.current || isExporting) return;
 
     const host = canvasRef.current;
     const capturedCrop = { ...cropBox };
-    setIsExporting(true);
+    const clamped = clampCropRectToBoard(capturedCrop);
+    const scaleRoot = host.querySelector("[data-moodboard-scale]") as HTMLElement | null;
+
+    if (isMobileViewport()) {
+      mobileExportSnapshotRef.current = {
+        cropBox: capturedCrop,
+        canvasZoom: canvasZoomRef.current || 1,
+        scrollLeft: host.scrollLeft,
+        scrollTop: host.scrollTop,
+      };
+    }
 
     const overlay = document.querySelector(".selection-overlay-root") as HTMLElement | null;
-    if (overlay) overlay.style.display = "none";
+    let exportWrapper: HTMLDivElement | null = null;
 
-    const originalOpacity = host.style.opacity;
+    try {
+      setIsExporting(true);
 
-    /** 大图导出：逻辑坐标 + scale(1) 克隆根节点，避免 scroll/zoom 与视口混算导致黑边偏移 */
-    const generateLargeImage = async (): Promise<void> => {
-      const clamped = clampCropRectToBoard(capturedCrop);
-      const scaleRoot = host.querySelector("[data-moodboard-scale]") as HTMLElement | null;
+      const exportScale = getMoodboardExportScale();
+      const mobileExport = isMobileViewport();
+      /** 必须在隐藏蒙层之前读取蓝框视口坐标，否则 getBoundingClientRect 失效 */
+      const mobileVisualCrop = mobileExport
+        ? resolveMobileExportCropFromVisual(host, clamped)
+        : null;
+
+      if (overlay) overlay.style.display = "none";
 
       let canvas: HTMLCanvasElement;
 
-      if (scaleRoot) {
-        let clone: HTMLElement | null = null;
-        try {
-          clone = scaleRoot.cloneNode(true) as HTMLElement;
-          clone.style.position = "fixed";
-          clone.style.left = "-20000px";
-          clone.style.top = "0";
-          clone.style.transform = "none";
-          clone.style.transformOrigin = "0 0";
-          clone.style.width = `${MOODBOARD_CONTENT_W}px`;
-          clone.style.height = `${MOODBOARD_CONTENT_H}px`;
-          clone.style.margin = "0";
-          clone.style.pointerEvents = "none";
-          document.body.appendChild(clone);
-
-          await Promise.all(
-            Array.from(clone.querySelectorAll("img")).map(
-              (img) =>
-                new Promise<void>((resolve) => {
-                  if (img.complete) resolve();
-                  else {
-                    img.onload = () => resolve();
-                    img.onerror = () => resolve();
-                  }
-                })
-            )
-          );
-          await new Promise<void>((r) =>
-            requestAnimationFrame(() => requestAnimationFrame(() => r()))
-          );
-
-          canvas = await html2canvas(clone, {
-            x: clamped.x,
-            y: clamped.y,
-            width: clamped.w,
-            height: clamped.h,
-            useCORS: true,
-            scale: 3,
-            backgroundColor: "#ffffff",
-            logging: false,
+      if (scaleRoot && mobileExport) {
+        if (import.meta.env.DEV) {
+          console.debug("[MoodBoard export] mobile", {
+            stateCrop: clamped,
+            visualCrop: mobileVisualCrop,
+            scroll: { left: host.scrollLeft, top: host.scrollTop },
+            zoom: canvasZoomRef.current,
+            exportScale,
+            dpr: window.devicePixelRatio,
           });
-        } finally {
-          if (clone?.parentNode) clone.parentNode.removeChild(clone);
         }
+
+        canvas = await captureMobileMoodboardExport(
+          scaleRoot,
+          mobileVisualCrop ?? clamped,
+          exportScale
+        );
+      } else if (scaleRoot) {
+        const { wrapper, clone } = createMoodboardExportClone(scaleRoot);
+        exportWrapper = wrapper;
+        document.body.appendChild(wrapper);
+        await waitForMoodboardExportReady(clone);
+
+        if (import.meta.env.DEV) {
+          console.debug("[MoodBoard export] desktop", {
+            crop: clamped,
+            exportScale,
+            imgCount: clone.querySelectorAll("img").length,
+          });
+        }
+
+        canvas = await html2canvas(clone, {
+          useCORS: true,
+          allowTaint: false,
+          backgroundColor: "#ffffff",
+          logging: false,
+          scrollX: 0,
+          scrollY: 0,
+          x: clamped.x,
+          y: clamped.y,
+          width: clamped.w,
+          height: clamped.h,
+          scale: exportScale,
+          windowWidth: MOODBOARD_CONTENT_W,
+          windowHeight: MOODBOARD_CONTENT_H,
+          onclone: (_doc, el) => {
+            el.querySelectorAll("img").forEach((img) => {
+              const src = img.getAttribute("src") || "";
+              if (src.startsWith("http://") || src.startsWith("https://")) {
+                img.crossOrigin = "anonymous";
+              }
+            });
+          },
+        });
       } else {
         const z = canvasZoomRef.current || 1;
         const sl = host.scrollLeft;
@@ -1352,7 +2149,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
           width: clamped.w * z,
           height: clamped.h * z,
           useCORS: true,
-          scale: 3,
+          allowTaint: false,
+          scale: exportScale,
           backgroundColor: "#ffffff",
           logging: false,
           scrollX: 0,
@@ -1360,19 +2158,31 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         });
       }
 
+      if (import.meta.env.DEV) {
+        console.debug("[MoodBoard export] result", {
+          width: canvas.width,
+          height: canvas.height,
+          expectedW: Math.round(clamped.w * exportScale),
+          expectedH: Math.round(clamped.h * exportScale),
+        });
+      }
+
+      if (canvas.width < 8 || canvas.height < 8) {
+        throw new Error("EXPORT_EMPTY_CANVAS");
+      }
+
       const dataUrl = canvas.toDataURL("image/jpeg", 0.95);
+      if (dataUrl.length < 500) {
+        throw new Error("EXPORT_BLANK_DATA");
+      }
+
       setCapturedImageData(dataUrl);
       setIsPreviewingCapturedImage(true);
-    };
-
-    try {
-      host.style.opacity = "1";
-      await generateLargeImage();
     } catch (error) {
       console.error("Export error:", error);
-      alert("生成预览失败，请尝试刷新页面。");
+      alert("截图失败，请确认画框内图片已加载完成后重试。");
     } finally {
-      host.style.opacity = originalOpacity;
+      if (exportWrapper?.parentNode) exportWrapper.parentNode.removeChild(exportWrapper);
       if (overlay) overlay.style.display = "";
       setIsExporting(false);
     }
@@ -1834,13 +2644,20 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     setAiVisionAnchor(null);
   };
 
+  const mobileItemGestureActive =
+    isMobileViewport() && !!(draggingItem || resizingItem || connectingFromId);
+
   return (
     <div 
       className="flex h-[calc(100vh-120px)] bg-gray-50 rounded-3xl overflow-hidden border border-gray-200 relative" 
       onMouseMove={handleMoveAction} 
       onTouchMove={handleMoveAction}
       onMouseUp={() => { setDraggingItem(null); setResizingItem(null); }}
-      onTouchEnd={() => { setDraggingItem(null); setResizingItem(null); }}
+      onTouchEnd={() => {
+        if (isMobileViewport()) return;
+        setDraggingItem(null);
+        setResizingItem(null);
+      }}
     >
       {/* Sidebar */}
       <div className={`${isSidebarOpen ? 'w-1/2 md:w-80' : 'w-0'} bg-white border-r transition-all duration-300 flex flex-col overflow-hidden`}>
@@ -2092,7 +2909,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               )}
             </button>
             
-            {isEditingName ? (
+            {isEditingName && !isMobileViewport() ? (
               <input 
                 autoFocus
                 value={activeBoard.name} 
@@ -2103,7 +2920,13 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               />
             ) : (
               <h2 
-                onClick={() => setIsEditingName(true)}
+                onClick={() => {
+                  if (isMobileViewport()) {
+                    setMobileEditSheet({ type: "boardName", draft: activeBoard.name });
+                    return;
+                  }
+                  setIsEditingName(true);
+                }}
                 className="text-sm md:text-lg font-black cursor-pointer hover:text-gray-600 transition-colors"
                 title="点击编辑名称"
               >
@@ -2140,9 +2963,9 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         </div>
 
         <div 
-          className={`flex-1 relative moodboard-canvas overflow-x-auto overflow-y-auto p-40 transition-all duration-500 bg-[#fafafa] flex items-center justify-center scroll-smooth select-none ${
-            isFinalMode ? 'cursor-crosshair' : isCanvasPanDragging ? 'cursor-grabbing' : canvasPanArmed ? 'cursor-grab' : ''
-          } ${isExporting ? 'pointer-events-none' : ''}`} 
+          className={`flex-1 relative moodboard-canvas overflow-x-auto overflow-y-auto p-40 transition-all duration-500 bg-[#fafafa] flex items-center justify-center scroll-smooth select-none max-md:overscroll-none ${
+            isFinalMode ? 'cursor-crosshair max-md:touch-none' : isCanvasPanDragging ? 'cursor-grabbing' : canvasPanArmed ? 'cursor-grab' : ''
+          } ${(draggingItem || resizingItem || connectingFromId) ? 'max-md:touch-none' : ''} ${isExporting ? 'pointer-events-none' : ''}`} 
           ref={canvasRef}
           onMouseDown={(e) => {
             if (isExporting || isPreviewingCapturedImage || isPreviewingImage || isAIModalOpen || connectingFromId) return;
@@ -2178,48 +3001,16 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               return;
             }
             if (isFinalMode) {
-              const host = canvasRef.current;
-              const rect = host?.getBoundingClientRect();
-              if (rect && host) {
-                const b = clientToBoard(e.clientX, e.clientY);
-                const x = b.x;
-                const y = b.y;
-                
-                // 1. Check for resize handles FIRST
-                if (cropBox) {
-                  const threshold = 35;
-                  const hX = cropBox.x + cropBox.w;
-                  const hY = cropBox.y + cropBox.h;
-                  
-                  if (Math.abs(x - cropBox.x) < threshold && Math.abs(y - cropBox.y) < threshold) {
-                    setResizingCropHandle('tl'); return;
-                  }
-                  if (Math.abs(x - hX) < threshold && Math.abs(y - cropBox.y) < threshold) {
-                    setResizingCropHandle('tr'); return;
-                  }
-                  if (Math.abs(x - cropBox.x) < threshold && Math.abs(y - hY) < threshold) {
-                    setResizingCropHandle('bl'); return;
-                  }
-                  if (Math.abs(x - hX) < threshold && Math.abs(y - hY) < threshold) {
-                    setResizingCropHandle('br'); return;
-                  }
-
-                  // 2. Check for move (click inside)
-                  if (x >= cropBox.x && x <= cropBox.x + cropBox.w && y >= cropBox.y && y <= cropBox.y + cropBox.h) {
-                    setIsMovingCropBox(true);
-                    setMovingCropOffset({ x: x - cropBox.x, y: y - cropBox.y });
-                    return;
-                  }
-                }
-                
-                // 3. Only if clicking outside/new area, start selection
-                setCropStart({ x, y });
-                setIsSelectingCrop(true);
-                setCropBox(null);
-                setIsMovingCropBox(false);
-                setResizingCropHandle(null);
-              }
+              handleFinalModeCanvasPointer(e.clientX, e.clientY);
             }
+          }}
+          onTouchStart={(e) => {
+            if (!isFinalMode || isExporting || isPreviewingCapturedImage || isPreviewingImage || isAIModalOpen || connectingFromId) return;
+            if (mobileCropGestureLockRef.current || isMovingCropBox || resizingCropHandle) return;
+            if (e.touches.length > 1) return;
+            const pt = getPointerClientXY(e);
+            if (!pt) return;
+            handleFinalModeCanvasPointer(pt.clientX, pt.clientY);
           }}
           onContextMenu={(e) => {
             if (isFinalMode || isExporting || isAIModalOpen) return;
@@ -2279,7 +3070,9 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
           >
             <div
               data-moodboard-scale
-              className="absolute left-0 top-0 origin-top-left will-change-transform"
+              className={`absolute left-0 top-0 origin-top-left will-change-transform${
+                mobileItemGestureActive ? " max-md:[&_*]:!transition-none max-md:!transition-none" : ""
+              }`}
               style={{
                 width: MOODBOARD_CONTENT_W,
                 height: MOODBOARD_CONTENT_H,
@@ -2352,6 +3145,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                   }}
                   onTouchStart={(e) => {
                     if (isFinalMode) return;
+                    beginMobileItemTouch(e);
                     if (isDrawing && !panArmed()) e.stopPropagation();
                     handleStartAction(e, item.id, "move");
                   }}
@@ -2471,7 +3265,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                             <p className="text-[11px] font-black text-black leading-tight mb-1 break-words pointer-events-none">
                               {display.name}
                             </p>
-                            {editingSpecId === item.id ? (
+                            {editingSpecId === item.id && !isMobileViewport() ? (
                               <input
                                 type="text"
                                 autoFocus
@@ -2516,6 +3310,20 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                             ) : (
                               <p
                                 className="text-[9px] font-bold text-gray-600 leading-tight cursor-text hover:text-black"
+                                onClick={(e) => {
+                                  if (!isMobileViewport()) return;
+                                  e.stopPropagation();
+                                  if (isFinalMode) return;
+                                  if (
+                                    !isLocalBoardMaterial(item) &&
+                                    !item.specEditWarningAcked &&
+                                    !item.isEditedByUser
+                                  ) {
+                                    setSpecEditModalItemId(item.id);
+                                    return;
+                                  }
+                                  openMobileItemSpecSheet(item.id);
+                                }}
                                 onDoubleClick={(e) => {
                                   e.stopPropagation();
                                   if (isFinalMode) return;
@@ -2546,6 +3354,12 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                         className={`absolute -bottom-10 left-1/2 -translate-x-1/2 w-[92%] max-w-[240px] z-[100]`}
                       >
                         <div 
+                          onClick={(e) => {
+                            if (!isMobileViewport()) return;
+                            e.stopPropagation();
+                            if (isFinalMode) return;
+                            if (isSample || isDrawing) openMobileItemTitleSheet(item.id);
+                          }}
                           onDoubleClick={(e) => {
                             e.stopPropagation();
                             if (!isFinalMode && isSample) setEditingTitleId(item.id);
@@ -2553,7 +3367,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                           }}
                           className={`bg-white/45 backdrop-blur-md border rounded-xl px-3 py-2 shadow-lg flex flex-col items-center gap-1 group/label transition-all ${editingTitleId === item.id ? 'border-blue-500/80 ring-1 ring-blue-500/25' : 'border-white/60 hover:border-black/20'}`}
                         >
-                          {editingTitleId === item.id ? (
+                          {editingTitleId === item.id && !isMobileViewport() ? (
                             <input 
                               type="text"
                               autoFocus
@@ -2631,7 +3445,18 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                                 const p = clientToBoard(e.clientX, e.clientY);
                                 setTempPointerPos({ x: p.x, y: p.y });
                               }}
-                              className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-black rounded-full border-2 border-white shadow-lg scale-0 group-hover/label:scale-100 transition-all cursor-crosshair z-[110]" 
+                              onTouchStart={(e) => {
+                                beginMobileItemTouch(e);
+                                if (panArmed()) return;
+                                if (!canvasRef.current) return;
+                                const t = e.touches[0];
+                                if (!t) return;
+                                mobileItemGestureLockRef.current = true;
+                                setConnectingFromId(item.id);
+                                const p = clientToBoard(t.clientX, t.clientY);
+                                setTempPointerPos({ x: p.x, y: p.y });
+                              }}
+                              className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-black rounded-full border-2 border-white shadow-lg scale-0 group-hover/label:scale-100 max-md:scale-100 transition-all cursor-crosshair z-[110] touch-none" 
                               title="按住并拖动以连接标注点"
                             />
                           )}
@@ -2677,7 +3502,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                 {!isMarker && (
                   <div 
                     onMouseDown={(e) => { e.stopPropagation(); handleStartAction(e, item.id, 'resize'); }}
-                    onTouchStart={(e) => { e.stopPropagation(); handleStartAction(e, item.id, 'resize'); }}
+                    onTouchStart={(e) => { beginMobileItemTouch(e); handleStartAction(e, item.id, 'resize'); }}
                     className="absolute bottom-1 right-1 w-4 h-4 rounded-md bg-white/90 border border-black/15 shadow-sm flex items-end justify-end cursor-nwse-resize opacity-0 group-hover:opacity-100 transition-opacity z-50"
                     title="拖拽缩放"
                   >
@@ -2697,14 +3522,9 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               {activeBoard.items.filter(i => i.type === 'marker' && i.targetId).map(marker => {
                 const sample = activeBoard.items.find(s => s.id === marker.targetId);
                 if (!sample) return null;
-                
-                // Precise coordinate calculation for professional lines
-                const startX = marker.x + marker.width / 2;
-                const startY = marker.y + marker.height / 2;
-                
-                // End at the label block area (roughly bottom of item + offset)
-                const endX = sample.x + sample.width / 2;
-                const endY = sample.y + sample.height + 28; // Lower connection to the center of label
+
+                const { x: startX, y: startY } = getMarkerLineAnchor(marker, activeBoard.items);
+                const { x: endX, y: endY } = getSampleLineEnd(sample);
 
                 return (
                   <g key={`line-svg-${marker.id}`}>
@@ -2765,7 +3585,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
       {/* CRYSTAL CLEAR SELECTION OVERLAY (OUTSIDE CANVAS) */}
       {isFinalMode && !isPreviewingCapturedImage && (
-        <div className="selection-overlay-root fixed inset-0 z-[8000] pointer-events-none overflow-hidden" data-html2canvas-ignore>
+        <div className="selection-overlay-root fixed inset-0 z-[8000] pointer-events-none overflow-hidden max-md:touch-none" data-html2canvas-ignore>
           {cropBox && (
             <>
               {/* Blur Screen with Hole */}
@@ -2811,7 +3631,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
           {cropBox && !isPreviewingCapturedImage && (
               <div 
-                className={`absolute border-2 border-blue-500 z-[8003] pointer-events-auto overflow-hidden bg-transparent ${isMovingCropBox ? 'cursor-move' : 'cursor-default'}`}
+                data-mobile-crop-box
+                className={`absolute border-2 border-blue-500 z-[8003] pointer-events-auto overflow-hidden bg-transparent max-md:touch-none ${isMovingCropBox ? 'cursor-move' : 'cursor-default'}`}
                 style={{
                   left: (() => {
                     void exportOverlayTick;
@@ -2839,14 +3660,76 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                      void handleExportToImage();
                   }
                 }}
+                onTouchStart={(e) => {
+                  if (!isMobileViewport() || e.touches.length > 1 || !cropBox) return;
+                  const target = e.target as HTMLElement;
+                  if (target.closest("[data-crop-handle]")) return;
+                  e.stopPropagation();
+                  const pt = getPointerClientXY(e);
+                  if (!pt) return;
+                  if (e.cancelable) e.preventDefault();
+                  mobileCropGestureLockRef.current = true;
+                  const b = clientToBoard(pt.clientX, pt.clientY);
+                  setIsMovingCropBox(true);
+                  setMovingCropOffset({ x: b.x - cropBox.x, y: b.y - cropBox.y });
+                }}
+                onTouchMove={(e) => {
+                  if (!mobileCropGestureLockRef.current && !isMovingCropBox && !resizingCropHandle) return;
+                  e.stopPropagation();
+                  if (e.cancelable) e.preventDefault();
+                  const pt = getPointerClientXY(e);
+                  if (!pt) return;
+                  applyCropBoxPointerMove(pt.clientX, pt.clientY);
+                }}
+                onTouchEnd={(e) => {
+                  if (!mobileCropGestureLockRef.current && !isMovingCropBox && !resizingCropHandle) return;
+                  e.stopPropagation();
+                  endCropGesture();
+                }}
+                onMouseMove={(e) => {
+                  if (!isMovingCropBox && !resizingCropHandle) return;
+                  if (e.buttons === 0) return;
+                  e.stopPropagation();
+                  applyCropBoxPointerMove(e.clientX, e.clientY);
+                }}
+                onMouseUp={(e) => {
+                  if (!isMovingCropBox && !resizingCropHandle) return;
+                  e.stopPropagation();
+                  endCropGesture();
+                }}
               >
-              {/* Resizing handles - Only show Top-Left or similar if needed? 
-                  User said: "Designing cannot pul other corners to adjust area" 
-                  So we only provide ONE handle or just let them draw and click.
-              */}
-              <div className="absolute -bottom-3 -right-3 w-6 h-6 bg-white border-2 border-blue-500 rounded-full shadow-xl cursor-nwse-resize z-10 flex items-center justify-center" onMouseDown={(e) => { e.stopPropagation(); setResizingCropHandle('br'); }}>
+              <div className="hidden md:flex absolute -bottom-3 -right-3 w-6 h-6 bg-white border-2 border-blue-500 rounded-full shadow-xl cursor-nwse-resize z-10 items-center justify-center" onMouseDown={(e) => { e.stopPropagation(); setResizingCropHandle('br'); }}>
                 <div className="w-2 h-2 bg-blue-500 rounded-full" />
               </div>
+              {(["tl", "tr", "bl", "br"] as const).map((corner) => {
+                const pos =
+                  corner === "tl"
+                    ? "-top-3 -left-3 cursor-nwse-resize"
+                    : corner === "tr"
+                      ? "-top-3 -right-3 cursor-nesw-resize"
+                      : corner === "bl"
+                        ? "-bottom-3 -left-3 cursor-nesw-resize"
+                        : "-bottom-3 -right-3 cursor-nwse-resize";
+                return (
+                  <div
+                    key={corner}
+                    data-crop-handle={corner}
+                    className={`md:hidden absolute w-8 h-8 bg-white border-2 border-blue-500 rounded-full shadow-xl z-10 flex items-center justify-center touch-none ${pos}`}
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      setResizingCropHandle(corner);
+                    }}
+                    onTouchStart={(e) => {
+                      e.stopPropagation();
+                      if (e.cancelable) e.preventDefault();
+                      mobileCropGestureLockRef.current = true;
+                      setResizingCropHandle(corner);
+                    }}
+                  >
+                    <div className="w-2.5 h-2.5 bg-blue-500 rounded-full" />
+                  </div>
+                );
+              })}
               <div className="absolute -top-12 left-0 bg-blue-600 text-white text-[10px] font-black px-4 py-1.5 rounded-lg flex items-center gap-2 shadow-lg">
                 <span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" />
                 选区已就绪
@@ -2866,19 +3749,23 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
           <div className="fixed bottom-12 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-white/95 backdrop-blur-2xl border border-gray-100 p-2 rounded-full shadow-[0_20px_50px_rgba(0,0,0,0.2)] pointer-events-auto z-[9000]">
             <button 
               onClick={() => { setIsFinalMode(false); setCropBox(null); setIsSelectingCrop(false); setCropStart(null); }} 
-              className="px-8 py-3 rounded-full text-xs font-bold hover:bg-gray-100 transition-all text-gray-500 hover:text-black" 
+              className="md:px-8 md:py-3 w-11 h-11 md:w-auto md:h-auto rounded-full text-xs font-bold hover:bg-gray-100 transition-all text-gray-500 hover:text-black flex items-center justify-center shrink-0" 
               disabled={isExporting}
+              aria-label="放弃导出"
             >
-              放弃导出
+              <span className="hidden md:inline">放弃导出</span>
+              <span className="md:hidden text-lg leading-none" aria-hidden>✕</span>
             </button>
             <button 
               type="button"
               onClick={() => void handleExportToImage()} 
               disabled={!cropBox || isExporting} 
-              className={`px-12 py-3 rounded-full text-xs font-black shadow-xl transition-all flex items-center gap-2 active:scale-95 ${!cropBox ? 'bg-gray-100 text-gray-300' : 'bg-blue-600 text-white hover:bg-blue-700 hover:scale-105 hover:shadow-blue-500/40'}`}
+              className={`md:px-12 md:py-3 w-11 h-11 md:w-auto md:h-auto rounded-full text-xs font-black shadow-xl transition-all flex items-center justify-center gap-2 active:scale-95 shrink-0 ${!cropBox ? 'bg-gray-100 text-gray-300' : 'bg-blue-600 text-white hover:bg-blue-700 md:hover:scale-105 hover:shadow-blue-500/40'}`}
+              aria-label={isExporting ? '开始生成' : '预览成图'}
             >
               {isExporting && <div className="w-3 h-3 border-2 border-white/20 border-t-white rounded-full animate-spin" />}
-              <span>{isExporting ? '开始生成...' : '预览成图'}</span>
+              <span className="hidden md:inline">{isExporting ? '开始生成...' : '预览成图'}</span>
+              <span className="md:hidden text-lg leading-none" aria-hidden>👁️</span>
             </button>
           </div>
         </div>
@@ -2893,10 +3780,15 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     setVisualAnnotations(null);
     setMatchResults(null);
   }}
-  className="absolute bottom-8 right-8 h-14 bg-black text-white rounded-full shadow-2xl flex items-center gap-3 px-6 group hover:scale-105 transition-all z-[60] border border-white/20"
+  className={`absolute bg-black text-white rounded-full shadow-2xl flex items-center group hover:scale-105 transition-all z-[60] border border-white/20 md:bottom-8 md:right-8 md:h-14 md:px-6 md:gap-3 ${
+    smartMatchSucceeded
+      ? "bottom-[6.75rem] right-6 h-11 w-11 justify-center gap-0 px-0"
+      : "bottom-8 right-8 h-14 px-6 gap-3"
+  }`}
+  aria-label="智能匹配"
 >
   <span className="text-xl group-hover:rotate-12 transition-transform">✨</span>
-  <span className="text-sm font-black tracking-widest">智能匹配</span>
+  <span className={`text-sm font-black tracking-widest ${smartMatchSucceeded ? "hidden md:inline" : ""}`}>智能匹配</span>
 </button>
       </div>
 
@@ -3010,44 +3902,100 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
       )}
       {/* Result Preview Modal */}
       {isPreviewingCapturedImage && capturedImageData && (
-        <div className="fixed inset-0 z-[6000] flex items-center justify-center bg-black/90 backdrop-blur-xl p-4 md:p-12">
-          <div className="bg-white rounded-3xl overflow-hidden shadow-2xl flex flex-col max-w-7xl w-full max-h-full">
-            <div className="p-4 border-b flex justify-between items-center bg-gray-50">
+        <div className="fixed inset-0 z-[6000] flex flex-col md:items-center md:justify-center bg-black/90 backdrop-blur-xl p-0 md:p-12">
+          <div className="bg-white md:rounded-3xl overflow-hidden shadow-2xl flex flex-col w-full h-full md:h-auto md:max-h-full md:max-w-7xl min-h-0 min-w-0">
+            <div className="p-4 border-b flex justify-between items-center bg-gray-50 shrink-0">
               <h3 className="font-black text-sm tracking-tight flex items-center gap-2">
                 <span className="w-2 h-2 bg-green-500 rounded-full" />
                 画面预览
               </h3>
               <button 
-                onClick={() => setIsPreviewingCapturedImage(false)}
+                onClick={handleMobileReturnFromPreview}
                 className="p-2 hover:bg-gray-200 rounded-full transition-colors"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/></svg>
               </button>
             </div>
             
-            <div className="flex-1 overflow-auto p-4 md:p-8 bg-[#f5f5f7] flex items-center justify-center">
+            <div className="flex-1 min-h-0 min-w-0 overflow-auto p-3 md:p-8 bg-[#f5f5f7] flex items-start md:items-center justify-center w-full">
               <img 
                 src={capturedImageData} 
-                className="max-w-full max-h-[70vh] rounded-sm bg-white shadow-none ring-0"
+                className="block w-full h-auto max-w-full object-contain rounded-sm bg-white shadow-none ring-0 md:max-h-[70vh] md:w-auto md:max-w-full"
                 alt="Captured Moodboard"
               />
             </div>
             
-            <div className="p-6 border-t bg-white flex items-center justify-center gap-4">
+            <div className="p-4 md:p-6 border-t bg-white flex items-center justify-center gap-3 md:gap-4 shrink-0 pb-[max(1rem,env(safe-area-inset-bottom))]">
               <button 
-                onClick={() => setIsPreviewingCapturedImage(false)}
-                className="px-10 py-3 rounded-full text-sm font-bold border border-gray-200 hover:bg-gray-50 transition-all text-gray-500"
+                onClick={handleMobileReturnFromPreview}
+                className="px-6 md:px-10 py-3 rounded-full text-sm font-bold border border-gray-200 hover:bg-gray-50 transition-all text-gray-500"
               >
                 返回调整
               </button>
               <button 
                 onClick={handleFinalSave}
-                className="px-14 py-3 rounded-full bg-black text-white text-sm font-black shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center gap-2"
+                className="px-8 md:px-14 py-3 rounded-full bg-black text-white text-sm font-black shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center gap-2"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
                 确认并保存 JPG
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 手机端：底部抽屉编辑名称 / 规格 */}
+      {mobileEditSheet && (
+        <div className="md:hidden fixed inset-0 z-[9100]">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setMobileEditSheet(null)}
+            aria-hidden
+          />
+          <div className="absolute bottom-0 left-0 right-0 bg-white rounded-t-2xl shadow-2xl border-t border-gray-100 px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))]">
+            <div className="w-10 h-1 bg-gray-200 rounded-full mx-auto mb-3" />
+            <div className="flex items-center justify-between mb-3">
+              <button
+                type="button"
+                className="text-sm font-bold text-gray-500 px-2 py-1"
+                onClick={() => setMobileEditSheet(null)}
+              >
+                取消
+              </button>
+              <span className="text-xs font-black text-gray-800">
+                {mobileEditSheet.type === "boardName"
+                  ? "编辑情绪板名称"
+                  : mobileEditSheet.type === "itemTitle"
+                    ? "编辑材料名称"
+                    : "编辑规格尺寸"}
+              </span>
+              <button
+                type="button"
+                className="text-sm font-black text-blue-600 px-2 py-1"
+                onClick={commitMobileEditSheet}
+              >
+                保存
+              </button>
+            </div>
+            <input
+              ref={mobileEditInputRef}
+              type="text"
+              value={mobileEditSheet.draft}
+              onChange={(e) =>
+                setMobileEditSheet((prev) =>
+                  prev ? { ...prev, draft: e.target.value } : prev
+                )
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitMobileEditSheet();
+              }}
+              className="w-full text-base font-bold text-black bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-black/10"
+              placeholder={
+                mobileEditSheet.type === "itemTitle"
+                  ? LOCAL_MATERIAL_NAME_PLACEHOLDER
+                  : "请输入"
+              }
+            />
           </div>
         </div>
       )}
@@ -3081,7 +4029,11 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                   const id = specEditModalItemId;
                   patchBoardItem(id, { specEditWarningAcked: true });
                   setSpecEditModalItemId(null);
-                  setEditingSpecId(id);
+                  if (isMobileViewport()) {
+                    openMobileItemSpecSheet(id);
+                  } else {
+                    setEditingSpecId(id);
+                  }
                 }}
               >
                 确认修改

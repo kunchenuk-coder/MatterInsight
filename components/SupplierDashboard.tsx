@@ -715,28 +715,28 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                 )}
                 <div>
                   <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">材料名称</label>
-                  <input required autoComplete="off" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} type="text" className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all" placeholder="例如: 意式极简大理石" />
+                  <input required autoComplete="new-password" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} type="text" className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all" placeholder="例如: 意式极简大理石" />
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">材料分类</label>
-                    <select value={formData.category} onChange={e => setFormData({...formData, category: e.target.value as Category})} className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all">
+                    <select autoComplete="off" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value as Category})} className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all">
                       {CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
                     </select>
                   </div>
                   <div>
                     <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">价格区间</label>
-                    <input required value={formData.priceRange} onChange={e => setFormData({...formData, priceRange: e.target.value})} type="text" className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all" placeholder="¥500-800/㎡" />
+                    <input required autoComplete="new-password" value={formData.priceRange} onChange={e => setFormData({...formData, priceRange: e.target.value})} type="text" className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all" placeholder="¥500-800/㎡" />
                   </div>
                 </div>
                 <div>
                   <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">规格尺寸</label>
-                  <input required value={formData.specifications} onChange={e => setFormData({...formData, specifications: e.target.value})} type="text" className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all" placeholder="600x1200x12mm" />
+                  <input required autoComplete="new-password" value={formData.specifications} onChange={e => setFormData({...formData, specifications: e.target.value})} type="text" className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all" placeholder="600x1200x12mm" />
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">防火等级</label>
-                    <select value={formData.fireRating} onChange={e => setFormData({...formData, fireRating: e.target.value})} className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all">
+                    <select autoComplete="off" value={formData.fireRating} onChange={e => setFormData({...formData, fireRating: e.target.value})} className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all">
                       <option value="Class A">Class A (不燃)</option>
                       <option value="Class B1">Class B1 (难燃)</option>
                       <option value="Class B2">Class B2 (可燃)</option>
@@ -745,12 +745,13 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                   </div>
                   <div>
                     <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">生产周期</label>
-                    <input required value={formData.leadTime} onChange={e => setFormData({...formData, leadTime: e.target.value})} type="text" className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all" placeholder="15天" />
+                    <input required autoComplete="off" value={formData.leadTime} onChange={e => setFormData({...formData, leadTime: e.target.value})} type="text" className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all" placeholder="15天" />
                   </div>
                 </div>
                 <div>
                   <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">材料商备注 (显示在详情页)</label>
                   <textarea 
+                    autoComplete="new-password"
                     value={formData.supplierNotes} 
                     onChange={e => setFormData({...formData, supplierNotes: e.target.value})} 
                     className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all h-24 resize-none" 

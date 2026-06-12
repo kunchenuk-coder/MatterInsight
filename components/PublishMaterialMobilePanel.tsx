@@ -84,7 +84,7 @@ const PublishMaterialMobilePanel: React.FC<PublishMaterialMobilePanelProps> = ({
             <label className={labelCls}>材料名称</label>
             <input
               required
-              autoComplete="off"
+              autoComplete="new-password"
               value={formData.name}
               onChange={(e) => setFormData({ ...formData, name: e.target.value })}
               type="text"
@@ -97,6 +97,7 @@ const PublishMaterialMobilePanel: React.FC<PublishMaterialMobilePanelProps> = ({
             <div>
               <label className={labelCls}>材料分类</label>
               <select
+                autoComplete="off"
                 value={formData.category}
                 onChange={(e) =>
                   setFormData({ ...formData, category: e.target.value as Category })
@@ -114,6 +115,7 @@ const PublishMaterialMobilePanel: React.FC<PublishMaterialMobilePanelProps> = ({
               <label className={labelCls}>价格区间</label>
               <input
                 required
+                autoComplete="new-password"
                 value={formData.priceRange}
                 onChange={(e) => setFormData({ ...formData, priceRange: e.target.value })}
                 type="text"
@@ -127,6 +129,7 @@ const PublishMaterialMobilePanel: React.FC<PublishMaterialMobilePanelProps> = ({
             <label className={labelCls}>规格尺寸</label>
             <input
               required
+              autoComplete="new-password"
               value={formData.specifications}
               onChange={(e) =>
                 setFormData({ ...formData, specifications: e.target.value })
@@ -151,6 +154,7 @@ const PublishMaterialMobilePanel: React.FC<PublishMaterialMobilePanelProps> = ({
                 <div>
                   <label className={labelCls}>防火等级</label>
                   <select
+                    autoComplete="off"
                     value={formData.fireRating}
                     onChange={(e) =>
                       setFormData({ ...formData, fireRating: e.target.value })
@@ -167,6 +171,7 @@ const PublishMaterialMobilePanel: React.FC<PublishMaterialMobilePanelProps> = ({
                   <label className={labelCls}>生产周期</label>
                   <input
                     required
+                    autoComplete="off"
                     value={formData.leadTime}
                     onChange={(e) => setFormData({ ...formData, leadTime: e.target.value })}
                     type="text"
@@ -178,6 +183,7 @@ const PublishMaterialMobilePanel: React.FC<PublishMaterialMobilePanelProps> = ({
               <div>
                 <label className={labelCls}>材料商备注</label>
                 <textarea
+                  autoComplete="new-password"
                   value={formData.supplierNotes}
                   onChange={(e) =>
                     setFormData({ ...formData, supplierNotes: e.target.value })
