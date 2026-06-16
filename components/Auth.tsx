@@ -43,12 +43,17 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
       }
 
       if (isLogin) {
-        const result = await signIn(trimmedEmail, trimmedPassword);
+        const result = await signIn(trimmedEmail, trimmedPassword, role);
         if (!result.ok) {
-          setError(LOGIN_FAILED_MSG);
+          setError(result.error);
           return;
         }
         onAuthSuccess(result.user);
+        return;
+      }
+
+      if (role === 'ADMIN') {
+        setError('管理员账号请联系平台开通，无法自助注册');
         return;
       }
 
@@ -64,6 +69,8 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
       setLoading(false);
     }
   };
+
+  const isRoleMismatchError = error.includes('账号角色不符');
 
   return (
     <div className="min-h-screen bg-[#111] flex items-center justify-center p-6 overflow-hidden relative">
@@ -88,21 +95,30 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
         <div className="flex bg-gray-100 p-1 rounded-2xl mb-8">
           <button
             type="button"
-            onClick={() => setRole('DESIGNER')}
+            onClick={() => {
+              setRole('DESIGNER');
+              setError('');
+            }}
             className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all ${role === 'DESIGNER' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}
           >
             设计师
           </button>
           <button
             type="button"
-            onClick={() => setRole('SUPPLIER')}
+            onClick={() => {
+              setRole('SUPPLIER');
+              setError('');
+            }}
             className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all ${role === 'SUPPLIER' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}
           >
             材料商
           </button>
           <button
             type="button"
-            onClick={() => setRole('ADMIN')}
+            onClick={() => {
+              setRole('ADMIN');
+              setError('');
+            }}
             className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all ${role === 'ADMIN' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}
           >
             管理端
@@ -140,7 +156,14 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
           </div>
 
           {error && (
-            <div role="alert" className="rounded-2xl bg-red-600/20 border border-red-500 px-4 py-3">
+            <div
+              role="alert"
+              className={`rounded-2xl px-4 py-3 border ${
+                isRoleMismatchError
+                  ? 'bg-red-600/25 border-red-500'
+                  : 'bg-red-600/20 border-red-500'
+              }`}
+            >
               <p className="text-red-400 text-sm font-bold text-center leading-snug">{error}</p>
             </div>
           )}

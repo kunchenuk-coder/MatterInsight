@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, Component } from 'react';
 import { User, UserRole, Material, Category, MoodBoard, PointTransaction, PendingMaterial, Inquiry, SampleRequest, MaterialStatus, AuditLog, Notification } from './types';
 import { MOCK_MATERIALS } from './constants';
@@ -33,6 +32,14 @@ import {
   fetchVerificationRequestsForAdmin,
   updateVerificationRequest,
 } from './services/profileService';
+
+/** 启动诊断：确认 Vite 是否注入环境变量（构建时打入，非运行时读取 .env.local） */
+console.log('[MatterInsight boot] VITE_SUPABASE_URL:', import.meta.env.VITE_SUPABASE_URL);
+console.log(
+  '[MatterInsight boot] VITE_SUPABASE_ANON_KEY:',
+  import.meta.env.VITE_SUPABASE_ANON_KEY ? '已加载' : '未加载'
+);
+console.log('[MatterInsight boot] MODE:', import.meta.env.MODE, 'PROD:', import.meta.env.PROD);
 
 // Error Boundary Component
 interface ErrorBoundaryProps {
@@ -249,12 +256,22 @@ const App: React.FC = () => {
 
   /** Supabase Session 恢复与监听 */
   useEffect(() => {
+    console.log('App rendered');
+
     if (!isSupabaseConfigured()) {
+      console.warn('[MatterInsight] Supabase 未配置，跳过 session 恢复');
       setAuthReady(true);
       return;
     }
 
     let cancelled = false;
+    const AUTH_BOOT_TIMEOUT_MS = 10_000;
+    const bootTimeout = window.setTimeout(() => {
+      if (!cancelled) {
+        console.warn('[MatterInsight] session 恢复超时，强制展示登录页');
+        setAuthReady(true);
+      }
+    }, AUTH_BOOT_TIMEOUT_MS);
 
     const hydrateFromCloud = async (userData: User) => {
       skipCloudSyncRef.current = true;
@@ -293,24 +310,36 @@ const App: React.FC = () => {
     };
 
     (async () => {
-      const restored = await restoreSession();
-      if (!cancelled && restored) {
-        await hydrateFromCloud(restored);
+      try {
+        const restored = await restoreSession();
+        if (!cancelled && restored) {
+          await hydrateFromCloud(restored);
+        }
+      } catch (err) {
+        console.error('[MatterInsight] session 恢复失败，回退到登录页:', err);
+      } finally {
+        if (!cancelled) setAuthReady(true);
+        window.clearTimeout(bootTimeout);
       }
-      if (!cancelled) setAuthReady(true);
     })();
 
-    const unsub = onAuthStateChange((nextUser) => {
-      if (!nextUser) {
-        setUser(null);
-        setSavedMaterialIds([]);
-        setMoodboards([]);
-        setActiveMoodboardId('');
-      }
-    });
+    let unsub = () => {};
+    try {
+      unsub = onAuthStateChange((nextUser) => {
+        if (!nextUser) {
+          setUser(null);
+          setSavedMaterialIds([]);
+          setMoodboards([]);
+          setActiveMoodboardId('');
+        }
+      });
+    } catch (err) {
+      console.error('[MatterInsight] onAuthStateChange 注册失败:', err);
+    }
 
     return () => {
       cancelled = true;
+      window.clearTimeout(bootTimeout);
       unsub();
     };
   }, []);
@@ -735,7 +764,12 @@ const App: React.FC = () => {
   }
 
   if (!authReady) {
-    return <div className="min-h-screen bg-[#111]" />;
+    return (
+      <div className="min-h-screen bg-[#111] flex flex-col items-center justify-center gap-4 p-6">
+        <div className="w-10 h-10 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+        <p className="text-white/70 text-sm font-bold tracking-wide">正在加载…</p>
+      </div>
+    );
   }
 
   if (!user) {
@@ -755,7 +789,7 @@ const App: React.FC = () => {
   return (
     <ErrorBoundary>
       <div className="min-h-screen flex flex-col">
-        <Navbar 
+        <Navbar
           user={user} 
           points={points} 
           onLogoClick={() => setCurrentView('HOME')} 

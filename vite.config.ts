@@ -13,6 +13,8 @@ export default defineConfig(({ mode }) => {
     Object.assign(process.env, env);
 
     return {
+      envDir: __dirname,
+      envPrefix: 'VITE_',
       server: {
         port: 3000,
         host: '0.0.0.0',

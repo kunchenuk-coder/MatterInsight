@@ -1,4 +1,10 @@
 
+console.log('[MatterInsight index] VITE_SUPABASE_URL:', import.meta.env.VITE_SUPABASE_URL);
+console.log(
+  '[MatterInsight index] VITE_SUPABASE_ANON_KEY:',
+  import.meta.env.VITE_SUPABASE_ANON_KEY ? '已加载' : '未加载'
+);
+
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
