@@ -1,6 +1,7 @@
 import type { User, UserRole } from '../types';
 import type { User as SupabaseAuthUser } from '@supabase/supabase-js';
 import { getSupabase, supabase, isSupabaseConfigured } from './supabaseClient';
+import { getPasswordResetRedirectUrl, isPasswordRecoveryFromUrl, isPasswordRecoveryMode, isResetPasswordRoute, lockPasswordRecoveryMode } from '../utils/authRoutes';
 import {
   dbRoleToUserRole,
   fetchProfile,
@@ -38,6 +39,10 @@ function mapSignUpError(message: string): string {
 /** 选项卡与数据库角色不一致时的提示 */
 export function roleMismatchMessage(actualRole: UserRole): string {
   return `您的账号角色不符，请切换至${PORTAL_LABEL[actualRole]}入口登录！`;
+}
+
+export function isRoleMismatchError(message: string): boolean {
+  return message.includes('账号角色不符');
 }
 
 function mapProfileToUser(
@@ -125,7 +130,14 @@ export async function signIn(
     return { ok: false, error: '账号资料异常，请联系客服' };
   }
 
-  const actualRole = dbRoleToUserRole(profile.role);
+  let actualRole: UserRole;
+  try {
+    actualRole = dbRoleToUserRole(profile.role);
+  } catch {
+    await client.auth.signOut();
+    return { ok: false, error: '账号角色数据异常，请联系客服' };
+  }
+
   if (actualRole !== expectedRole) {
     await client.auth.signOut();
     return { ok: false, error: roleMismatchMessage(actualRole) };
@@ -138,9 +150,10 @@ export async function signOut(): Promise<void> {
   await getSupabase().auth.signOut();
 }
 
-/** 刷新页面时按 profiles 真实角色恢复（不做选项卡校验） */
+/** 刷新页面时按 profiles 真实角色恢复（recovery 模式下一律不恢复进主页） */
 export async function restoreSession(): Promise<User | null> {
   if (!isSupabaseConfigured()) return null;
+  if (isPasswordRecoveryMode()) return null;
 
   const { data, error } = await supabase.auth.getSession();
   if (error || !data.session?.user) return null;
@@ -160,6 +173,17 @@ export function onAuthStateChange(
   if (!isSupabaseConfigured()) return () => {};
 
   const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
+    if (event === 'PASSWORD_RECOVERY') {
+      lockPasswordRecoveryMode(true);
+      callback(null);
+      return;
+    }
+
+    if (isPasswordRecoveryMode()) {
+      callback(null);
+      return;
+    }
+
     if (event === 'SIGNED_OUT' || !session?.user) {
       callback(null);
       return;
@@ -184,4 +208,87 @@ export function onAuthStateChange(
 export async function getAccessToken(): Promise<string | null> {
   const { data } = await getSupabase().auth.getSession();
   return data.session?.access_token ?? null;
+}
+
+/** 发送密码重置邮件 */
+export async function requestPasswordReset(
+  email: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const trimmed = email.trim();
+  if (!trimmed) {
+    return { ok: false, error: '请输入邮箱地址' };
+  }
+
+  const { error } = await getSupabase().auth.resetPasswordForEmail(trimmed, {
+    redirectTo: getPasswordResetRedirectUrl(),
+  });
+
+  if (error) {
+    console.error('[authService] requestPasswordReset:', error.message);
+    return { ok: false, error: '发送失败，请检查邮箱地址后重试' };
+  }
+
+  return { ok: true };
+}
+
+/** 重置密码页：写入新密码 */
+export async function updatePassword(
+  newPassword: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { error } = await getSupabase().auth.updateUser({ password: newPassword });
+
+  if (error) {
+    const lower = error.message.toLowerCase();
+    if (lower.includes('password') || lower.includes('weak')) {
+      return { ok: false, error: '密码不符合要求，请使用至少 6 位字符' };
+    }
+    return { ok: false, error: error.message };
+  }
+
+  return { ok: true };
+}
+
+/**
+ * 等待邮件链接带来的 recovery session 就绪（hash 含 type=recovery）。
+ */
+export async function waitForRecoverySession(timeoutMs = 15_000): Promise<boolean> {
+  if (!isSupabaseConfigured()) return false;
+
+  lockPasswordRecoveryMode(true);
+  const client = getSupabase();
+
+  const hasRecoverySession = async (): Promise<boolean> => {
+    const { data } = await client.auth.getSession();
+    return Boolean(data.session);
+  };
+
+  if (isPasswordRecoveryFromUrl() && (await hasRecoverySession())) return true;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      subscription.unsubscribe();
+      if (value) lockPasswordRecoveryMode(true);
+      resolve(value);
+    };
+
+    const timer = window.setTimeout(() => finish(false), timeoutMs);
+
+    const { data: { subscription } } = client.auth.onAuthStateChange((event, session) => {
+      if (!session) return;
+      if (event === 'PASSWORD_RECOVERY') {
+        finish(true);
+        return;
+      }
+      if (
+        event === 'SIGNED_IN' &&
+        (isPasswordRecoveryFromUrl() || isResetPasswordRoute() || isPasswordRecoveryMode())
+      ) {
+        finish(true);
+      }
+    });
+  });
 }

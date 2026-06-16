@@ -3,6 +3,7 @@ import { User, UserRole, Material, Category, MoodBoard, PointTransaction, Pendin
 import { MOCK_MATERIALS } from './constants';
 import Navbar from './components/Navbar';
 import Auth from './components/Auth';
+import ResetPassword from './components/ResetPassword';
 import PinterestFeed from './components/PinterestFeed';
 import CategoryBar from './components/CategoryBar';
 import MaterialDetail from './components/MaterialDetail';
@@ -32,6 +33,10 @@ import {
   fetchVerificationRequestsForAdmin,
   updateVerificationRequest,
 } from './services/profileService';
+import {
+  isPasswordRecoveryMode,
+  lockPasswordRecoveryMode,
+} from './utils/authRoutes';
 
 /** 启动诊断：确认 Vite 是否注入环境变量（构建时打入，非运行时读取 .env.local） */
 console.log('[MatterInsight boot] VITE_SUPABASE_URL:', import.meta.env.VITE_SUPABASE_URL);
@@ -111,6 +116,7 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [recoveryMode, setRecoveryMode] = useState(() => isPasswordRecoveryMode());
   const skipCloudSyncRef = useRef(true);
   const [currentView, setCurrentView] = useState<'HOME' | 'DETAILS' | 'MOODBOARD' | 'DASHBOARD'>('HOME');
   const [selectedMaterial, setSelectedMaterial] = useState<Material | null>(null);
@@ -254,12 +260,42 @@ const App: React.FC = () => {
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [user?.role, user?.id]);
 
+  /** recovery 模式：最高优先级，禁止 session 恢复进主页 */
+  useEffect(() => {
+    const syncRecovery = () => {
+      const active = isPasswordRecoveryMode();
+      setRecoveryMode(active);
+      if (active) {
+        setUser(null);
+        setSavedMaterialIds([]);
+        setMoodboards([]);
+        setActiveMoodboardId('');
+      }
+    };
+
+    syncRecovery();
+    window.addEventListener('hashchange', syncRecovery);
+    window.addEventListener('popstate', syncRecovery);
+    return () => {
+      window.removeEventListener('hashchange', syncRecovery);
+      window.removeEventListener('popstate', syncRecovery);
+    };
+  }, []);
+
   /** Supabase Session 恢复与监听 */
   useEffect(() => {
     console.log('App rendered');
 
     if (!isSupabaseConfigured()) {
       console.warn('[MatterInsight] Supabase 未配置，跳过 session 恢复');
+      setAuthReady(true);
+      return;
+    }
+
+    if (isPasswordRecoveryMode()) {
+      lockPasswordRecoveryMode(true);
+      setRecoveryMode(true);
+      setUser(null);
       setAuthReady(true);
       return;
     }
@@ -306,6 +342,7 @@ const App: React.FC = () => {
         setActiveMoodboardId('');
       }
       setPoints(userData.points);
+      setCurrentView('DASHBOARD');
       setTimeout(() => { skipCloudSyncRef.current = false; }, 500);
     };
 
@@ -326,6 +363,10 @@ const App: React.FC = () => {
     let unsub = () => {};
     try {
       unsub = onAuthStateChange((nextUser) => {
+        if (isPasswordRecoveryMode()) {
+          setUser(null);
+          return;
+        }
         if (!nextUser) {
           setUser(null);
           setSavedMaterialIds([]);
@@ -453,6 +494,7 @@ const App: React.FC = () => {
   };
 
   const handleAuthSuccess = async (userData: User) => {
+    if (isPasswordRecoveryMode()) return;
     if (!isSupabaseConfigured()) return;
 
     const token = await getAccessToken();
@@ -494,12 +536,12 @@ const App: React.FC = () => {
       setActiveMoodboardId('');
     }
     setPoints(userData.points);
+    setCurrentView('DASHBOARD');
     setTimeout(() => { skipCloudSyncRef.current = false; }, 500);
 
     if ((userData as User & { showWelcomeBonus?: boolean }).showWelcomeBonus) {
       setShowWelcomeBonus(true);
     }
-    if (userData.role === 'SUPPLIER') setCurrentView('HOME');
   };
 
   const handleSubmitMaterialForReview = async (mat: PendingMaterial) => {
@@ -770,6 +812,11 @@ const App: React.FC = () => {
         <p className="text-white/70 text-sm font-bold tracking-wide">正在加载…</p>
       </div>
     );
+  }
+
+  // 最高优先级：recovery 模式绝对禁止进入 Dashboard
+  if (recoveryMode || isPasswordRecoveryMode()) {
+    return <ResetPassword />;
   }
 
   if (!user) {
