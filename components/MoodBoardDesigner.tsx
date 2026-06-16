@@ -34,6 +34,9 @@ import {
   LOCAL_TEMP_DEFAULT_SPEC,
 } from '../utils/localDesignerMaterials';
 import { isQuotaExceededError } from "../utils/moodboardStorage";
+import { uploadImage } from '../services/uploadService';
+import { fetchLocalMaterials, insertLocalMaterial } from '../services/localMaterialService';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 
 const DRAG_LOCAL_MATERIAL_MIME = "application/x-matter-local-material-id";
 
@@ -1052,7 +1055,17 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   }, [canvasContextMenu]);
 
   useEffect(() => {
-    setLocalMaterialsList(loadLocalDesignerMaterials(user.id));
+    if (!user.id) return;
+    (async () => {
+      if (isSupabaseConfigured()) {
+        const remote = await fetchLocalMaterials(user.id);
+        if (remote.length > 0) {
+          setLocalMaterialsList(remote);
+          return;
+        }
+      }
+      setLocalMaterialsList(loadLocalDesignerMaterials(user.id));
+    })();
   }, [user.id]);
 
   useEffect(() => {
@@ -1653,18 +1666,27 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     });
   };
 
-  /** 压缩并生成统一的 LocalTemporaryMaterial */
+  /** 上传至 OSS（或回退 base64）并生成 LocalTemporaryMaterial */
   const buildLocalTemporaryFromFile = async (
     file: File
   ): Promise<LocalTemporaryMaterial | null> => {
-    const compressedBase64 = await compressImage(file);
-    if (!compressedBase64.startsWith("data:image/jpeg")) {
-      throw new Error("INVALID_COMPRESSED_FORMAT");
+    const { url } = await uploadImage(file, 'local-materials');
+
+    if (url.startsWith('data:')) {
+      if (!url.startsWith("data:image/jpeg")) {
+        throw new Error("INVALID_COMPRESSED_FORMAT");
+      }
+      if (dataUrlByteSize(url) > LOCAL_CANVAS_MATERIAL_TARGET_MAX_BYTES * 1.2) {
+        throw new Error("IMAGE_TOO_LARGE_AFTER_COMPRESS");
+      }
     }
-    if (dataUrlByteSize(compressedBase64) > LOCAL_CANVAS_MATERIAL_TARGET_MAX_BYTES * 1.2) {
-      throw new Error("IMAGE_TOO_LARGE_AFTER_COMPRESS");
+
+    if (isSupabaseConfigured()) {
+      const remote = await insertLocalMaterial(user.id, url);
+      if (remote) return remote;
     }
-    return createLocalTemporaryMaterial(user.id, compressedBase64);
+
+    return createLocalTemporaryMaterial(user.id, url);
   };
 
   /** 仅写入左侧「本地材料」列表（localStorage + React state） */

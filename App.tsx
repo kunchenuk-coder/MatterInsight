@@ -18,6 +18,21 @@ import {
   pruneMoodboardsForQuota,
   stripLargestDrawingImages,
 } from './utils/moodboardStorage';
+import { isSupabaseConfigured } from './services/supabaseClient';
+import { restoreSession, signOut, onAuthStateChange, getAccessToken } from './services/authService';
+import { syncMoodboards } from './services/moodboardService';
+import { syncSavedMaterialIds } from './services/savedMaterialService';
+import {
+  submitPendingMaterial,
+  approveMaterial as cloudApproveMaterial,
+  rejectMaterial as cloudRejectMaterial,
+} from './services/materialService';
+import { loadDesignerCloudData, loadGlobalCloudData } from './services/dataSyncService';
+import {
+  approveSupplier,
+  fetchVerificationRequestsForAdmin,
+  updateVerificationRequest,
+} from './services/profileService';
 
 // Error Boundary Component
 interface ErrorBoundaryProps {
@@ -88,6 +103,8 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 
 const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const skipCloudSyncRef = useRef(true);
   const [currentView, setCurrentView] = useState<'HOME' | 'DETAILS' | 'MOODBOARD' | 'DASHBOARD'>('HOME');
   const [selectedMaterial, setSelectedMaterial] = useState<Material | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
@@ -189,7 +206,9 @@ const App: React.FC = () => {
   const [notifications, setNotifications] = useState<Notification[]>(() => getFromLocal('notifications') || []);
   const [activeMoodboardId, setActiveMoodboardId] = useState<string>('');
   const [savedMaterialIds, setSavedMaterialIds] = useState<string[]>([]);
-  const [verificationRequests, setVerificationRequests] = useState<User[]>(() => getFromLocal('verifications') || []);
+  const [verificationRequests, setVerificationRequests] = useState<User[]>(() =>
+    isSupabaseConfigured() ? [] : getFromLocal('verifications') || []
+  );
   const [verifiedUserIds, setVerifiedUserIds] = useState<string[]>(() => getFromLocal('verified_ids') || []);
   const [isRechargeModalOpen, setIsRechargeModalOpen] = useState(false);
   const [showWelcomeBonus, setShowWelcomeBonus] = useState(false);
@@ -202,9 +221,107 @@ const App: React.FC = () => {
   moodboardsRef.current = moodboards;
   libraryRef.current = library;
 
+  /** 运营后台：从 Supabase 拉取待认证供应商（跨设备同步，不依赖 localStorage） */
+  const refreshVerificationRequestsFromCloud = async () => {
+    if (!isSupabaseConfigured()) return;
+    const rows = await fetchVerificationRequestsForAdmin();
+    setVerificationRequests(rows);
+  };
+
   useEffect(() => {
     setUser((u) => (u ? { ...u, collections: savedMaterialIds } : u));
   }, [savedMaterialIds]);
+
+  /** 管理员登录后及页面重新可见时刷新认证列表 */
+  useEffect(() => {
+    if (!isSupabaseConfigured() || user?.role !== 'ADMIN') return;
+
+    void refreshVerificationRequestsFromCloud();
+
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshVerificationRequestsFromCloud();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [user?.role, user?.id]);
+
+  /** Supabase Session 恢复与监听 */
+  useEffect(() => {
+    if (!isSupabaseConfigured()) {
+      setAuthReady(true);
+      return;
+    }
+
+    let cancelled = false;
+
+    const hydrateFromCloud = async (userData: User) => {
+      skipCloudSyncRef.current = true;
+      const cloudGlobal = await loadGlobalCloudData();
+      if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
+      if (cloudGlobal.pendingMaterials.length > 0) setPendingMaterials(cloudGlobal.pendingMaterials);
+
+      if (userData.role === 'DESIGNER') {
+        const cloud = await loadDesignerCloudData(userData.id);
+        const boards = cloud.moodboards.length > 0
+          ? cloud.moodboards
+          : getFromLocal('moodboards', userData.id) || [
+              { id: `mb_${userData.id}_default`, name: '默认情绪板', items: [], isPaid: false, maxMaterials: 10 },
+            ];
+        const collections = cloud.savedMaterialIds.length > 0
+          ? cloud.savedMaterialIds
+          : (getFromLocal('saved_ids', userData.id) || []);
+        setUser({ ...userData, collections });
+        setSavedMaterialIds(collections);
+        setMoodboards(boards);
+        setActiveMoodboardId(boards[0]?.id ?? '');
+      } else if (userData.role === 'ADMIN') {
+        await refreshVerificationRequestsFromCloud();
+        setUser(userData);
+        setSavedMaterialIds([]);
+        setMoodboards([]);
+        setActiveMoodboardId('');
+      } else {
+        setUser(userData);
+        setSavedMaterialIds([]);
+        setMoodboards([]);
+        setActiveMoodboardId('');
+      }
+      setPoints(userData.points);
+      setTimeout(() => { skipCloudSyncRef.current = false; }, 500);
+    };
+
+    (async () => {
+      const restored = await restoreSession();
+      if (!cancelled && restored) {
+        await hydrateFromCloud(restored);
+      }
+      if (!cancelled) setAuthReady(true);
+    })();
+
+    const unsub = onAuthStateChange((nextUser) => {
+      if (!nextUser) {
+        setUser(null);
+        setSavedMaterialIds([]);
+        setMoodboards([]);
+        setActiveMoodboardId('');
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, []);
+
+  /** 设计师数据同步到 Supabase */
+  useEffect(() => {
+    if (!isSupabaseConfigured() || !user || user.role !== 'DESIGNER') return;
+    if (skipCloudSyncRef.current) return;
+    syncMoodboards(user.id, moodboards);
+    syncSavedMaterialIds(user.id, savedMaterialIds);
+  }, [moodboards, savedMaterialIds, user]);
 
   useEffect(() => {
     if (user && currentView === 'MOODBOARD' && user.role !== 'DESIGNER') {
@@ -249,7 +366,7 @@ const App: React.FC = () => {
     setNotifications(prev => [newNotif, ...prev]);
   };
 
-  const handleApproveMaterial = (id: string, comment: string = '审核通过') => {
+  const handleApproveMaterial = async (id: string, comment: string = '审核通过') => {
     const pending = pendingMaterials.find(p => p.id === id);
     if (pending) {
       const auditEntry: AuditLog = {
@@ -273,11 +390,14 @@ const App: React.FC = () => {
       setLibrary(prev => [...prev, newMat]);
       setPendingMaterials(prev => prev.filter(p => p.id !== id));
       addNotification(pending.submitterId, '材料审核通过', `您的材料 "${pending.name}" 已审核通过并发布。`, 'AUDIT');
+      if (isSupabaseConfigured()) {
+        await cloudApproveMaterial(id, newMat);
+      }
       alert(`材料 "${newMat.name}" 已通过审核并上架！`);
     }
   };
 
-  const handleRejectMaterial = (id: string, comment: string = '不符合上架标准') => {
+  const handleRejectMaterial = async (id: string, comment: string = '不符合上架标准') => {
     const pending = pendingMaterials.find(p => p.id === id);
     if (pending) {
       const auditEntry: AuditLog = {
@@ -286,80 +406,84 @@ const App: React.FC = () => {
         comment,
         operatorId: user?.id || 'admin'
       };
-      // We keep it in pending but mark as rejected, or just remove and notify
-      // User requested "move to rejected status" - let's keep it in pending list for supplier to see
+      const rejected: PendingMaterial = {
+        ...pending,
+        status: MaterialStatus.REJECTED,
+        auditLog: [...pending.auditLog, auditEntry],
+        isAcknowledged: false,
+      };
       setPendingMaterials(prev => prev.map(p => 
-        p.id === id ? { ...p, status: MaterialStatus.REJECTED, auditLog: [...p.auditLog, auditEntry], isAcknowledged: false } : p
+        p.id === id ? rejected : p
       ));
       addNotification(pending.submitterId, '材料审核驳回', `您的材料 "${pending.name}" 审核未通过。原因：${comment}`, 'AUDIT');
+      if (isSupabaseConfigured()) {
+        await cloudRejectMaterial(id, rejected);
+      }
       alert('申请已驳回');
     }
   };
 
-  const handleAuthSuccess = (userData: User) => {
-    // For demo purposes, if it's a supplier, we give them a fixed ID to match mock data
-    const baseUser = userData.role === 'SUPPLIER' ? { ...userData, id: 'supplier_1' } : userData;
-    
-    // Check if user should be verified based on persisted list
-    const isVerified = baseUser.role === 'ADMIN' || verifiedUserIds.includes(baseUser.id) || baseUser.isVerified;
-    if (baseUser.role === 'DESIGNER') {
-      const persistedCollections: string[] = getFromLocal('saved_ids', baseUser.id) || [];
-      const persistedBoards: MoodBoard[] = getFromLocal('moodboards', baseUser.id) || [
-        { id: `mb_${baseUser.id}_default`, name: '默认情绪板', items: [], isPaid: false, maxMaterials: 10 },
+  const handleAuthSuccess = async (userData: User) => {
+    if (!isSupabaseConfigured()) return;
+
+    const token = await getAccessToken();
+    if (!token) return;
+
+    skipCloudSyncRef.current = true;
+
+    if (userData.role === 'DESIGNER') {
+      const cloud = await loadDesignerCloudData(userData.id);
+      const cloudGlobal = await loadGlobalCloudData();
+      if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
+      if (cloudGlobal.pendingMaterials.length > 0) setPendingMaterials(cloudGlobal.pendingMaterials);
+
+      const boards = cloud.moodboards.length > 0 ? cloud.moodboards : [
+        { id: `mb_${userData.id}_default`, name: '默认情绪板', items: [], isPaid: false, maxMaterials: 10 },
       ];
-      const finalUser = {
-        ...baseUser,
-        isVerified,
-        transactions: baseUser.transactions || [],
-        collections: persistedCollections,
-      };
+      const collections = cloud.savedMaterialIds;
+      const finalUser = { ...userData, collections, transactions: userData.transactions || [] };
       setUser(finalUser);
-      setSavedMaterialIds(persistedCollections);
-      setMoodboards(persistedBoards);
-      setActiveMoodboardId(persistedBoards[0]?.id ?? '');
+      setSavedMaterialIds(collections);
+      setMoodboards(boards);
+      setActiveMoodboardId(boards[0]?.id ?? '');
+    } else if (userData.role === 'ADMIN') {
+      const cloudGlobal = await loadGlobalCloudData();
+      if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
+      if (cloudGlobal.pendingMaterials.length > 0) setPendingMaterials(cloudGlobal.pendingMaterials);
+      await refreshVerificationRequestsFromCloud();
+      setUser({ ...userData, collections: [], transactions: userData.transactions || [] });
+      setSavedMaterialIds([]);
+      setMoodboards([]);
+      setActiveMoodboardId('');
     } else {
-      const finalUser = {
-        ...baseUser,
-        isVerified,
-        transactions: baseUser.transactions || [],
-        collections: [],
-      };
-      setUser(finalUser);
+      const cloudGlobal = await loadGlobalCloudData();
+      if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
+      if (cloudGlobal.pendingMaterials.length > 0) setPendingMaterials(cloudGlobal.pendingMaterials);
+      setUser({ ...userData, collections: [], transactions: userData.transactions || [] });
       setSavedMaterialIds([]);
       setMoodboards([]);
       setActiveMoodboardId('');
     }
     setPoints(userData.points);
-    
-    if ((userData as any).showWelcomeBonus) {
+    setTimeout(() => { skipCloudSyncRef.current = false; }, 500);
+
+    if ((userData as User & { showWelcomeBonus?: boolean }).showWelcomeBonus) {
       setShowWelcomeBonus(true);
     }
+    if (userData.role === 'SUPPLIER') setCurrentView('HOME');
+  };
 
-    // Supplier should go to Explore (HOME) page upon login
-    if (userData.role === 'SUPPLIER') {
-      setCurrentView('HOME');
+  const handleSubmitMaterialForReview = async (mat: PendingMaterial) => {
+    setPendingMaterials(prev => [...prev, mat]);
+    if (isSupabaseConfigured() && user) {
+      await submitPendingMaterial(user.id, mat);
     }
   };
 
   const handleAdminAuth = () => {
-    if (adminPass === 'admin123') {
-      setUser({
-        id: 'admin_1',
-        name: '平台管理员',
-        email: 'admin@materialmatters.com',
-        role: 'ADMIN',
-        points: 999999,
-        isVerified: true
-      });
-      setSavedMaterialIds([]);
-      setMoodboards([]);
-      setActiveMoodboardId('');
-      setShowAdminLogin(false);
-      setAdminPass('');
-      setCurrentView('DASHBOARD');
-    } else {
-      alert('密码错误');
-    }
+    alert('请使用登录页的邮箱与密码登录管理员账号（已接入 Supabase 鉴权，不再支持本地口令 bypass）。');
+    setShowAdminLogin(false);
+    setAdminPass('');
   };
 
   /** 仅写入「我的收藏」与 user.collections，不创建或修改情绪板 */
@@ -533,9 +657,13 @@ const App: React.FC = () => {
     ));
   };
 
-  const handleVerifySupplier = (userId: string) => {
+  const handleVerifySupplier = async (userId: string) => {
     setVerificationRequests(prev => prev.filter(u => u.id !== userId));
     setVerifiedUserIds(prev => [...prev, userId]);
+    
+    if (isSupabaseConfigured()) {
+      await approveSupplier(userId);
+    }
     
     // Add notification for the user
     addNotification(userId, '认证通过', '恭喜！您的供应商认证申请已通过，现在可以发布材料并接收询价了。', 'AUDIT');
@@ -548,10 +676,24 @@ const App: React.FC = () => {
     alert('供应商认证已通过！');
   };
 
-  const handleRequestVerification = (phone: string, doc: string) => {
+  const handleRequestVerification = async (phone: string, doc: string) => {
     if (!user) return;
     const updatedUser = { ...user, registeredPhone: phone, verificationDoc: doc };
-    setVerificationRequests(prev => [...prev, updatedUser]);
+
+    if (isSupabaseConfigured()) {
+      const ok = await updateVerificationRequest(user.id, phone, doc);
+      if (!ok) {
+        alert('认证信息提交失败，请检查网络后重试。');
+        return;
+      }
+    } else {
+      setVerificationRequests((prev) => {
+        const exists = prev.some((u) => u.id === user.id);
+        if (exists) return prev.map((u) => (u.id === user.id ? updatedUser : u));
+        return [...prev, updatedUser];
+      });
+    }
+
     setUser(updatedUser);
     alert('感谢申请，请等待认证。');
   };
@@ -592,6 +734,10 @@ const App: React.FC = () => {
     }
   }
 
+  if (!authReady) {
+    return <div className="min-h-screen bg-[#111]" />;
+  }
+
   if (!user) {
     return <Auth onAuthSuccess={handleAuthSuccess} />;
   }
@@ -615,7 +761,8 @@ const App: React.FC = () => {
           onLogoClick={() => setCurrentView('HOME')} 
           onProfileClick={() => setCurrentView('DASHBOARD')}
           onMoodboardClick={() => setCurrentView('MOODBOARD')}
-          onLogout={() => {
+          onLogout={async () => {
+            if (isSupabaseConfigured()) await signOut();
             setUser(null);
             setSavedMaterialIds([]);
             setMoodboards([]);
@@ -738,7 +885,7 @@ const App: React.FC = () => {
                     setLibrary={setLibrary}
                     pendingList={pendingMaterials}
                     setPendingMaterials={setPendingMaterials}
-                    onSubmitForReview={(mat) => setPendingMaterials(prev => [...prev, mat])} 
+                    onSubmitForReview={handleSubmitMaterialForReview}
                     onRechargeClick={() => setIsRechargeModalOpen(true)}
                     inquiries={inquiries}
                     onQuote={handleQuote}

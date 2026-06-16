@@ -1,0 +1,15 @@
+{
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/$1" }
+  ],
+  "functions": {
+    "api/upload.ts": {
+      "memory": 1024,
+      "maxDuration": 30
+    },
+    "api/get-upload-url.ts": {
+      "memory": 512,
+      "maxDuration": 15
+    }
+  }
+}

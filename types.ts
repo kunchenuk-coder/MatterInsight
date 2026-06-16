@@ -18,6 +18,8 @@ export interface User {
   transactions?: PointTransaction[];
   comments?: DesignerComment[];
   isVerified: boolean;
+  /** 材料商账号审核状态（仅 SUPPLIER 有效） */
+  accountStatus?: 'pending' | 'approved' | 'rejected';
   registeredPhone?: string;
   verificationDoc?: string;
   /** 我的收藏（材料 ID），与本地 saved_ids 同步 */
@@ -151,6 +153,12 @@ export interface LocalTemporaryMaterial {
   createdAt: number;
   isLocalStorageMaterial: true;
   isEditedByUser: true;
+  /** OSS 对象键 users/{userId}/assets/... */
+  ossObjectKey?: string;
+  /** AI/人工审核状态，默认 pending_review */
+  reviewStatus?: AssetReviewStatus;
+  /** 预留：VR 场景 3D 模型路径 */
+  model3dUrl?: string;
 }
 
 /** @deprecated 使用 LocalTemporaryMaterial */
@@ -227,4 +235,32 @@ export interface SampleRequest {
   status: 'PENDING' | 'SHIPPED_BY_SUPPLIER' | 'SHIPPED_BY_ADMIN' | 'COMPLETED';
   submitDate: string;
   shipDate?: string;
+}
+
+/** 上传目录分类（OSS 路径 users/{id}/assets/{category}/...） */
+export type UploadFolder =
+  | 'materials'
+  | 'variants'
+  | 'project-photos'
+  | 'verification'
+  | 'local-materials';
+
+/** 资产 AI 审核状态 */
+export type AssetReviewStatus = 'pending_review' | 'approved' | 'rejected';
+
+/** 资产类型：图片 / 3D 模型 */
+export type AssetType = 'image' | 'model_3d';
+export interface UserAsset {
+  id: string;
+  userId: string;
+  assetType: AssetType;
+  ossObjectKey: string;
+  contentType?: string;
+  fileName?: string;
+  category?: string;
+  reviewStatus: AssetReviewStatus;
+  model3dUrl?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
 }

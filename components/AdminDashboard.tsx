@@ -411,7 +411,61 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
         {subTab === 'VERIFICATIONS' && (
           <div>
-             <table className="w-full text-left border-collapse">
+             {/* 移动端：卡片视图，避免宽表横向溢出导致操作列不可点 */}
+             <div className="md:hidden p-4 space-y-4">
+               {verificationRequests.map((req) => (
+                 <div
+                   key={req.id}
+                   className="border border-gray-100 rounded-3xl p-5 shadow-sm bg-white space-y-4"
+                 >
+                   <div>
+                     <p className="text-[10px] font-black uppercase text-gray-400 tracking-widest mb-1">供应商信息</p>
+                     <p className="font-bold text-base break-words">{req.company}</p>
+                     <p className="text-xs text-gray-400 break-all mt-1">{req.email}</p>
+                   </div>
+                   <div>
+                     <p className="text-[10px] font-black uppercase text-gray-400 tracking-widest mb-1">联系电话</p>
+                     <p className="font-black">{req.registeredPhone || '—'}</p>
+                   </div>
+                   <div>
+                     <p className="text-[10px] font-black uppercase text-gray-400 tracking-widest mb-1">认证文件</p>
+                     {req.verificationDoc ? (
+                       <button
+                         type="button"
+                         onClick={() => setViewingVerificationDoc(req)}
+                         className="text-xs font-bold text-blue-600 hover:underline"
+                       >
+                         查看证件大图
+                       </button>
+                     ) : (
+                       <p className="text-xs text-gray-400">未上传</p>
+                     )}
+                   </div>
+                   <div className="pt-2 border-t border-gray-100 space-y-2">
+                     <p className="text-[10px] font-black uppercase text-gray-400 tracking-widest">管理操作</p>
+                     <button
+                       type="button"
+                       onClick={() => onVerifySupplier(req.id)}
+                       className="w-full py-3 bg-black text-white rounded-xl text-xs font-bold active:scale-[0.98] transition-transform"
+                     >
+                       通过认证
+                     </button>
+                     <button
+                       type="button"
+                       className="w-full py-3 text-red-500 text-xs font-bold rounded-xl border border-red-100 bg-red-50/50"
+                     >
+                       驳回申请
+                     </button>
+                   </div>
+                 </div>
+               ))}
+               {verificationRequests.length === 0 && (
+                 <p className="p-12 text-center text-gray-300 italic">暂无待处理的认证申请</p>
+               )}
+             </div>
+
+             {/* 桌面端：保留原表格 */}
+             <table className="hidden md:table w-full text-left border-collapse">
                <thead>
                  <tr className="bg-gray-50 border-b text-[10px] font-black uppercase text-gray-400 tracking-widest">
                    <th className="p-6">供应商信息</th>

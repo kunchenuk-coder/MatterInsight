@@ -4,6 +4,7 @@ import { User, Category, PendingMaterial, Material, Inquiry, SampleRequest, Mate
 import { CATEGORIES } from '../constants';
 import MaterialVoiceFillButton from './MaterialVoiceFillButton';
 import PublishMaterialMobilePanel from './PublishMaterialMobilePanel';
+import { uploadImage } from '../services/uploadService';
 
 const COMMON_COLORS = [
   { name: '白色', code: '#FFFFFF' },
@@ -31,39 +32,13 @@ interface SupplierDashboardProps {
   onRequestVerification: (phone: string, doc: string) => void;
 }
 
-const compressImage = (file: File, maxWidth = 1200, quality = 0.7): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.readAsDataURL(file);
-    reader.onload = (event) => {
-      const img = new Image();
-      img.src = event.target?.result as string;
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        let width = img.width;
-        let height = img.height;
-
-        if (width > maxWidth) {
-          height = (height * maxWidth) / width;
-          width = maxWidth;
-        }
-
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx?.drawImage(img, 0, 0, width, height);
-        
-        // Use jpeg for better compression
-        const dataUrl = canvas.toDataURL('image/jpeg', quality);
-        resolve(dataUrl);
-      };
-      img.onerror = (err) => reject(err);
-    };
-    reader.onerror = (err) => reject(err);
-  });
+const UPLOAD_FOLDER: Record<'image' | 'projectPhotos' | 'variants', 'materials' | 'project-photos' | 'variants'> = {
+  image: 'materials',
+  projectPhotos: 'project-photos',
+  variants: 'variants',
 };
 
-const SupplierDashboard: React.FC<SupplierDashboardProps> = ({ 
+const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
   user, library, setLibrary, pendingList, setPendingMaterials, onSubmitForReview, onRechargeClick, inquiries, onQuote,
   sampleRequests, onShipSample, onRequestVerification
 }) => {
@@ -95,17 +70,20 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
   };
 
   if (!user.isVerified) {
-    const isWaiting = !!user.registeredPhone;
+    const isAccountPending = user.accountStatus === 'pending';
+    const isWaiting = isAccountPending || !!user.registeredPhone;
 
     return (
       <div className="max-w-2xl mx-auto py-20">
         <div className="bg-white p-12 rounded-[50px] shadow-2xl border border-gray-100 text-center">
           <div className="text-6xl mb-8">{isWaiting ? '⏳' : '🛡️'}</div>
           <h2 className="text-3xl font-black mb-4 tracking-tighter">
-            {isWaiting ? '认证审核中' : '供应商入驻认证'}
+            {isAccountPending ? '账号审核中' : isWaiting ? '认证审核中' : '供应商入驻认证'}
           </h2>
           <p className="text-gray-500 mb-10 leading-relaxed">
-            {isWaiting 
+            {isAccountPending
+              ? '您的材料商账号正在平台审核中，审核通过后方可进入材料商后台、发布材料与管理订单。'
+              : isWaiting 
               ? '感谢您的申请！我们的工作人员正在核实您的资料，请耐心等待。认证通过后，您将收到系统通知并解锁完整功能。'
               : '为了维护物见平台的专业性与材料真实性，新入驻供应商需完成身份认证。认证通过后，您即可发布材料并接收设计师询价。'}
           </p>
@@ -143,8 +121,8 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                       const file = e.target.files?.[0];
                       if (file) {
                         try {
-                          const compressed = await compressImage(file, 800, 0.6); // Even more aggressive for docs
-                          setVerificationForm({...verificationForm, doc: compressed});
+                          const { url } = await uploadImage(file, 'verification');
+                          setVerificationForm({...verificationForm, doc: url});
                         } catch (err) {
                           console.error('Doc compression error:', err);
                           alert('证件处理失败，请重试');
@@ -227,8 +205,8 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
     for (let i = 0; i < totalFiles; i++) {
       const file = fileArray[i];
       try {
-        const result = await compressImage(file);
-        results.push(result);
+        const { url } = await uploadImage(file, UPLOAD_FOLDER[field]);
+        results.push(url);
       } catch (err) {
         console.error('File compression error:', err);
         alert(`文件 "${file.name}" 处理失败`);

@@ -19,6 +19,10 @@ interface ImportMetaEnv {
   readonly VITE_VISION_FREE_LIMIT?: string;
   /** 可选：GET 返回 { remaining?: number } 与后端计费对齐 */
   readonly VITE_VISION_QUOTA_URL?: string;
+  /** Supabase 项目 URL */
+  readonly VITE_SUPABASE_URL?: string;
+  /** Supabase 匿名公钥（publishable / anon key） */
+  readonly VITE_SUPABASE_ANON_KEY?: string;
 }
 
 interface ImportMeta {
