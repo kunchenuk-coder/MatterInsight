@@ -6,6 +6,8 @@ import {
   dbRoleToUserRole,
   fetchProfile,
   insertProfileOnSignup,
+  normalizeDbRole,
+  userRoleToDbRole,
   type ProfileRow,
 } from './profileService';
 
@@ -21,44 +23,77 @@ const PORTAL_LABEL: Record<UserRole, string> = {
   ADMIN: '管理端',
 };
 
-function mapSignUpError(message: string): string {
+function isDuplicateEmailError(message: string): boolean {
   const lower = message.toLowerCase();
-  if (
+  return (
     lower.includes('already registered') ||
     lower.includes('already exists') ||
-    lower.includes('unique')
-  ) {
-    return '该邮箱已被注册';
-  }
-  if (lower.includes('password')) {
-    return '密码不符合要求，请使用至少 6 位字符';
-  }
-  return message;
+    lower.includes('unique') ||
+    lower.includes('duplicate')
+  );
 }
 
-/** 选项卡与数据库角色不一致时的提示 */
+/** 该邮箱已绑定某一身份时的统一提示（登录错入口 / 注册重复） */
+export function registeredRoleMessage(actualRole: UserRole): string {
+  return `该邮箱已被注册为${PORTAL_LABEL[actualRole]}，请选用其他邮箱。`;
+}
+
+/** @deprecated 使用 registeredRoleMessage */
 export function roleMismatchMessage(actualRole: UserRole): string {
-  return `您的账号角色不符，请切换至${PORTAL_LABEL[actualRole]}入口登录！`;
+  return registeredRoleMessage(actualRole);
+}
+
+export function isRegisteredRoleError(message: string): boolean {
+  return message.includes('已被注册为');
 }
 
 export function isRoleMismatchError(message: string): boolean {
-  return message.includes('账号角色不符');
+  return isRegisteredRoleError(message);
+}
+
+/** 邮箱已存在时，用同一密码登录一次以读取 profiles.role（随后立即 signOut） */
+async function lookupExistingRoleByCredentials(
+  email: string,
+  password: string
+): Promise<UserRole | null> {
+  const client = getSupabase();
+  const { data, error } = await client.auth.signInWithPassword({ email, password });
+  if (error || !data.user) return null;
+
+  const profile = await fetchProfile(data.user.id);
+  await client.auth.signOut();
+  if (!profile) return null;
+
+  const dbRole = normalizeDbRole(profile.role);
+  if (!dbRole) return null;
+  return dbRoleToUserRole(dbRole);
 }
 
 function mapProfileToUser(
   profile: ProfileRow,
   extras?: { showWelcomeBonus?: boolean }
 ): User {
-  const role = dbRoleToUserRole(profile.role);
+  const dbRole = normalizeDbRole(profile.role);
+  if (!dbRole) {
+    throw new Error(`无效 profiles.role: ${profile.role}`);
+  }
+  const role = dbRoleToUserRole(dbRole);
+  const isSupplier = role === 'SUPPLIER';
+  const supplierStatus =
+    (profile.status as User['accountStatus']) ?? 'approved';
 
   return {
     id: profile.id,
     email: profile.email,
     role,
+    dbRole,
     name: profile.email.split('@')[0] || '用户',
     points: role === 'DESIGNER' ? 1000 : role === 'ADMIN' ? 999999 : 0,
-    isVerified: role !== 'SUPPLIER',
-    accountStatus: role === 'SUPPLIER' ? 'approved' : undefined,
+    // 材料商以数据库 is_verified 为准（管理员审核通过后解锁）；其余角色默认已验证。
+    isVerified: isSupplier ? profile.is_verified === true : true,
+    accountStatus: isSupplier ? supplierStatus : undefined,
+    registeredPhone: profile.registered_phone ?? undefined,
+    verificationDoc: profile.verification_doc_url ?? undefined,
     transactions: [],
     collections: [],
     ...(extras?.showWelcomeBonus ? { showWelcomeBonus: true } : {}),
@@ -82,9 +117,29 @@ export async function signUp(
   }
 
   const client = getSupabase();
-  const { data, error } = await client.auth.signUp({ email, password });
+  const dbRole = userRoleToDbRole(role);
+  // 把所选身份写入 user_metadata，让数据库触发器 handle_new_user 直接写对 profiles.role，
+  // 而不是回退成默认的 designer。
+  const { data, error } = await client.auth.signUp({
+    email,
+    password,
+    options: { data: { role: dbRole } },
+  });
 
-  if (error) return { ok: false, error: mapSignUpError(error.message) };
+  if (error) {
+    if (isDuplicateEmailError(error.message)) {
+      const existingRole = await lookupExistingRoleByCredentials(email, password);
+      if (existingRole) {
+        return { ok: false, error: registeredRoleMessage(existingRole) };
+      }
+      return { ok: false, error: '该邮箱已被注册，请选用其他邮箱' };
+    }
+    const lower = error.message.toLowerCase();
+    if (lower.includes('password')) {
+      return { ok: false, error: '密码不符合要求，请使用至少 6 位字符' };
+    }
+    return { ok: false, error: error.message };
+  }
   if (!data.user) return { ok: false, error: '注册失败，请重试' };
   if (!data.session) {
     return { ok: false, error: '注册成功，请查收邮箱验证链接后再登录' };
@@ -130,17 +185,16 @@ export async function signIn(
     return { ok: false, error: '账号资料异常，请联系客服' };
   }
 
-  let actualRole: UserRole;
-  try {
-    actualRole = dbRoleToUserRole(profile.role);
-  } catch {
+  const role = normalizeDbRole(profile.role);
+  if (!role) {
     await client.auth.signOut();
     return { ok: false, error: '账号角色数据异常，请联系客服' };
   }
 
-  if (actualRole !== expectedRole) {
+  const actualRole = dbRoleToUserRole(role);
+  if (role !== userRoleToDbRole(expectedRole)) {
     await client.auth.signOut();
-    return { ok: false, error: roleMismatchMessage(actualRole) };
+    return { ok: false, error: registeredRoleMessage(actualRole) };
   }
 
   return { ok: true, user: mapProfileToUser(profile) };
@@ -164,7 +218,12 @@ export async function restoreSession(): Promise<User | null> {
     return null;
   }
 
-  return mapProfileToUser(profile);
+  try {
+    return mapProfileToUser(profile);
+  } catch {
+    await signOut();
+    return null;
+  }
 }
 
 export function onAuthStateChange(
@@ -199,7 +258,11 @@ export function onAuthStateChange(
       return;
     }
 
-    callback(mapProfileToUser(profile));
+    try {
+      callback(mapProfileToUser(profile));
+    } catch {
+      callback(null);
+    }
   });
 
   return () => data.subscription.unsubscribe();

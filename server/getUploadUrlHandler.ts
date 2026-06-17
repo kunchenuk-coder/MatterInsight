@@ -1,9 +1,9 @@
-import { createClient } from '@supabase/supabase-js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   createPresignedUploadUrls,
   type AssetType,
 } from './ossPresign';
+import { verifySupabaseToken } from './verifySupabaseToken';
 
 const ALLOWED_CATEGORIES = new Set([
   'materials',
@@ -34,25 +34,6 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
     });
     req.on('error', reject);
   });
-}
-
-async function verifyAuthToken(authHeader: string | undefined): Promise<string | null> {
-  if (!authHeader?.startsWith('Bearer ')) return null;
-
-  const token = authHeader.slice(7);
-  const url = process.env.VITE_SUPABASE_URL ?? process.env.SUPABASE_URL;
-  const serviceKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SECRET_KEY;
-
-  if (!url || !serviceKey) return null;
-
-  const admin = createClient(url, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-
-  const { data, error } = await admin.auth.getUser(token);
-  if (error || !data.user) return null;
-  return data.user.id;
 }
 
 export interface GetUploadUrlParams {
@@ -105,7 +86,7 @@ export async function handleGetUploadUrlRequest(
     return;
   }
 
-  const userId = await verifyAuthToken(req.headers.authorization);
+  const userId = await verifySupabaseToken(req.headers.authorization);
   if (!userId) {
     sendJson(res, 401, { error: '未登录或 token 无效' });
     return;

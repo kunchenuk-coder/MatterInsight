@@ -49,8 +49,82 @@ async function requestPresignedUrl(
   return json;
 }
 
+interface UploadedObject {
+  readUrl: string;
+  objectKey: string;
+  contentType: string;
+}
+
 /**
- * 私有桶安全直传：浏览器压缩 → 预签名 PUT → 登记 user_assets（pending_review）
+ * 服务端代理上传：把文件 POST 给我们自己的后端，由后端用 OSS SDK 直传私有桶。
+ * 用于浏览器 → OSS 直传被 CORS 拦截（Failed to fetch）时的兜底路径。
+ */
+async function uploadViaServerProxy(
+  token: string,
+  file: File | Blob,
+  fileName: string,
+  category: UploadFolder,
+  assetType: AssetType
+): Promise<UploadedObject> {
+  const form = new FormData();
+  form.append('file', file, fileName);
+
+  const res = await fetch(
+    `/api/upload-asset?category=${encodeURIComponent(category)}&assetType=${assetType}`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    }
+  );
+
+  const json = (await res.json()) as {
+    url?: string;
+    objectKey?: string;
+    contentType?: string;
+    error?: string;
+  };
+
+  if (!res.ok || !json.url || !json.objectKey) {
+    throw new Error(json.error ?? '服务端代理上传失败');
+  }
+
+  return {
+    readUrl: json.url,
+    objectKey: json.objectKey,
+    contentType: json.contentType ?? (file as File).type ?? 'image/jpeg',
+  };
+}
+
+/** 浏览器 → OSS 预签名直传（需 OSS 桶已配置 CORS） */
+async function uploadViaDirectPut(
+  token: string,
+  file: File,
+  category: UploadFolder,
+  assetType: AssetType
+): Promise<UploadedObject> {
+  const presigned = await requestPresignedUrl(token, file, category, assetType);
+
+  const putRes = await fetch(presigned.uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': presigned.contentType },
+    body: file,
+  });
+
+  if (!putRes.ok) {
+    throw new Error(`OSS PUT 失败 (${putRes.status})`);
+  }
+
+  return {
+    readUrl: presigned.readUrl,
+    objectKey: presigned.objectKey,
+    contentType: presigned.contentType,
+  };
+}
+
+/**
+ * 私有桶安全上传：浏览器压缩 → 预签名直传（CORS 失败则自动回退服务端代理）→
+ * 登记 user_assets（pending_review）。
  */
 export async function uploadViaPresignedUrl(
   file: File,
@@ -64,24 +138,22 @@ export async function uploadViaPresignedUrl(
 
   const compressed =
     assetType === 'image' ? await compressImageForUpload(file) : file;
+  const fileName = (compressed as File).name || file.name || 'upload.jpg';
 
-  const presigned = await requestPresignedUrl(
-    token,
-    compressed,
-    category,
-    assetType
-  );
-
-  const putRes = await fetch(presigned.uploadUrl, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': presigned.contentType,
-    },
-    body: compressed,
-  });
-
-  if (!putRes.ok) {
-    throw new Error(`OSS PUT 失败 (${putRes.status})`);
+  let uploaded: UploadedObject;
+  try {
+    uploaded = await uploadViaDirectPut(token, compressed as File, category, assetType);
+  } catch (directErr) {
+    // 典型为浏览器 → OSS 跨域被拦截（TypeError: Failed to fetch）。
+    // 回退到服务端代理上传，避免依赖 OSS 桶的 CORS 配置。
+    console.warn('[presignedUpload] 直传失败，改用服务端代理上传:', directErr);
+    uploaded = await uploadViaServerProxy(
+      token,
+      compressed,
+      fileName,
+      category,
+      assetType
+    );
   }
 
   const userId = await getCurrentUserId();
@@ -90,17 +162,17 @@ export async function uploadViaPresignedUrl(
     await recordUserAsset({
       userId,
       assetType,
-      ossObjectKey: presigned.objectKey,
-      contentType: presigned.contentType,
-      fileName: compressed.name,
+      ossObjectKey: uploaded.objectKey,
+      contentType: uploaded.contentType,
+      fileName,
       category,
       metadata: { source: 'presigned_upload' },
     });
   }
 
   return {
-    url: presigned.readUrl,
-    objectKey: presigned.objectKey,
+    url: uploaded.readUrl,
+    objectKey: uploaded.objectKey,
     isRemote: true,
     reviewStatus: 'pending_review',
     assetType,

@@ -105,6 +105,46 @@ export function createPresignedUploadUrls(
   return { uploadUrl, objectKey, readUrl, expiresAt, contentType: mime };
 }
 
+export interface ServerUploadResult {
+  objectKey: string;
+  readUrl: string;
+  contentType: string;
+}
+
+/**
+ * 服务端直传：浏览器把文件 POST 到我们自己的后端，后端用 OSS SDK 直接 put。
+ * 避免浏览器 -> OSS 的跨域（CORS）限制，适合私有桶 + “阻止公共访问”场景。
+ * 返回私有桶可用的预签名读取 URL。
+ */
+export async function putUserAssetToOss(
+  userId: string,
+  category: string,
+  fileName: string,
+  contentType: string,
+  assetType: AssetType,
+  buffer: Buffer
+): Promise<ServerUploadResult> {
+  const client = getOssClient();
+  const objectKey = buildUserAssetObjectKey(
+    userId,
+    category,
+    fileName,
+    contentType,
+    assetType
+  );
+  const mime =
+    contentType || (assetType === 'model_3d' ? 'model/gltf-binary' : 'image/jpeg');
+
+  await client.put(objectKey, buffer, { headers: { 'Content-Type': mime } });
+
+  const readUrl = client.signatureUrl(objectKey, {
+    method: 'GET',
+    expires: PRESIGN_GET_EXPIRES_SEC,
+  });
+
+  return { objectKey, readUrl, contentType: mime };
+}
+
 /** 为已存在的 objectKey 生成短期可读 URL（私有桶展示用） */
 export function createPresignedReadUrl(objectKey: string, expiresSec = 3600): string {
   const client = getOssClient();

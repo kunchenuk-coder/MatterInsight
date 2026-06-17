@@ -1,24 +1,38 @@
-import type { User, UserRole } from '../types';
+import type { User, UserRole, DbRole } from '../types';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 
-/** Supabase profiles.role 存储值（小写） */
-export type DbRole = 'designer' | 'supplier' | 'admin';
+export type { DbRole };
 
 export interface ProfileRow {
   id: string;
   email: string;
   role: DbRole | string;
+  registered_phone?: string | null;
+  verification_doc_url?: string | null;
+  status?: string | null;
+  is_verified?: boolean | null;
 }
+
+const PROFILE_COLUMNS = 'id, email, role, registered_phone, verification_doc_url, status, is_verified';
 
 export function userRoleToDbRole(role: UserRole): DbRole {
   return role.toLowerCase() as DbRole;
 }
 
+/** 将数据库 / API 返回的 role 规范为小写英文：designer | supplier | admin */
+export function normalizeDbRole(role: string | null | undefined): DbRole | null {
+  const normalized = (role ?? '').toLowerCase().trim();
+  if (normalized === 'designer') return 'designer';
+  if (normalized === 'supplier') return 'supplier';
+  if (normalized === 'admin') return 'admin';
+  return null;
+}
+
 export function dbRoleToUserRole(role: string): UserRole {
-  const normalized = role.toLowerCase();
-  if (normalized === 'designer') return 'DESIGNER';
-  if (normalized === 'supplier') return 'SUPPLIER';
-  if (normalized === 'admin') return 'ADMIN';
+  const dbRole = normalizeDbRole(role);
+  if (dbRole === 'designer') return 'DESIGNER';
+  if (dbRole === 'supplier') return 'SUPPLIER';
+  if (dbRole === 'admin') return 'ADMIN';
   throw new Error(`未知角色: ${role}`);
 }
 
@@ -28,7 +42,7 @@ export async function fetchProfile(userId: string): Promise<ProfileRow | null> {
 
   const { data, error } = await getSupabase()
     .from('profiles')
-    .select('id, email, role')
+    .select(PROFILE_COLUMNS)
     .eq('id', userId)
     .maybeSingle();
 
@@ -39,7 +53,30 @@ export async function fetchProfile(userId: string): Promise<ProfileRow | null> {
   return data as ProfileRow | null;
 }
 
-/** 注册成功后写入唯一身份行 */
+/** 按邮箱查询 profiles（用于注册重复提示；需 RLS 允许或已通过 Auth 验证） */
+export async function fetchProfileByEmail(email: string): Promise<ProfileRow | null> {
+  if (!isSupabaseConfigured()) return null;
+
+  const { data, error } = await getSupabase()
+    .from('profiles')
+    .select('id, email, role')
+    .eq('email', email.trim())
+    .maybeSingle();
+
+  if (error) {
+    console.error('[profileService] fetchProfileByEmail:', error.message);
+    return null;
+  }
+  return data as ProfileRow | null;
+}
+
+/**
+ * 注册成功后写入身份行。
+ *
+ * 使用 upsert(onConflict: id)：若数据库触发器 handle_new_user 已自动插入
+ * 一条默认 designer 行，这里用用户实际选择的 role 覆盖它，确保身份正确。
+ * 该行 id = 当前刚注册的 auth.uid，RLS 的 insert/update own 策略均允许。
+ */
 export async function insertProfileOnSignup(
   userId: string,
   email: string,
@@ -49,24 +86,18 @@ export async function insertProfileOnSignup(
     return { ok: false, error: '服务未配置' };
   }
 
-  const { error } = await getSupabase().from('profiles').insert({
-    id: userId,
-    email,
-    role: userRoleToDbRole(role),
-  });
+  const { error } = await getSupabase()
+    .from('profiles')
+    .upsert(
+      {
+        id: userId,
+        email,
+        role: userRoleToDbRole(role),
+      },
+      { onConflict: 'id' }
+    );
 
   if (!error) return { ok: true };
-
-  const msg = error.message.toLowerCase();
-  const duplicate =
-    error.code === '23505' ||
-    msg.includes('unique') ||
-    msg.includes('duplicate') ||
-    msg.includes('already exists');
-
-  if (duplicate) {
-    return { ok: false, error: '该邮箱已被注册' };
-  }
 
   console.error('[profileService] insertProfileOnSignup:', error.message);
   return { ok: false, error: '注册失败，请稍后重试' };
@@ -105,15 +136,19 @@ export async function approveSupplier(userId: string): Promise<boolean> {
 }
 
 export function profileRowToVerificationUser(row: ProfileRow): User {
-  const role = dbRoleToUserRole(row.role);
+  const dbRole = normalizeDbRole(row.role) ?? 'supplier';
+  const status = (row.status as User['accountStatus']) ?? 'pending';
   return {
     id: row.id,
     email: row.email,
     name: row.email.split('@')[0],
     role: 'SUPPLIER',
+    dbRole,
     points: 0,
-    isVerified: false,
-    accountStatus: 'pending',
+    isVerified: row.is_verified === true,
+    accountStatus: status,
+    registeredPhone: row.registered_phone ?? undefined,
+    verificationDoc: row.verification_doc_url ?? undefined,
   };
 }
 
@@ -122,7 +157,7 @@ export async function fetchPendingSuppliers(): Promise<ProfileRow[]> {
 
   const { data, error } = await getSupabase()
     .from('profiles')
-    .select('id, email, role')
+    .select(PROFILE_COLUMNS)
     .eq('role', 'supplier')
     .order('email', { ascending: true });
 

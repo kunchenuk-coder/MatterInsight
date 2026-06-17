@@ -1,6 +1,9 @@
 
 export type UserRole = 'DESIGNER' | 'SUPPLIER' | 'ADMIN';
 
+/** profiles.role 小写值，与 Supabase 一致，用于路由跳转 */
+export type DbRole = 'designer' | 'supplier' | 'admin';
+
 export interface PointTransaction {
   id: string;
   amount: number;
@@ -12,6 +15,8 @@ export interface User {
   id: string;
   email: string;
   role: UserRole;
+  /** 数据库 profiles.role（designer / supplier / admin），登录跳转以此为准 */
+  dbRole: DbRole;
   points: number;
   name: string;
   company?: string;

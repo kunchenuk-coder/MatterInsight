@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { UserRole } from '../types';
 import { isSupabaseConfigured } from '../services/supabaseClient';
-import { requestPasswordReset, signIn, signUp, isRoleMismatchError } from '../services/authService';
+import { requestPasswordReset, signIn, signUp, isRegisteredRoleError } from '../services/authService';
 import AuthShell from './AuthShell';
 
 interface AuthProps {
@@ -12,7 +12,6 @@ interface AuthProps {
 type AuthMode = 'login' | 'register' | 'forgot';
 
 const LOGIN_FAILED_MSG = '邮箱或密码错误';
-const EMAIL_ALREADY_REGISTERED = '该邮箱已被注册';
 
 const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
   const [mode, setMode] = useState<AuthMode>('login');
@@ -39,8 +38,7 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
     setInfo('');
   };
 
-  const showForgotLink =
-    mode === 'login' || (mode === 'register' && error === EMAIL_ALREADY_REGISTERED);
+  const showForgotLink = mode === 'login';
 
   const handleForgotSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -112,7 +110,7 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
     }
   };
 
-  const isRoleMismatch = isRoleMismatchError(error);
+  const isRegisteredRole = isRegisteredRoleError(error);
 
   if (mode === 'forgot') {
     return (
@@ -250,25 +248,26 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
           <div
             role="alert"
             className={`rounded-2xl px-4 py-3 border ${
-              isRoleMismatch
+              isRegisteredRole
                 ? 'bg-red-600/25 border-red-500'
                 : 'bg-red-600/20 border-red-500'
             }`}
           >
             <p className="text-red-400 text-sm font-bold text-center leading-snug">{error}</p>
-            {isRoleMismatch && (
+            {isRegisteredRole && mode === 'login' && (
               <p className="text-red-300/90 text-xs text-center mt-2 leading-relaxed">
-                请点选上方正确的身份入口后，再使用邮箱密码登录。
+                同一邮箱只能拥有一个身份；如需使用{role === 'DESIGNER' ? '设计师' : role === 'SUPPLIER' ? '材料商' : '管理端'}身份，请更换邮箱重新注册。
               </p>
             )}
-            {error === EMAIL_ALREADY_REGISTERED && (
-              <button
-                type="button"
-                onClick={() => switchMode('forgot')}
-                className="block w-full mt-2 text-xs font-bold text-blue-400 hover:text-blue-300 transition-colors"
-              >
-                忘记密码？
-              </button>
+            {isRegisteredRole && mode === 'register' && (
+              <p className="text-red-300/90 text-xs text-center mt-2 leading-relaxed">
+                请更换其他邮箱后再创建{role === 'DESIGNER' ? '设计师' : role === 'SUPPLIER' ? '材料商' : '管理端'}账号。
+              </p>
+            )}
+            {!isRegisteredRole && mode === 'register' && error.includes('该邮箱已被注册') && (
+              <p className="text-red-300/90 text-xs text-center mt-2 leading-relaxed">
+                请更换其他邮箱后再试。
+              </p>
             )}
           </div>
         )}

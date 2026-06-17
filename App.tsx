@@ -37,6 +37,10 @@ import {
   isPasswordRecoveryMode,
   lockPasswordRecoveryMode,
 } from './utils/authRoutes';
+import {
+  guardDashboardRoute,
+  redirectToRoleDashboard,
+} from './router';
 
 /** 启动诊断：确认 Vite 是否注入环境变量（构建时打入，非运行时读取 .env.local） */
 console.log('[MatterInsight boot] VITE_SUPABASE_URL:', import.meta.env.VITE_SUPABASE_URL);
@@ -117,6 +121,7 @@ const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [recoveryMode, setRecoveryMode] = useState(() => isPasswordRecoveryMode());
+  const [pathname, setPathname] = useState(() => window.location.pathname);
   const skipCloudSyncRef = useRef(true);
   const [currentView, setCurrentView] = useState<'HOME' | 'DETAILS' | 'MOODBOARD' | 'DASHBOARD'>('HOME');
   const [selectedMaterial, setSelectedMaterial] = useState<Material | null>(null);
@@ -260,6 +265,21 @@ const App: React.FC = () => {
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [user?.role, user?.id]);
 
+  /** 监听浏览器路径（角色仪表板路由） */
+  useEffect(() => {
+    const onPathChange = () => setPathname(window.location.pathname);
+    window.addEventListener('popstate', onPathChange);
+    return () => window.removeEventListener('popstate', onPathChange);
+  }, []);
+
+  /** 已登录用户的路由守卫：role 与 URL 不匹配则退回登录页 */
+  useEffect(() => {
+    if (!user || recoveryMode || isPasswordRecoveryMode()) return;
+    if (!guardDashboardRoute(user.dbRole)) {
+      void signOut().then(() => setUser(null));
+    }
+  }, [user, pathname, recoveryMode]);
+
   /** recovery 模式：最高优先级，禁止 session 恢复进主页 */
   useEffect(() => {
     const syncRecovery = () => {
@@ -315,7 +335,7 @@ const App: React.FC = () => {
       if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
       if (cloudGlobal.pendingMaterials.length > 0) setPendingMaterials(cloudGlobal.pendingMaterials);
 
-      if (userData.role === 'DESIGNER') {
+      if (userData.dbRole === 'designer') {
         const cloud = await loadDesignerCloudData(userData.id);
         const boards = cloud.moodboards.length > 0
           ? cloud.moodboards
@@ -329,7 +349,7 @@ const App: React.FC = () => {
         setSavedMaterialIds(collections);
         setMoodboards(boards);
         setActiveMoodboardId(boards[0]?.id ?? '');
-      } else if (userData.role === 'ADMIN') {
+      } else if (userData.dbRole === 'admin') {
         await refreshVerificationRequestsFromCloud();
         setUser(userData);
         setSavedMaterialIds([]);
@@ -343,6 +363,12 @@ const App: React.FC = () => {
       }
       setPoints(userData.points);
       setCurrentView('DASHBOARD');
+      const role = userData.dbRole;
+      if (!redirectToRoleDashboard(role)) {
+        await signOut();
+        setUser(null);
+        return;
+      }
       setTimeout(() => { skipCloudSyncRef.current = false; }, 500);
     };
 
@@ -502,7 +528,7 @@ const App: React.FC = () => {
 
     skipCloudSyncRef.current = true;
 
-    if (userData.role === 'DESIGNER') {
+    if (userData.dbRole === 'designer') {
       const cloud = await loadDesignerCloudData(userData.id);
       const cloudGlobal = await loadGlobalCloudData();
       if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
@@ -517,7 +543,7 @@ const App: React.FC = () => {
       setSavedMaterialIds(collections);
       setMoodboards(boards);
       setActiveMoodboardId(boards[0]?.id ?? '');
-    } else if (userData.role === 'ADMIN') {
+    } else if (userData.dbRole === 'admin') {
       const cloudGlobal = await loadGlobalCloudData();
       if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
       if (cloudGlobal.pendingMaterials.length > 0) setPendingMaterials(cloudGlobal.pendingMaterials);
@@ -537,6 +563,12 @@ const App: React.FC = () => {
     }
     setPoints(userData.points);
     setCurrentView('DASHBOARD');
+    const role = userData.dbRole;
+    if (!redirectToRoleDashboard(role)) {
+      await signOut();
+      setUser(null);
+      return;
+    }
     setTimeout(() => { skipCloudSyncRef.current = false; }, 500);
 
     if ((userData as User & { showWelcomeBonus?: boolean }).showWelcomeBonus) {
@@ -840,7 +872,10 @@ const App: React.FC = () => {
           user={user} 
           points={points} 
           onLogoClick={() => setCurrentView('HOME')} 
-          onProfileClick={() => setCurrentView('DASHBOARD')}
+          onProfileClick={() => {
+            redirectToRoleDashboard(user.dbRole);
+            setCurrentView('DASHBOARD');
+          }}
           onMoodboardClick={() => setCurrentView('MOODBOARD')}
           onLogout={async () => {
             if (isSupabaseConfigured()) await signOut();
@@ -929,29 +964,32 @@ const App: React.FC = () => {
             />
           )}
 
-          {currentView === 'DASHBOARD' && (
-            user.role === 'ADMIN' ? (
-              <AdminDashboard 
-                user={user} 
-                library={library}
-                setLibrary={setLibrary}
-                pendingList={pendingMaterials}
-                onApprove={handleApproveMaterial}
-                onReject={handleRejectMaterial}
-                sampleRequests={sampleRequests}
-                onShipSample={(id) => handleShipSample(id, 'ADMIN')}
-                verificationRequests={verificationRequests}
-                onVerifySupplier={handleVerifySupplier}
-              />
-            ) : (
-              user.role === 'DESIGNER' 
-                ? <DesignerDashboard 
-                    user={user} 
-                    savedIds={savedMaterialIds} 
-                    setSavedIds={setSavedMaterialIds} 
-                    moodboards={moodboards} 
+          {currentView === 'DASHBOARD' && (() => {
+            switch (user.dbRole) {
+              case 'admin':
+                return (
+                  <AdminDashboard
+                    user={user}
+                    library={library}
+                    setLibrary={setLibrary}
+                    pendingList={pendingMaterials}
+                    onApprove={handleApproveMaterial}
+                    onReject={handleRejectMaterial}
+                    sampleRequests={sampleRequests}
+                    onShipSample={(id) => handleShipSample(id, 'ADMIN')}
+                    verificationRequests={verificationRequests}
+                    onVerifySupplier={handleVerifySupplier}
+                  />
+                );
+              case 'designer':
+                return (
+                  <DesignerDashboard
+                    user={user}
+                    savedIds={savedMaterialIds}
+                    setSavedIds={setSavedMaterialIds}
+                    moodboards={moodboards}
                     setMoodboards={setMoodboards}
-                    library={library} 
+                    library={library}
                     onRechargeClick={() => setIsRechargeModalOpen(true)}
                     onOpenMoodboard={(id) => { setActiveMoodboardId(id); setCurrentView('MOODBOARD'); }}
                     onViewMaterialDetail={(m) => { setSelectedMaterial(m); setCurrentView('DETAILS'); }}
@@ -960,8 +998,11 @@ const App: React.FC = () => {
                     onSampleRequest={handleSampleRequest}
                     sampleRequests={sampleRequests}
                   />
-                : <SupplierDashboard 
-                    user={user} 
+                );
+              case 'supplier':
+                return (
+                  <SupplierDashboard
+                    user={user}
                     library={library}
                     setLibrary={setLibrary}
                     pendingList={pendingMaterials}
@@ -974,8 +1015,12 @@ const App: React.FC = () => {
                     onShipSample={(id) => handleShipSample(id, 'SUPPLIER')}
                     onRequestVerification={handleRequestVerification}
                   />
-            )
-          )}
+                );
+              default:
+                void signOut().then(() => setUser(null));
+                return null;
+            }
+          })()}
         </main>
 
         <RechargeModal 

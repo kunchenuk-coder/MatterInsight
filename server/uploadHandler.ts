@@ -1,7 +1,7 @@
 import multer from 'multer';
-import { createClient } from '@supabase/supabase-js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { uploadToObjectStorage } from './objectStorage';
+import { verifySupabaseToken } from './verifySupabaseToken';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -26,27 +26,6 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
-async function verifyAuthToken(
-  authHeader: string | undefined
-): Promise<string | null> {
-  if (!authHeader?.startsWith('Bearer ')) return null;
-
-  const token = authHeader.slice(7);
-  const url = process.env.VITE_SUPABASE_URL ?? process.env.SUPABASE_URL;
-  const serviceKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SECRET_KEY;
-
-  if (!url || !serviceKey) return null;
-
-  const admin = createClient(url, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-
-  const { data, error } = await admin.auth.getUser(token);
-  if (error || !data.user) return null;
-  return data.user.id;
-}
-
 export function createUploadMiddleware() {
   return (req: IncomingMessage, res: ServerResponse, next: () => void) => {
     if (req.method !== 'POST' || !req.url?.startsWith('/api/upload')) {
@@ -63,7 +42,7 @@ export function createUploadMiddleware() {
       }
 
       const mreq = req as MulterRequest;
-      const userId = await verifyAuthToken(req.headers.authorization);
+      const userId = await verifySupabaseToken(req.headers.authorization);
       if (!userId) {
         sendJson(res, 401, { error: '未登录或 token 无效' });
         return;
@@ -122,7 +101,7 @@ export async function handleUploadRequest(
       }
 
       const mreq = req as MulterRequest;
-      const userId = await verifyAuthToken(req.headers.authorization);
+      const userId = await verifySupabaseToken(req.headers.authorization);
       if (!userId) {
         sendJson(res, 401, { error: '未登录或 token 无效' });
         resolve();

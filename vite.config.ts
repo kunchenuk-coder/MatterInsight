@@ -5,6 +5,7 @@ import react from '@vitejs/plugin-react';
 import { createSpeechToTextMiddleware } from './server/speechToText';
 import { createUploadMiddleware } from './server/uploadHandler';
 import { createGetUploadUrlMiddleware } from './server/getUploadUrlHandler';
+import { createUploadAssetMiddleware } from './server/uploadAssetHandler';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -37,6 +38,12 @@ export default defineConfig(({ mode }) => {
           name: 'get-upload-url-api',
           configureServer(server) {
             server.middlewares.use(createGetUploadUrlMiddleware());
+          },
+        },
+        {
+          name: 'upload-asset-api',
+          configureServer(server) {
+            server.middlewares.use(createUploadAssetMiddleware());
           },
         },
       ],
