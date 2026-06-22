@@ -34,6 +34,7 @@ import {
   updateVerificationRequest,
 } from './services/profileService';
 import {
+  isAdminPortal,
   isPasswordRecoveryMode,
   lockPasswordRecoveryMode,
 } from './utils/authRoutes';
@@ -852,7 +853,7 @@ const App: React.FC = () => {
   }
 
   if (!user) {
-    return <Auth onAuthSuccess={handleAuthSuccess} />;
+    return <Auth onAuthSuccess={handleAuthSuccess} adminPortal={isAdminPortal()} />;
   }
 
   const unreadQuotes = inquiries.filter(inq => inq.status === 'QUOTED' && inq.designerId === user.id).length;

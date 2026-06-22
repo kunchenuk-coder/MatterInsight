@@ -1,4 +1,21 @@
-export type PublicAuthPath = '/login' | '/reset-password';
+export type PublicAuthPath = '/login' | '/reset-password' | '/admin';
+
+/** 隐藏的管理员入口路径（普通登录页不暴露管理端） */
+export const ADMIN_PORTAL_PATH = '/admin';
+
+/**
+ * 是否为「管理员入口」：
+ *   1) 域名以 admin 开头或包含 admin（如 matterinsightadmin.vercel.app / admin.xxx.com）；
+ *   2) 或访问隐藏路径 /admin。
+ * 普通登录页（设计师 / 材料商）不会命中此判断，从而隐藏管理端入口。
+ */
+export function isAdminPortal(): boolean {
+  const host = window.location.hostname.toLowerCase();
+  const path = window.location.pathname.toLowerCase();
+  const onAdminHost = host.startsWith('admin') || host.includes('admin');
+  const onAdminPath = path === ADMIN_PORTAL_PATH || path.startsWith('/admin/');
+  return onAdminHost || onAdminPath;
+}
 
 /** 内存标记：Supabase 解析 hash 后 URL 可能不再含 type=recovery，需保持 recovery 状态 */
 let recoveryModeLocked = false;

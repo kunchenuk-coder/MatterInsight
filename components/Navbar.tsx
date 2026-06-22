@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React from 'react';
 import { User } from '../types';
 
 interface NavbarProps {
@@ -19,18 +19,16 @@ const Navbar: React.FC<NavbarProps> = ({
   user, points, onLogoClick, onProfileClick, onMoodboardClick, onLogout, onRechargeClick, 
   notifications = 0, searchTerm, onSearchChange 
 }) => {
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-
   return (
     <>
-      <nav className="fixed top-0 left-0 right-0 bg-white/80 backdrop-blur-md border-b z-50 h-16 flex items-center px-6 justify-between">
-        <div className="flex items-center gap-8">
+      <nav className="fixed top-0 left-0 right-0 bg-white/80 backdrop-blur-md border-b z-50 h-16 flex items-center px-3 md:px-6 justify-between gap-2">
+        <div className="flex items-center gap-8 min-w-0">
           <div 
             onClick={onLogoClick}
-            className="flex flex-col cursor-pointer group flex-1 md:flex-none items-center md:items-start"
+            className="flex flex-col cursor-pointer group items-start shrink-0"
           >
             <div className="text-[12px] md:text-xl font-black bg-black text-white px-2.5 md:px-4 py-1.5 md:py-1 tracking-tighter flex items-center gap-1.5 md:gap-2 w-fit whitespace-nowrap">
-              物见 <span className="text-gray-400 font-light text-[10px] md:text-base">|</span> MATTER INSIGHT
+              物见 <span className="hidden md:inline text-gray-400 font-light text-[10px] md:text-base">|</span> <span className="hidden md:inline">MATTER INSIGHT</span>
             </div>
           </div>
           
@@ -92,63 +90,54 @@ const Navbar: React.FC<NavbarProps> = ({
             </button>
           </div>
 
-          {/* Mobile Menu Toggle */}
-          <button 
-            onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-            className="md:hidden text-black p-2"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={isMobileMenuOpen ? "M6 18L18 6M6 6l12 12" : "M4 6h16M4 12h16M4 18h16"} />
-            </svg>
-          </button>
-        </div>
-      </nav>
-
-      {/* Mobile Menu Drawer */}
-      {isMobileMenuOpen && (
-        <div className="fixed inset-0 bg-white z-[60] pt-20 px-6 md:hidden flex flex-col items-center">
-          <div className="w-full max-w-sm space-y-4 flex flex-col items-center pt-8">
-            <button 
-              onClick={() => { onLogoClick(); setIsMobileMenuOpen(false); }} 
-              className="w-full py-5 rounded-2xl bg-gray-50 text-xl font-black uppercase tracking-tighter text-center hover:bg-black hover:text-white transition-all shadow-sm flex items-center justify-center gap-3"
+          {/* 移动端常驻导航：4 个图标固定在顶部，随时跳转（替代汉堡菜单） */}
+          <div className="md:hidden flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={onLogoClick}
+              title="探索材料库"
+              aria-label="探索材料库"
+              className="w-9 h-9 rounded-xl flex items-center justify-center text-lg leading-none hover:bg-gray-100 active:scale-90 transition-all"
             >
-              <span>🔍</span> 探索材料库
+              🔍
             </button>
             {user.role === 'DESIGNER' && (
-              <button 
-                onClick={() => { onMoodboardClick(); setIsMobileMenuOpen(false); }} 
-                className="w-full py-5 rounded-2xl bg-gray-50 text-xl font-black uppercase tracking-tighter text-center hover:bg-black hover:text-white transition-all shadow-sm flex items-center justify-center gap-3"
+              <button
+                type="button"
+                onClick={onMoodboardClick}
+                title="情绪板设计"
+                aria-label="情绪板设计"
+                className="w-9 h-9 rounded-xl flex items-center justify-center text-lg leading-none hover:bg-gray-100 active:scale-90 transition-all"
               >
-                <span>🎨</span> 情绪板设计
+                🎨
               </button>
             )}
-            <button 
-              onClick={() => { onProfileClick(); setIsMobileMenuOpen(false); }} 
-              className="w-full py-5 rounded-2xl bg-gray-50 text-xl font-black uppercase tracking-tighter text-center hover:bg-black hover:text-white transition-all shadow-sm flex items-center justify-center gap-3"
+            <button
+              type="button"
+              onClick={onProfileClick}
+              title="个人控制台"
+              aria-label="个人控制台"
+              className="relative w-9 h-9 rounded-xl flex items-center justify-center text-lg leading-none hover:bg-gray-100 active:scale-90 transition-all"
             >
-              <span>📊</span> 个人控制台
+              👤
+              {notifications > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-[9px] font-black min-w-[16px] h-4 px-1 rounded-full flex items-center justify-center border border-white">
+                  {notifications}
+                </span>
+              )}
             </button>
-            <button 
-              onClick={() => { onLogout(); setIsMobileMenuOpen(false); }} 
-              className="w-full py-5 rounded-2xl bg-red-50 text-xl font-black uppercase tracking-tighter text-center text-red-500 hover:bg-red-500 hover:text-white transition-all shadow-sm flex items-center justify-center gap-3"
+            <button
+              type="button"
+              onClick={onLogout}
+              title="退出登录"
+              aria-label="退出登录"
+              className="w-9 h-9 rounded-xl flex items-center justify-center text-lg leading-none hover:bg-red-50 active:scale-90 transition-all"
             >
-              <span>🚪</span> 退出登录
+              🚪
             </button>
-          </div>
-          
-          <div className="mt-12 w-full max-w-sm">
-             <div className="relative w-full">
-              <input 
-                type="text" 
-                placeholder="搜索感兴趣的材质..." 
-                className="w-full bg-gray-100 border-none rounded-2xl px-6 py-4 text-sm font-bold focus:ring-2 focus:ring-black outline-none transition-all text-center"
-                value={searchTerm}
-                onChange={(e) => onSearchChange(e.target.value)}
-              />
-            </div>
           </div>
         </div>
-      )}
+      </nav>
     </>
   );
 };

@@ -244,6 +244,99 @@ function beginMobileItemTouch(e: React.TouchEvent) {
   if (!isMobileViewport()) return;
   e.stopPropagation();
 }
+
+/**
+ * 手机端「在效果图上放置标注点」全屏浮层：
+ * 把效果图临时铺满屏幕，手指点/拖选择位置（百分比落点），确认后回调 onPlace 自动连线。
+ */
+const MarkerPlacementOverlay: React.FC<{
+  imageUrl?: string;
+  sampleName?: string;
+  onPlace: (relX: number, relY: number) => void;
+  onCancel: () => void;
+}> = ({ imageUrl, sampleName, onPlace, onCancel }) => {
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  const updateFromClient = (clientX: number, clientY: number) => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return;
+    const x = Math.min(100, Math.max(0, ((clientX - r.left) / r.width) * 100));
+    const y = Math.min(100, Math.max(0, ((clientY - r.top) / r.height) * 100));
+    setPos({ x, y });
+  };
+
+  return (
+    <div className="fixed inset-0 z-[9500] bg-black/92 flex flex-col select-none" data-html2canvas-ignore>
+      <div className="flex items-center justify-between gap-2 px-4 py-3 text-white">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="text-sm font-bold px-4 py-2 rounded-full bg-white/15 active:scale-95 transition-transform"
+        >
+          取消
+        </button>
+        <span className="flex-1 text-center text-xs font-bold opacity-80 truncate">
+          点按效果图放置标注点{sampleName ? ` · ${sampleName}` : ""}
+        </span>
+        <button
+          type="button"
+          disabled={!pos}
+          onClick={() => pos && onPlace(pos.x, pos.y)}
+          className="text-sm font-bold px-5 py-2 rounded-full bg-white text-black disabled:opacity-40 active:scale-95 transition-transform"
+        >
+          确认
+        </button>
+      </div>
+      <div className="flex-1 flex items-center justify-center px-3 pb-2 overflow-hidden">
+        <div
+          ref={wrapRef}
+          className="relative touch-none"
+          onClick={(e) => updateFromClient(e.clientX, e.clientY)}
+          onTouchStart={(e) => {
+            const t = e.touches[0];
+            if (t) updateFromClient(t.clientX, t.clientY);
+          }}
+          onTouchMove={(e) => {
+            const t = e.touches[0];
+            if (!t) return;
+            if (e.cancelable) e.preventDefault();
+            updateFromClient(t.clientX, t.clientY);
+          }}
+        >
+          {imageUrl ? (
+            <img
+              src={imageUrl}
+              alt=""
+              className="max-w-full max-h-[72vh] object-contain rounded-lg pointer-events-none select-none"
+              draggable={false}
+            />
+          ) : (
+            <div className="w-72 h-48 rounded-lg bg-white/10 flex items-center justify-center text-white/60 text-sm">
+              暂无效果图
+            </div>
+          )}
+          {pos && (
+            <div
+              className="absolute -translate-x-1/2 -translate-y-1/2 pointer-events-none"
+              style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
+            >
+              <div className="w-7 h-7 bg-black border-2 border-white rounded-full shadow-2xl ring-4 ring-white/30 flex items-center justify-center">
+                <div className="w-2 h-2 bg-white rounded-full" />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      <p className="text-center text-white/55 text-[11px] leading-relaxed px-8 pb-7">
+        点按或拖动选择标注位置，点「确认」后引线会自动连到该材料。放置后仍可在画布上拖动小圆点微调。
+      </p>
+    </div>
+  );
+};
+
 const MOODBOARD_ZOOM_MIN = 0.5;
 const MOODBOARD_ZOOM_MAX = 3;
 
@@ -261,9 +354,55 @@ function getMarkerLineAnchor(marker: MoodBoardItem, items: MoodBoardItem[]): { x
   return { x: marker.x + marker.width / 2, y: marker.y + marker.height / 2 };
 }
 
-/** 样块连线落点：标签区中心偏下 */
-function getSampleLineEnd(sample: MoodBoardItem): { x: number; y: number } {
-  return { x: sample.x + sample.width / 2, y: sample.y + sample.height + 28 };
+/**
+ * 样块连线落点：自动吸附到「最靠近效果图（来向 from）」的一侧边缘，
+ * 落点贴在样块边框外侧一点点，既不盖住照片，也避开底部的文字标签。
+ */
+function getSampleConnectionPoint(
+  sample: MoodBoardItem,
+  fromX: number,
+  fromY: number
+): { x: number; y: number } {
+  const left = sample.x;
+  const right = sample.x + sample.width;
+  const top = sample.y;
+  const bottom = sample.y + sample.height;
+  const cx = sample.x + sample.width / 2;
+  const cy = sample.y + sample.height / 2;
+  const margin = 6;
+  const halfW = sample.width / 2 || 1;
+  const halfH = sample.height / 2 || 1;
+  const dx = fromX - cx;
+  const dy = fromY - cy;
+
+  // 取「方向占比」更大的轴作为最近的一侧
+  if (Math.abs(dx) / halfW >= Math.abs(dy) / halfH) {
+    // 左 / 右侧：落点纵向跟随来向，限制在卡片高度内
+    const x = dx >= 0 ? right + margin : left - margin;
+    const y = Math.min(bottom - 8, Math.max(top + 8, fromY));
+    return { x, y };
+  }
+  // 上 / 下侧：落点横向跟随来向，限制在卡片宽度内
+  const y = dy >= 0 ? bottom + margin : top - margin;
+  const x = Math.min(right - 8, Math.max(left + 8, fromX));
+  return { x, y };
+}
+
+/** 连线路径：按主导轴生成平滑 S 形曲线（横向/纵向自适应）。unit 用于导出时的百分比坐标。 */
+function buildConnectorPath(
+  sx: number,
+  sy: number,
+  ex: number,
+  ey: number,
+  unit = ''
+): string {
+  const u = unit;
+  if (Math.abs(ex - sx) >= Math.abs(ey - sy)) {
+    const mx = (sx + ex) / 2;
+    return `M ${sx}${u} ${sy}${u} C ${mx}${u} ${sy}${u}, ${mx}${u} ${ey}${u}, ${ex}${u} ${ey}${u}`;
+  }
+  const my = (sy + ey) / 2;
+  return `M ${sx}${u} ${sy}${u} C ${sx}${u} ${my}${u}, ${ex}${u} ${my}${u}, ${ex}${u} ${ey}${u}`;
 }
 
 /** 将视口像素位移换算为画布逻辑位移（与 clientToBoard 同一 scale 基准） */
@@ -582,6 +721,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   const connectingFromIdRef = useRef(connectingFromId);
   connectingFromIdRef.current = connectingFromId;
   const [tempPointerPos, setTempPointerPos] = useState<{x: number, y: number} | null>(null);
+  /** 手机端：点按样块连线点后，进入“在效果图上放置标注点”的全屏浮层（sampleId 为要连线的材料样块） */
+  const [markerPlacing, setMarkerPlacing] = useState<{ sampleId: string } | null>(null);
   const [analysisStep, setAnalysisStep] = useState<1 | 2 | 3>(1); // 1 上传 2 识别中 3 已写入画布
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [aiImage, setAiImage] = useState<string | null>(null);
@@ -1204,6 +1345,34 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   const updateBoardItems = (items: MoodBoardItem[]) => {
     if (!activeBoard) return;
     setMoodboards(prev => prev.map(b => b.id === activeBoard.id ? { ...b, items } : b));
+  };
+
+  /** 手机端放点浮层：在效果图(drawing)上按百分比落点生成标注点并自动连到样块 */
+  const createMarkerForSample = (sampleId: string, relX: number, relY: number) => {
+    if (!activeBoard) return;
+    const drawing = activeBoard.items.find((i) => i.type === "drawing");
+    if (!drawing) return;
+    const sample = activeBoard.items.find((i) => i.id === sampleId);
+    const x = drawing.x + (relX / 100) * drawing.width;
+    const y = drawing.y + (relY / 100) * drawing.height;
+    const maxZ = Math.max(...activeBoard.items.map((i) => i.zIndex), 0);
+    updateBoardItems([
+      ...activeBoard.items,
+      {
+        id: `marker_place_${Date.now()}`,
+        type: "marker",
+        parentId: drawing.id,
+        targetId: sampleId,
+        relX,
+        relY,
+        x: x - 8,
+        y: y - 8,
+        width: 16,
+        height: 16,
+        zIndex: maxZ + 500,
+        remark: sample?.remark || "标注点",
+      },
+    ]);
   };
 
   const cancelMobileItemMoveRaf = useCallback(() => {
@@ -2671,7 +2840,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
   return (
     <div 
-      className="flex h-[calc(100vh-120px)] bg-gray-50 rounded-3xl overflow-hidden border border-gray-200 relative" 
+      className="flex h-[calc(100vh-120px)] max-md:h-[calc(100dvh-140px)] bg-gray-50 rounded-3xl max-md:rounded-2xl overflow-hidden border border-gray-200 relative" 
       onMouseMove={handleMoveAction} 
       onTouchMove={handleMoveAction}
       onMouseUp={() => { setDraggingItem(null); setResizingItem(null); }}
@@ -3171,11 +3340,16 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                     if (isDrawing && !panArmed()) e.stopPropagation();
                     handleStartAction(e, item.id, "move");
                   }}
-                  className={`relative ${isDrawing ? "cursor-move" : ""}`}
+                  className={`relative touch-none ${isDrawing ? "cursor-move" : ""}`}
                 >
                   {isMarker ? (
                     <div className="relative group/marker flex items-center justify-center">
-                      <div className="w-5 h-5 bg-black border-2 border-white rounded-full shadow-2xl flex items-center justify-center cursor-move transition-transform active:scale-90 ring-4 ring-white/20">
+                      {/* 手机端隐形扩大点击区：让 20px 小圆点更易按住与挪动（不影响视觉与导出） */}
+                      <span
+                        aria-hidden="true"
+                        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-11 h-11 rounded-full md:hidden"
+                      />
+                      <div className="w-5 h-5 max-md:w-6 max-md:h-6 bg-black border-2 border-white rounded-full shadow-2xl flex items-center justify-center cursor-move transition-transform active:scale-90 ring-4 ring-white/20">
                         <div className="w-1.5 h-1.5 bg-white rounded-full" />
                       </div>
                       {!isFinalMode && (
@@ -3199,7 +3373,9 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                         <img
                           src={item.imageUrl}
                           alt=""
-                          className="w-full h-auto rounded-2xl shadow-xl cursor-move pointer-events-auto select-none transition-all"
+                          draggable={false}
+                          onContextMenu={(e) => e.preventDefault()}
+                          className="w-full h-auto rounded-2xl shadow-xl cursor-move pointer-events-auto select-none transition-all touch-none [-webkit-touch-callout:none]"
                           onDoubleClick={(e) => {
                             e.stopPropagation();
                             if (isFinalMode || !canvasRef.current) return;
@@ -3247,7 +3423,9 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                               mat?.image
                             }
                             alt=""
-                            className={`w-full h-full object-cover rounded-2xl shadow-xl cursor-move pointer-events-none select-none transition-all ${isSample ? "border-4 border-white ring-1 ring-black/5" : ""}`}
+                            draggable={false}
+                            onContextMenu={(e) => e.preventDefault()}
+                            className={`w-full h-full object-cover rounded-2xl shadow-xl cursor-move pointer-events-none select-none transition-all [-webkit-touch-callout:none] ${isSample ? "border-4 border-white ring-1 ring-black/5" : ""}`}
                           />
                           {isSample && display?.showUpdateDot && !isExporting && (
                             <button
@@ -3468,6 +3646,11 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                                 setTempPointerPos({ x: p.x, y: p.y });
                               }}
                               onTouchStart={(e) => {
+                                if (isMobileViewport()) {
+                                  // 手机端：拦截冒泡（避免触发卡片移动），改由 onClick 打开“全屏放点”浮层
+                                  e.stopPropagation();
+                                  return;
+                                }
                                 beginMobileItemTouch(e);
                                 if (panArmed()) return;
                                 if (!canvasRef.current) return;
@@ -3478,9 +3661,21 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                                 const p = clientToBoard(t.clientX, t.clientY);
                                 setTempPointerPos({ x: p.x, y: p.y });
                               }}
-                              className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-black rounded-full border-2 border-white shadow-lg scale-0 group-hover/label:scale-100 max-md:scale-100 transition-all cursor-crosshair z-[110] touch-none" 
-                              title="按住并拖动以连接标注点"
-                            />
+                              onClick={(e) => {
+                                if (!isMobileViewport() || isDrawing) return;
+                                e.stopPropagation();
+                                const drawing = activeBoard.items.find((i) => i.type === "drawing");
+                                if (!drawing) {
+                                  alert("请先在情绪板中添加效果图，再放置标注点");
+                                  return;
+                                }
+                                setMarkerPlacing({ sampleId: item.id });
+                              }}
+                              className="absolute -bottom-2 left-1/2 -translate-x-1/2 max-md:bottom-auto max-md:left-1 max-md:top-1 max-md:translate-x-0 w-4 h-4 max-md:w-8 max-md:h-8 bg-black rounded-full border-2 border-white shadow-lg scale-0 group-hover/label:scale-100 max-md:scale-100 transition-all cursor-crosshair z-[110] touch-none flex items-center justify-center"
+                              title="点按在效果图上放置标注点并自动连线"
+                            >
+                              <span className="hidden max-md:block text-white text-[15px] font-black leading-none">+</span>
+                            </div>
                           )}
                         </div>
                       </div>
@@ -3524,11 +3719,11 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                 {!isMarker && (
                   <div 
                     onMouseDown={(e) => { e.stopPropagation(); handleStartAction(e, item.id, 'resize'); }}
-                    onTouchStart={(e) => { beginMobileItemTouch(e); handleStartAction(e, item.id, 'resize'); }}
-                    className="absolute bottom-1 right-1 w-4 h-4 rounded-md bg-white/90 border border-black/15 shadow-sm flex items-end justify-end cursor-nwse-resize opacity-0 group-hover:opacity-100 transition-opacity z-50"
+                    onTouchStart={(e) => { e.stopPropagation(); beginMobileItemTouch(e); handleStartAction(e, item.id, 'resize'); }}
+                    className="absolute bottom-1 right-1 max-md:-bottom-4 max-md:-right-4 w-4 h-4 max-md:w-12 max-md:h-12 rounded-md max-md:rounded-full bg-white/90 max-md:bg-black/85 border border-black/15 max-md:border-2 max-md:border-white shadow-sm max-md:shadow-xl flex items-end max-md:items-center justify-end max-md:justify-center cursor-nwse-resize opacity-0 group-hover:opacity-100 max-md:opacity-100 transition-opacity z-[60] touch-none"
                     title="拖拽缩放"
                   >
-                    <svg className="w-2.5 h-2.5 text-black/45" viewBox="0 0 10 10" aria-hidden>
+                    <svg className="w-2.5 h-2.5 max-md:w-5 max-md:h-5 text-black/45 max-md:text-white" viewBox="0 0 10 10" aria-hidden>
                       <path d="M9 1v8H1" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
                       <path d="M9 5v4H5" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
                     </svg>
@@ -3546,16 +3741,17 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                 if (!sample) return null;
 
                 const { x: startX, y: startY } = getMarkerLineAnchor(marker, activeBoard.items);
-                const { x: endX, y: endY } = getSampleLineEnd(sample);
+                const { x: endX, y: endY } = getSampleConnectionPoint(sample, startX, startY);
+                const d = buildConnectorPath(startX, startY, endX, endY);
 
                 return (
                   <g key={`line-svg-${marker.id}`}>
                     <path 
-                      d={`M ${startX} ${startY} C ${startX} ${startY + (endY - startY)/2}, ${endX} ${startY + (endY - startY)/2}, ${endX} ${endY}`}
+                      d={d}
                       fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" className="opacity-30"
                     />
                     <path 
-                      d={`M ${startX} ${startY} C ${startX} ${startY + (endY - startY)/2}, ${endX} ${startY + (endY - startY)/2}, ${endX} ${endY}`}
+                      d={d}
                       fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" className="opacity-90"
                     />
                     <circle cx={startX} cy={startY} r="3" fill="currentColor" />
@@ -3817,6 +4013,22 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
    
 
       {/* Large Image Preview Modal */}
+      {markerPlacing && (() => {
+        const drawing = activeBoard.items.find((i) => i.type === "drawing");
+        const sample = activeBoard.items.find((i) => i.id === markerPlacing.sampleId);
+        return (
+          <MarkerPlacementOverlay
+            imageUrl={drawing?.imageUrl}
+            sampleName={sample?.remark}
+            onCancel={() => setMarkerPlacing(null)}
+            onPlace={(relX, relY) => {
+              createMarkerForSample(markerPlacing.sampleId, relX, relY);
+              setMarkerPlacing(null);
+            }}
+          />
+        );
+      })()}
+
       {isPreviewingImage && (
         <div className="fixed inset-0 bg-black/95 backdrop-blur-2xl z-[300] flex flex-col items-center justify-center p-4 md:p-10">
           <div className="absolute top-8 right-8 flex items-center gap-4">
@@ -3856,15 +4068,19 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                   const sample = activeBoard.items.find(s => s.id === marker.targetId);
                   if (!sample) return null;
                   
-                  const startX = (marker.x + marker.width / 2) / (canvasRef.current?.clientWidth || 1000) * 100;
-                  const startY = (marker.y + marker.height / 2) / (canvasRef.current?.clientHeight || 1000) * 100;
-                  const endX = (sample.x + sample.width / 2) / (canvasRef.current?.clientWidth || 1000) * 100;
-                  const endY = ((sample.y + sample.height + 28) / (canvasRef.current?.clientHeight || 1000)) * 100; 
+                  const cw = canvasRef.current?.clientWidth || 1000;
+                  const ch = canvasRef.current?.clientHeight || 1000;
+                  const anchor = getMarkerLineAnchor(marker, activeBoard.items);
+                  const conn = getSampleConnectionPoint(sample, anchor.x, anchor.y);
+                  const startX = (anchor.x / cw) * 100;
+                  const startY = (anchor.y / ch) * 100;
+                  const endX = (conn.x / cw) * 100;
+                  const endY = (conn.y / ch) * 100;
 
                   return (
                     <g key={`export-line-${marker.id}`}>
                       <path 
-                        d={`M ${startX}% ${startY}% C ${startX}% ${startY + (endY - startY)/2}%, ${endX}% ${startY + (endY - startY)/2}%, ${endX}% ${endY}%`}
+                        d={buildConnectorPath(startX, startY, endX, endY, '%')}
                         fill="none"
                         stroke="currentColor"
                         strokeWidth="1.2"

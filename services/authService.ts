@@ -231,7 +231,12 @@ export function onAuthStateChange(
 ): () => void {
   if (!isSupabaseConfigured()) return () => {};
 
-  const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
+  // 注意：回调内严禁再 await 其它 supabase 调用（官方告警：易死锁）。
+  // App 端的监听只消费“用户变为 null（登出）”这一种情况，非空用户不会被使用，
+  // 因此这里只在「真正登出 / 密码恢复」时回调 null；其余事件（SIGNED_IN /
+  // INITIAL_SESSION / TOKEN_REFRESHED / USER_UPDATED 等）一律不打扰已登录态，
+  // 避免移动端切前后台、双指缩放等触发的瞬时会话重校验把用户错误踢回登录页。
+  const { data } = supabase.auth.onAuthStateChange((event, session) => {
     if (event === 'PASSWORD_RECOVERY') {
       lockPasswordRecoveryMode(true);
       callback(null);
@@ -243,25 +248,9 @@ export function onAuthStateChange(
       return;
     }
 
-    if (event === 'SIGNED_OUT' || !session?.user) {
+    if (event === 'SIGNED_OUT') {
       callback(null);
       return;
-    }
-
-    if (event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
-      return;
-    }
-
-    const profile = await requireProfile(session.user);
-    if (!profile) {
-      callback(null);
-      return;
-    }
-
-    try {
-      callback(mapProfileToUser(profile));
-    } catch {
-      callback(null);
     }
   });
 

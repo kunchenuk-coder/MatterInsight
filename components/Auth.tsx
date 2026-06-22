@@ -7,15 +7,17 @@ import AuthShell from './AuthShell';
 
 interface AuthProps {
   onAuthSuccess: (user: import('../types').User) => void;
+  /** 管理员入口：隐藏角色选项卡，强制 ADMIN 身份，且不可自助注册 */
+  adminPortal?: boolean;
 }
 
 type AuthMode = 'login' | 'register' | 'forgot';
 
 const LOGIN_FAILED_MSG = '邮箱或密码错误';
 
-const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
+const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
   const [mode, setMode] = useState<AuthMode>('login');
-  const [role, setRole] = useState<UserRole>('DESIGNER');
+  const [role, setRole] = useState<UserRole>(adminPortal ? 'ADMIN' : 'DESIGNER');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -169,39 +171,38 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
   }
 
   return (
-    <AuthShell>
-      <div className="flex bg-gray-100 p-1 rounded-2xl mb-8">
-        <button
-          type="button"
-          onClick={() => {
-            setRole('DESIGNER');
-            setError('');
-          }}
-          className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all ${role === 'DESIGNER' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}
-        >
-          设计师
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setRole('SUPPLIER');
-            setError('');
-          }}
-          className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all ${role === 'SUPPLIER' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}
-        >
-          材料商
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setRole('ADMIN');
-            setError('');
-          }}
-          className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all ${role === 'ADMIN' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}
-        >
-          管理端
-        </button>
-      </div>
+    <AuthShell subtitle={adminPortal ? '管理控制台 · 仅限平台管理员' : undefined}>
+      {adminPortal ? (
+        <div className="mb-8 text-center">
+          <div className="inline-flex items-center gap-2 bg-gray-100 px-6 py-3 rounded-2xl">
+            <span className="text-lg">🛡️</span>
+            <span className="text-sm font-black text-black tracking-wide">管理控制台登录</span>
+          </div>
+        </div>
+      ) : (
+        <div className="flex bg-gray-100 p-1 rounded-2xl mb-8">
+          <button
+            type="button"
+            onClick={() => {
+              setRole('DESIGNER');
+              setError('');
+            }}
+            className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all ${role === 'DESIGNER' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}
+          >
+            设计师
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setRole('SUPPLIER');
+              setError('');
+            }}
+            className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all ${role === 'SUPPLIER' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}
+          >
+            材料商
+          </button>
+        </div>
+      )}
 
       <form onSubmit={handleSubmit} className="space-y-4">
         <div>
@@ -287,15 +288,17 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
         </button>
       </form>
 
-      <div className="mt-8 text-center">
-        <button
-          type="button"
-          onClick={() => switchMode(mode === 'login' ? 'register' : 'login')}
-          className="text-xs font-bold text-gray-400 hover:text-black transition-colors"
-        >
-          {mode === 'login' ? '还没有账号? 立即注册' : '已有账号? 返回登录'}
-        </button>
-      </div>
+      {!adminPortal && (
+        <div className="mt-8 text-center">
+          <button
+            type="button"
+            onClick={() => switchMode(mode === 'login' ? 'register' : 'login')}
+            className="text-xs font-bold text-gray-400 hover:text-black transition-colors"
+          >
+            {mode === 'login' ? '还没有账号? 立即注册' : '已有账号? 返回登录'}
+          </button>
+        </div>
+      )}
     </AuthShell>
   );
 };
