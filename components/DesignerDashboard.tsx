@@ -4,6 +4,10 @@ import { User, Material, Category, MoodBoard, Inquiry, SampleRequest } from '../
 import jsPDF from 'jspdf';
 import 'jspdf-autotable';
 import { UserOptions } from 'jspdf-autotable';
+import {
+  findDesignerMoodboardInquiry,
+  formatSupplierQuotePrice,
+} from '../services/inquiryService';
 
 // Add type declaration for jspdf-autotable
 interface jsPDFWithPlugin extends jsPDF {
@@ -66,7 +70,8 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
       name: `新建情绪板 ${moodboards.length + 1}`,
       items: [],
       isPaid: false,
-      maxMaterials: 10
+      maxMaterials: 10,
+      visibility: 'private',
     };
     setMoodboards([...moodboards, newBoard]);
   };
@@ -100,13 +105,14 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
       
       const tableRows = showQuotation.items.map(item => {
         const m = library.find(x => x.id === item.materialId);
-        const inq = inquiries.find(i => i.materialId === item.materialId && i.moodBoardId === showQuotation.id);
+        const inq = findDesignerMoodboardInquiry(inquiries, user.id, item.materialId, showQuotation.id);
+        const quoteLabel = inq?.status === 'QUOTED' ? formatSupplierQuotePrice(inq.quotePrice) : null;
         return [
           m?.name || '未知',
           m?.brand || '未知',
           m?.specifications || '-',
           m?.priceRange || '-',
-          inq?.status === 'QUOTED' ? `¥ ${inq.quotePrice}` : '未报价',
+          quoteLabel || '未报价',
           inq?.status === 'QUOTED' ? `¥ ${inq.totalPrice}` : '-',
           inq?.status === 'QUOTED' ? '已报价' : (inq ? '询价中' : '未询价')
         ];
@@ -172,12 +178,26 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
                     <p className="text-xs text-gray-400 font-bold uppercase tracking-widest mt-1">项目材料清单</p>
                   </div>
                   {mb.isPaid && <span className="bg-yellow-400 text-black text-[9px] font-black px-2 py-0.5 rounded-full">PRO</span>}
+                  {mb.visibility === 'public' && (
+                    <span className="bg-green-100 text-green-700 text-[9px] font-black px-2 py-0.5 rounded-full ml-1">公开</span>
+                  )}
+                  {mb.visibility === 'team' && (
+                    <span className="bg-blue-100 text-blue-700 text-[9px] font-black px-2 py-0.5 rounded-full ml-1">团队</span>
+                  )}
                 </div>
                 <div className="space-y-4 mb-8">
                   {mb.items.filter(i => i.materialId).slice(0, expandedMbs.includes(mb.id) ? undefined : 3).map((item, idx) => {
                     const m = library.find(x => x.id === item.materialId);
+                    const inq = findDesignerMoodboardInquiry(inquiries, user.id, item.materialId, mb.id);
+                    const quoteLabel =
+                      inq?.status === 'QUOTED' ? formatSupplierQuotePrice(inq.quotePrice) : null;
+                    const refPrice = m?.priceRange?.split('-')[0].replace('¥', '') ?? '';
                     return (
-                      <div key={idx} className="flex items-center gap-4 group/item">
+                      <div
+                        key={idx}
+                        onClick={() => m && onViewMaterialDetail(m)}
+                        className="flex items-center gap-4 group/item cursor-pointer"
+                      >
                          <div className="w-10 h-10 rounded-lg overflow-hidden bg-gray-50 border border-gray-100 shrink-0">
                             <img src={m?.image} className="w-full h-full object-cover" alt={m?.name} />
                          </div>
@@ -185,8 +205,8 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
                             <p className="text-xs font-black text-gray-900 truncate">{m?.name}</p>
                             <p className="text-[10px] text-gray-400 font-bold uppercase tracking-tight">{m?.brand}</p>
                          </div>
-                         <div className="text-[10px] font-black text-gray-300 group-hover/item:text-black transition-colors">
-                            ¥{m?.priceRange?.split('-')[0].replace('¥','')}
+                         <div className={`text-[10px] font-black transition-colors ${quoteLabel ? 'text-blue-600' : 'text-gray-300 group-hover/item:text-black'}`}>
+                            {quoteLabel ?? `¥${refPrice}`}
                          </div>
                       </div>
                     );
@@ -266,7 +286,14 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
                     .filter(item => item.materialId) // Only show actual materials
                     .map((item, idx) => {
                       const m = library.find(x => x.id === item.materialId);
-                      const inq = inquiries.find(i => i.materialId === item.materialId && i.moodBoardId === showQuotation.id);
+                      const inq = findDesignerMoodboardInquiry(
+                        inquiries,
+                        user.id,
+                        item.materialId,
+                        showQuotation.id
+                      );
+                      const quoteLabel =
+                        inq?.status === 'QUOTED' ? formatSupplierQuotePrice(inq.quotePrice) : null;
                       return (
                         <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
                           <td className="py-4 px-2 font-bold text-black">{m?.name || '未命名材料'}</td>
@@ -274,7 +301,7 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
                           <td className="py-4 px-2 text-xs text-gray-400">{m?.specifications || '-'}</td>
                           <td className="py-4 px-2 font-black text-gray-400">{m?.priceRange || '-'}</td>
                         <td className="py-4 px-2 font-black text-blue-600">
-                          {inq?.status === 'QUOTED' ? `¥ ${inq.quotePrice}` : '-'}
+                          {quoteLabel ?? '-'}
                         </td>
                         <td className="py-4 px-2 font-black text-black">
                           {inq?.status === 'QUOTED' ? `¥ ${inq.totalPrice}` : '-'}

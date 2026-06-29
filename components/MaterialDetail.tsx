@@ -1,11 +1,13 @@
 
 import React, { useState } from 'react';
 import { Material, User, Inquiry, SampleRequest } from '../types';
+import { isSupplierUser } from '../services/inquiryService';
 
 interface MaterialDetailProps {
   material: Material;
   user: User | null;
   isPublicView?: boolean;
+  backLabel?: string;
   onBack: () => void;
   onDeductPoints: (amt: number) => void;
   onSampleRequest: (materialId: string, address: string, contactName: string, phone: string) => void;
@@ -16,7 +18,7 @@ interface MaterialDetailProps {
 
 const MaterialDetail: React.FC<MaterialDetailProps> = ({ 
   material, user, onBack, onDeductPoints, onSampleRequest, onInquiry,
-  inquiries, sampleRequests, isPublicView = false
+  inquiries, sampleRequests, isPublicView = false, backLabel
 }) => {
   const [selectedVariant, setSelectedVariant] = useState((material.variants && material.variants[0]) || { id: 'default', colorCode: '#FFFFFF', imageUrl: material.image, name: '默认' });
   const [isQuoting, setIsQuoting] = useState(false);
@@ -56,9 +58,12 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
     });
   };
 
+  const supplierViewer = isSupplierUser(user);
+
   const handleSampleOrder = (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return alert('请先登录');
+    if (supplierViewer) return;
     if (user.points < material.pointsNeeded.sample) {
       alert('积分不足，请先充值');
       return;
@@ -71,6 +76,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
 
   const handleQuoteSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (supplierViewer) return;
     // For standalone material detail, we use a dummy moodboard ID or handle it specially
     onInquiry(material.id, 'STANDALONE', `项目: ${quoteForm.project} | 地址: ${quoteForm.address} | 面积: ${quoteForm.area} | 时间: ${quoteForm.date} | 备注: ${quoteForm.notes}`);
     setIsQuoting(false);
@@ -87,7 +93,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
           <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
-          {isPublicView ? "探索公开库" : "返回列表"}
+          {backLabel ?? (isPublicView ? '探索公开库' : '返回列表')}
         </button>
         <div className="flex items-center gap-3">
           <button 
@@ -165,32 +171,34 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
               </div>
             </div>
 
-            <div className="flex gap-4">
-              <button 
-                onClick={() => {
-                  if (isPublicView) {
-                    alert('请先注册/登录账户');
-                    return;
-                  }
-                  setIsRequestingSample(true);
-                }}
-                className="flex-1 bg-black text-white py-4 rounded-2xl font-bold hover:bg-gray-800 transition-colors shadow-lg shadow-black/10"
-              >
-                申领小样 ({material.pointsNeeded.sample}点)
-              </button>
-              <button 
-                onClick={() => {
-                  if (isPublicView) {
-                    alert('请先注册/登录账户');
-                    return;
-                  }
-                  setIsQuoting(true);
-                }}
-                className="flex-1 border-2 border-black py-4 rounded-2xl font-bold hover:bg-gray-50 transition-colors"
-              >
-                申请报价
-              </button>
-            </div>
+            {!supplierViewer && (
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => {
+                    if (isPublicView) {
+                      alert('请先注册/登录账户');
+                      return;
+                    }
+                    setIsRequestingSample(true);
+                  }}
+                  className="flex-1 bg-black text-white py-4 rounded-2xl font-bold hover:bg-gray-800 transition-colors shadow-lg shadow-black/10"
+                >
+                  申领小样 ({material.pointsNeeded.sample}点)
+                </button>
+                <button 
+                  onClick={() => {
+                    if (isPublicView) {
+                      alert('请先注册/登录账户');
+                      return;
+                    }
+                    setIsQuoting(true);
+                  }}
+                  className="flex-1 border-2 border-black py-4 rounded-2xl font-bold hover:bg-gray-50 transition-colors"
+                >
+                  申请报价
+                </button>
+              </div>
+            )}
 
             {material.supplierNotes && (
               <div className="bg-yellow-50 p-4 rounded-2xl border border-yellow-100">

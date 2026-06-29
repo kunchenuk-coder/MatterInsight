@@ -8,6 +8,8 @@ import PinterestFeed from './components/PinterestFeed';
 import CategoryBar from './components/CategoryBar';
 import MaterialDetail from './components/MaterialDetail';
 import MoodBoardDesigner from './components/MoodBoardDesigner';
+import MoodBoardViewer from './components/MoodBoardViewer';
+import DesignerPage from './components/DesignerPage';
 import SupplierDashboard from './components/SupplierDashboard';
 import DesignerDashboard from './components/DesignerDashboard';
 import AdminDashboard from './components/AdminDashboard';
@@ -19,8 +21,9 @@ import {
   stripLargestDrawingImages,
 } from './utils/moodboardStorage';
 import { isSupabaseConfigured } from './services/supabaseClient';
-import { restoreSession, signOut, onAuthStateChange, getAccessToken } from './services/authService';
-import { syncMoodboards } from './services/moodboardService';
+import { restoreSession, signOut, onAuthStateChange } from './services/authService';
+import { useDeviceSessionGuard } from './hooks/useDeviceSessionGuard';
+import { syncMoodboards, subscribeMoodboardChanges, fetchPublicMoodboards, withDefaultVisibility } from './services/moodboardService';
 import { syncSavedMaterialIds } from './services/savedMaterialService';
 import {
   submitPendingMaterial,
@@ -30,9 +33,15 @@ import {
 import { loadDesignerCloudData, loadGlobalCloudData } from './services/dataSyncService';
 import {
   approveSupplier,
+  fetchProfile,
   fetchVerificationRequestsForAdmin,
   updateVerificationRequest,
 } from './services/profileService';
+import {
+  assertDesignerCanRequestQuoteOrSample,
+  countUnreadDesignerQuotes,
+  getDesignerRequestRejectionReason,
+} from './services/inquiryService';
 import {
   isAdminPortal,
   isPasswordRecoveryMode,
@@ -41,7 +50,18 @@ import {
 import {
   guardDashboardRoute,
   redirectToRoleDashboard,
+  parseAppPageRoute,
+  navigateTo,
+  LOGIN_PATH,
+  MY_PAGE_PATH,
+  DESIGNER_DASHBOARD_PATH,
+  getDesignerPublicPath,
+  getMaterialPath,
+  parseMaterialId,
+  isDashboardPath,
 } from './router';
+import { toggleCollectMoodboard, getCollectedMoodboards } from './services/collectedMoodboardService';
+import { resolveUserDisplayName } from './utils/profileDisplayName';
 
 /** 启动诊断：确认 Vite 是否注入环境变量（构建时打入，非运行时读取 .env.local） */
 console.log('[MatterInsight boot] VITE_SUPABASE_URL:', import.meta.env.VITE_SUPABASE_URL);
@@ -124,8 +144,12 @@ const App: React.FC = () => {
   const [recoveryMode, setRecoveryMode] = useState(() => isPasswordRecoveryMode());
   const [pathname, setPathname] = useState(() => window.location.pathname);
   const skipCloudSyncRef = useRef(true);
-  const [currentView, setCurrentView] = useState<'HOME' | 'DETAILS' | 'MOODBOARD' | 'DASHBOARD'>('HOME');
+  const [currentView, setCurrentView] = useState<'HOME' | 'DETAILS' | 'MOODBOARD' | 'MOODBOARD_VIEW' | 'DASHBOARD'>('HOME');
   const [selectedMaterial, setSelectedMaterial] = useState<Material | null>(null);
+  const [materialDetailReturnTo, setMaterialDetailReturnTo] = useState<'home' | 'dashboard' | 'moodboard'>('home');
+  const [materialDetailReturnPath, setMaterialDetailReturnPath] = useState<string | null>(null);
+  const materialReturnToRef = useRef<'home' | 'dashboard' | 'moodboard'>('home');
+  const [selectedMoodboard, setSelectedMoodboard] = useState<MoodBoard | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
   const [sharedMaterialId, setSharedMaterialId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -222,6 +246,8 @@ const App: React.FC = () => {
   const [inquiries, setInquiries] = useState<Inquiry[]>(() => getFromLocal('inquiries') || []);
   const [sampleRequests, setSampleRequests] = useState<SampleRequest[]>(() => getFromLocal('samples') || []);
   const [moodboards, setMoodboards] = useState<MoodBoard[]>([]);
+  const [publicMoodboards, setPublicMoodboards] = useState<MoodBoard[]>([]);
+  const [collectedMoodboardIds, setCollectedMoodboardIds] = useState<string[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>(() => getFromLocal('notifications') || []);
   const [activeMoodboardId, setActiveMoodboardId] = useState<string>('');
   const [savedMaterialIds, setSavedMaterialIds] = useState<string[]>([]);
@@ -233,6 +259,90 @@ const App: React.FC = () => {
   const [showWelcomeBonus, setShowWelcomeBonus] = useState(false);
   const [showFeatureModal, setShowFeatureModal] = useState(false);
   const savedIdsRef = useRef<string[]>([]);
+  const prevPathnameRef = useRef(pathname);
+  const pageRoute = parseAppPageRoute(pathname);
+  const onProfilePage = pageRoute.type === 'my-page' || pageRoute.type === 'designer';
+
+  const goToExploreLibrary = () => {
+    if (onProfilePage || isDashboardPath(pathname)) {
+      navigateTo(LOGIN_PATH, true);
+    }
+    setSelectedMaterial(null);
+    setSelectedMoodboard(null);
+    setCurrentView('HOME');
+  };
+
+  const leaveProfilePages = () => {
+    goToExploreLibrary();
+  };
+
+  const openMoodboardFromFeed = (board: MoodBoard) => {
+    if (pageRoute.type !== 'designer' && pageRoute.type !== 'my-page') {
+      navigateTo(DESIGNER_DASHBOARD_PATH, true);
+    }
+    setSelectedMoodboard(board);
+    setCurrentView('MOODBOARD_VIEW');
+  };
+
+  const handleFindSimilar = (name: string) => {
+    setSearchTerm(name);
+    leaveProfilePages();
+    setSelectedMoodboard(null);
+    setCurrentView('HOME');
+  };
+
+  const openMaterialDetail = (
+    material: Material,
+    returnTo: 'home' | 'dashboard' | 'moodboard' = 'home'
+  ) => {
+    materialReturnToRef.current = returnTo;
+    setMaterialDetailReturnTo(returnTo);
+    setMaterialDetailReturnPath(returnTo === 'moodboard' ? pathname : null);
+    setSelectedMaterial(material);
+    navigateTo(getMaterialPath(material.id));
+    setCurrentView('DETAILS');
+    setLibrary((prev) =>
+      prev.map((mat) => (mat.id === material.id ? { ...mat, clicks: mat.clicks + 1 } : mat))
+    );
+  };
+
+  const closeMaterialDetail = () => {
+    const returnTo = materialReturnToRef.current;
+    setSelectedMaterial(null);
+
+    if (returnTo === 'moodboard') {
+      setCurrentView('MOODBOARD_VIEW');
+      if (materialDetailReturnPath) {
+        navigateTo(materialDetailReturnPath);
+      } else {
+        navigateTo('/');
+      }
+      return;
+    }
+
+    if (returnTo === 'dashboard') {
+      navigateTo(DESIGNER_DASHBOARD_PATH);
+      setCurrentView('DASHBOARD');
+      return;
+    }
+
+    navigateTo('/');
+    setCurrentView('HOME');
+  };
+
+  const handleToggleCollectMoodboard = async (moodboardId: string) => {
+    if (!user || user.role !== 'DESIGNER') return;
+    const result = await toggleCollectMoodboard(user.id, moodboardId);
+    if (!result.ok) {
+      window.alert(result.error);
+      return;
+    }
+    setCollectedMoodboardIds((prev) =>
+      result.collected
+        ? [...new Set([...prev, moodboardId])]
+        : prev.filter((id) => id !== moodboardId)
+    );
+  };
   const moodboardsRef = useRef<MoodBoard[]>([]);
   const libraryRef = useRef<Material[]>([]);
 
@@ -240,11 +350,104 @@ const App: React.FC = () => {
   moodboardsRef.current = moodboards;
   libraryRef.current = library;
 
+  /** 单设备顶号守卫：手机/PC 各允许一台，同类新登录踢掉旧会话 */
+  useDeviceSessionGuard(user?.id, () => {
+    setUser(null);
+    setSavedMaterialIds([]);
+    setMoodboards([]);
+    setActiveMoodboardId('');
+  });
+
   /** 运营后台：从 Supabase 拉取待认证供应商（跨设备同步，不依赖 localStorage） */
   const refreshVerificationRequestsFromCloud = async () => {
     if (!isSupabaseConfigured()) return;
     const rows = await fetchVerificationRequestsForAdmin();
     setVerificationRequests(rows);
+  };
+
+  const defaultMoodboardsFor = (userId: string): MoodBoard[] => [
+    { id: `mb_${userId}_default`, name: '默认情绪板', items: [], isPaid: false, maxMaterials: 10, visibility: 'private' },
+  ];
+
+  /** 先用本地缓存进入主页，不等待云端同步 */
+  const enterAuthenticatedSession = (userData: User): boolean => {
+    skipCloudSyncRef.current = true;
+    setPoints(userData.points);
+    setCurrentView('DASHBOARD');
+
+    if (userData.dbRole === 'designer') {
+      const boards =
+        (getFromLocal('moodboards', userData.id) || defaultMoodboardsFor(userData.id)).map(
+          withDefaultVisibility
+        );
+      const collections = getFromLocal('saved_ids', userData.id) || [];
+      setUser({ ...userData, collections, transactions: userData.transactions || [] });
+      setSavedMaterialIds(collections);
+      setMoodboards(boards);
+      setActiveMoodboardId(boards[0]?.id ?? '');
+    } else {
+      setUser({ ...userData, collections: [], transactions: userData.transactions || [] });
+      setSavedMaterialIds([]);
+      setMoodboards([]);
+      setActiveMoodboardId('');
+    }
+
+    if (!redirectToRoleDashboard(userData.dbRole)) {
+      void signOut().then(() => setUser(null));
+      return false;
+    }
+    return true;
+  };
+
+  /** 后台拉取云端数据并合并（登录 / 刷新恢复共用） */
+  const hydrateCloudDataInBackground = async (userData: User) => {
+    try {
+      if (userData.dbRole === 'designer') {
+        const [cloud, cloudGlobal] = await Promise.all([
+          loadDesignerCloudData(userData.id),
+          loadGlobalCloudData(),
+        ]);
+        if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
+        if (cloudGlobal.pendingMaterials.length > 0) {
+          setPendingMaterials(cloudGlobal.pendingMaterials);
+        }
+
+        const boards = (
+          cloud.moodboards.length > 0
+            ? cloud.moodboards
+            : getFromLocal('moodboards', userData.id) || defaultMoodboardsFor(userData.id)
+        ).map(withDefaultVisibility);
+        const collections =
+          cloud.savedMaterialIds.length > 0
+            ? cloud.savedMaterialIds
+            : getFromLocal('saved_ids', userData.id) || [];
+        setUser((prev) =>
+          prev?.id === userData.id ? { ...prev, collections } : prev
+        );
+        setSavedMaterialIds(collections);
+        setMoodboards(boards);
+        setActiveMoodboardId(boards[0]?.id ?? '');
+      } else if (userData.dbRole === 'admin') {
+        const cloudGlobal = await loadGlobalCloudData();
+        if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
+        if (cloudGlobal.pendingMaterials.length > 0) {
+          setPendingMaterials(cloudGlobal.pendingMaterials);
+        }
+        await refreshVerificationRequestsFromCloud();
+      } else {
+        const cloudGlobal = await loadGlobalCloudData();
+        if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
+        if (cloudGlobal.pendingMaterials.length > 0) {
+          setPendingMaterials(cloudGlobal.pendingMaterials);
+        }
+      }
+    } catch (err) {
+      console.error('[MatterInsight] 云端数据同步失败:', err);
+    } finally {
+      setTimeout(() => {
+        skipCloudSyncRef.current = false;
+      }, 500);
+    }
   };
 
   useEffect(() => {
@@ -272,6 +475,34 @@ const App: React.FC = () => {
     window.addEventListener('popstate', onPathChange);
     return () => window.removeEventListener('popstate', onPathChange);
   }, []);
+
+  /** 材料详情页 URL 同步 */
+  useEffect(() => {
+    if (!user) return;
+
+    const materialId = parseMaterialId(pathname);
+    const wasMaterial = parseMaterialId(prevPathnameRef.current);
+
+    if (materialId) {
+      const material = library.find((m) => m.id === materialId);
+      if (material) {
+        setSelectedMaterial(material);
+        setCurrentView('DETAILS');
+      }
+    } else if (wasMaterial) {
+      setSelectedMaterial(null);
+      const returnTo = materialReturnToRef.current;
+      if (returnTo === 'moodboard') {
+        setCurrentView('MOODBOARD_VIEW');
+      } else if (returnTo === 'dashboard' || isDashboardPath(pathname)) {
+        setCurrentView('DASHBOARD');
+      } else {
+        setCurrentView('HOME');
+      }
+    }
+
+    prevPathnameRef.current = pathname;
+  }, [pathname, library, user?.id]);
 
   /** 已登录用户的路由守卫：role 与 URL 不匹配则退回登录页 */
   useEffect(() => {
@@ -330,54 +561,13 @@ const App: React.FC = () => {
       }
     }, AUTH_BOOT_TIMEOUT_MS);
 
-    const hydrateFromCloud = async (userData: User) => {
-      skipCloudSyncRef.current = true;
-      const cloudGlobal = await loadGlobalCloudData();
-      if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
-      if (cloudGlobal.pendingMaterials.length > 0) setPendingMaterials(cloudGlobal.pendingMaterials);
-
-      if (userData.dbRole === 'designer') {
-        const cloud = await loadDesignerCloudData(userData.id);
-        const boards = cloud.moodboards.length > 0
-          ? cloud.moodboards
-          : getFromLocal('moodboards', userData.id) || [
-              { id: `mb_${userData.id}_default`, name: '默认情绪板', items: [], isPaid: false, maxMaterials: 10 },
-            ];
-        const collections = cloud.savedMaterialIds.length > 0
-          ? cloud.savedMaterialIds
-          : (getFromLocal('saved_ids', userData.id) || []);
-        setUser({ ...userData, collections });
-        setSavedMaterialIds(collections);
-        setMoodboards(boards);
-        setActiveMoodboardId(boards[0]?.id ?? '');
-      } else if (userData.dbRole === 'admin') {
-        await refreshVerificationRequestsFromCloud();
-        setUser(userData);
-        setSavedMaterialIds([]);
-        setMoodboards([]);
-        setActiveMoodboardId('');
-      } else {
-        setUser(userData);
-        setSavedMaterialIds([]);
-        setMoodboards([]);
-        setActiveMoodboardId('');
-      }
-      setPoints(userData.points);
-      setCurrentView('DASHBOARD');
-      const role = userData.dbRole;
-      if (!redirectToRoleDashboard(role)) {
-        await signOut();
-        setUser(null);
-        return;
-      }
-      setTimeout(() => { skipCloudSyncRef.current = false; }, 500);
-    };
-
     (async () => {
       try {
         const restored = await restoreSession();
         if (!cancelled && restored) {
-          await hydrateFromCloud(restored);
+          if (enterAuthenticatedSession(restored)) {
+            void hydrateCloudDataInBackground(restored);
+          }
         }
       } catch (err) {
         console.error('[MatterInsight] session 恢复失败，回退到登录页:', err);
@@ -416,9 +606,118 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!isSupabaseConfigured() || !user || user.role !== 'DESIGNER') return;
     if (skipCloudSyncRef.current) return;
-    syncMoodboards(user.id, moodboards);
+    syncMoodboards(
+      user.id,
+      moodboards.filter((b) => !b.ownerId || b.ownerId === user.id)
+    );
     syncSavedMaterialIds(user.id, savedMaterialIds);
   }, [moodboards, savedMaterialIds, user]);
+
+  /** 多端 Realtime：情绪板名字 / 新建 / 删除免刷新同步 */
+  useEffect(() => {
+    if (!isSupabaseConfigured() || !user || user.role !== 'DESIGNER') return;
+
+    const unsubscribe = subscribeMoodboardChanges(user.id, ({ event, board }) => {
+      skipCloudSyncRef.current = true;
+
+      setMoodboards((prev) => {
+        if (event === 'DELETE') {
+          if (prev.length <= 1) return prev;
+          const next = prev.filter((b) => b.id !== board.id);
+          setActiveMoodboardId((current) =>
+            current === board.id ? (next[0]?.id ?? '') : current
+          );
+          return next;
+        }
+
+        const existing = prev.find((b) => b.id === board.id);
+
+        if (event === 'INSERT') {
+          if (existing) return prev;
+          return [...prev, board];
+        }
+
+        // UPDATE：合并名字与可见性，避免覆盖本端未同步的画布 items
+        if (!existing) return [...prev, board];
+        if (
+          existing.name === board.name &&
+          (existing.visibility ?? 'private') === (board.visibility ?? 'private') &&
+          (existing.isPublished ?? false) === (board.isPublished ?? false) &&
+          existing.publishedAt === board.publishedAt
+        ) {
+          return prev;
+        }
+        return prev.map((b) =>
+          b.id === board.id
+            ? {
+                ...b,
+                name: board.name,
+                visibility: board.visibility ?? b.visibility,
+                isPublished: board.isPublished ?? b.isPublished,
+                publishedAt: board.publishedAt ?? b.publishedAt,
+              }
+            : b
+        );
+      });
+
+      window.setTimeout(() => {
+        skipCloudSyncRef.current = false;
+      }, 500);
+    });
+
+    return unsubscribe;
+  }, [user?.id, user?.role]);
+
+  /** 探索页：已发布公开情绪板（混入瀑布流） */
+  const refreshPublicMoodboards = () => {
+    if (!isSupabaseConfigured()) return;
+    void fetchPublicMoodboards().then(setPublicMoodboards);
+  };
+
+  useEffect(() => {
+    if (!isSupabaseConfigured() || currentView !== 'HOME') return;
+
+    let cancelled = false;
+    void fetchPublicMoodboards()
+      .then((boards) => {
+        if (!cancelled) setPublicMoodboards(boards);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentView, user?.id]);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured() || !user || user.role !== 'DESIGNER') {
+      setCollectedMoodboardIds([]);
+      return;
+    }
+    void getCollectedMoodboards(user.id).then((boards) => {
+      setCollectedMoodboardIds(boards.map((b) => b.id));
+    });
+  }, [user?.id, user?.role]);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured() || !user || user.role !== 'DESIGNER') return;
+
+    let cancelled = false;
+    void fetchProfile(user.id).then((profile) => {
+      if (cancelled || !profile) return;
+      const avatar = profile.avatar ?? null;
+      const company = profile.company?.trim() || undefined;
+      const name = resolveUserDisplayName({ company: profile.company, email: profile.email });
+      setUser((prev) => {
+        if (!prev) return prev;
+        if (prev.avatar === avatar && prev.company === company && prev.name === name) return prev;
+        return { ...prev, avatar, company, name };
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, user?.role, pageRoute.type]);
 
   useEffect(() => {
     if (user && currentView === 'MOODBOARD' && user.role !== 'DESIGNER') {
@@ -520,57 +819,12 @@ const App: React.FC = () => {
     }
   };
 
-  const handleAuthSuccess = async (userData: User) => {
+  const handleAuthSuccess = (userData: User) => {
     if (isPasswordRecoveryMode()) return;
     if (!isSupabaseConfigured()) return;
+    if (!enterAuthenticatedSession(userData)) return;
 
-    const token = await getAccessToken();
-    if (!token) return;
-
-    skipCloudSyncRef.current = true;
-
-    if (userData.dbRole === 'designer') {
-      const cloud = await loadDesignerCloudData(userData.id);
-      const cloudGlobal = await loadGlobalCloudData();
-      if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
-      if (cloudGlobal.pendingMaterials.length > 0) setPendingMaterials(cloudGlobal.pendingMaterials);
-
-      const boards = cloud.moodboards.length > 0 ? cloud.moodboards : [
-        { id: `mb_${userData.id}_default`, name: '默认情绪板', items: [], isPaid: false, maxMaterials: 10 },
-      ];
-      const collections = cloud.savedMaterialIds;
-      const finalUser = { ...userData, collections, transactions: userData.transactions || [] };
-      setUser(finalUser);
-      setSavedMaterialIds(collections);
-      setMoodboards(boards);
-      setActiveMoodboardId(boards[0]?.id ?? '');
-    } else if (userData.dbRole === 'admin') {
-      const cloudGlobal = await loadGlobalCloudData();
-      if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
-      if (cloudGlobal.pendingMaterials.length > 0) setPendingMaterials(cloudGlobal.pendingMaterials);
-      await refreshVerificationRequestsFromCloud();
-      setUser({ ...userData, collections: [], transactions: userData.transactions || [] });
-      setSavedMaterialIds([]);
-      setMoodboards([]);
-      setActiveMoodboardId('');
-    } else {
-      const cloudGlobal = await loadGlobalCloudData();
-      if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
-      if (cloudGlobal.pendingMaterials.length > 0) setPendingMaterials(cloudGlobal.pendingMaterials);
-      setUser({ ...userData, collections: [], transactions: userData.transactions || [] });
-      setSavedMaterialIds([]);
-      setMoodboards([]);
-      setActiveMoodboardId('');
-    }
-    setPoints(userData.points);
-    setCurrentView('DASHBOARD');
-    const role = userData.dbRole;
-    if (!redirectToRoleDashboard(role)) {
-      await signOut();
-      setUser(null);
-      return;
-    }
-    setTimeout(() => { skipCloudSyncRef.current = false; }, 500);
+    void hydrateCloudDataInBackground(userData);
 
     if ((userData as User & { showWelcomeBonus?: boolean }).showWelcomeBonus) {
       setShowWelcomeBonus(true);
@@ -631,6 +885,7 @@ const App: React.FC = () => {
         items: [],
         maxMaterials: 10,
         isPaid: false,
+        visibility: 'private',
       };
       boards = [...boards, newMb];
       targetMbId = newMb.id;
@@ -703,6 +958,13 @@ const App: React.FC = () => {
   const handleInquiry = (materialId: string, moodBoardId: string, notes?: string) => {
     const material = library.find(m => m.id === materialId);
     if (!material || !user) return;
+    if (!assertDesignerCanRequestQuoteOrSample(user)) {
+      const reason = getDesignerRequestRejectionReason(user);
+      if (reason === 'supplier') {
+        console.warn('[MatterInsight] 材料商账户不可发起询价申请');
+      }
+      return;
+    }
 
     const newInquiry: Inquiry = {
       id: `inq_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
@@ -738,6 +1000,13 @@ const App: React.FC = () => {
   const handleSampleRequest = (materialId: string, address: string, contactName: string, phone: string) => {
     const material = library.find(m => m.id === materialId);
     if (!user || !material) return;
+    if (!assertDesignerCanRequestQuoteOrSample(user)) {
+      const reason = getDesignerRequestRejectionReason(user);
+      if (reason === 'supplier') {
+        console.warn('[MatterInsight] 材料商账户不可发起小样申请');
+      }
+      return;
+    }
     const newRequest: SampleRequest = {
       id: `samp_${Date.now()}`,
       materialId,
@@ -856,7 +1125,7 @@ const App: React.FC = () => {
     return <Auth onAuthSuccess={handleAuthSuccess} adminPortal={isAdminPortal()} />;
   }
 
-  const unreadQuotes = inquiries.filter(inq => inq.status === 'QUOTED' && inq.designerId === user.id).length;
+  const unreadQuotes = countUnreadDesignerQuotes(user.id, inquiries);
   const unreadInquiries = inquiries.filter(inq => inq.status === 'PENDING' && inq.supplierId === user.id).length;
   const supplierNotifications = user.role === 'SUPPLIER' 
     ? library.filter(m => m.supplierId === user.id && m.isAcknowledged === false).length +
@@ -866,17 +1135,31 @@ const App: React.FC = () => {
 
   const totalNotifications = user.role === 'SUPPLIER' ? supplierNotifications : unreadQuotes;
 
+  const handleAvatarClick = () => {
+    if (user.role === 'DESIGNER') {
+      navigateTo(MY_PAGE_PATH);
+      setSelectedMaterial(null);
+      setSelectedMoodboard(null);
+      setCurrentView('HOME');
+      return;
+    }
+    redirectToRoleDashboard(user.dbRole);
+    setCurrentView('DASHBOARD');
+  };
+
   return (
     <ErrorBoundary>
       <div className="min-h-screen flex flex-col">
         <Navbar
           user={user} 
           points={points} 
-          onLogoClick={() => setCurrentView('HOME')} 
+          onLogoClick={goToExploreLibrary}
           onProfileClick={() => {
             redirectToRoleDashboard(user.dbRole);
             setCurrentView('DASHBOARD');
           }}
+          onAvatarClick={handleAvatarClick}
+          onMyPageClick={() => navigateTo(MY_PAGE_PATH)}
           onMoodboardClick={() => setCurrentView('MOODBOARD')}
           onLogout={async () => {
             if (isSupabaseConfigured()) await signOut();
@@ -892,7 +1175,51 @@ const App: React.FC = () => {
         />
         
         <main className="flex-grow pt-20 px-4 md:px-8">
-          {currentView === 'HOME' && (
+          {onProfilePage && pageRoute.type === 'my-page' && user.role === 'DESIGNER' && (
+            <DesignerPage
+              mode="owner"
+              designerId={user.id}
+              viewerId={user.id}
+              materials={library}
+              ownedMoodboards={moodboards}
+              onSelectMoodboard={openMoodboardFromFeed}
+              onBack={leaveProfilePages}
+              onProfileUpdated={({ company }) => {
+                setUser((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        company: company ?? undefined,
+                        name: resolveUserDisplayName({ company, email: prev.email }),
+                      }
+                    : prev
+                );
+              }}
+            />
+          )}
+
+          {onProfilePage && pageRoute.type === 'designer' && (
+            <DesignerPage
+              mode="public"
+              designerId={pageRoute.id}
+              viewerId={user.id}
+              materials={library}
+              ownedMoodboards={[]}
+              onSelectMoodboard={openMoodboardFromFeed}
+              onBack={leaveProfilePages}
+            />
+          )}
+
+          {onProfilePage && pageRoute.type === 'my-page' && user.role !== 'DESIGNER' && (
+            <div className="max-w-3xl mx-auto py-20 text-center">
+              <p className="text-gray-400 font-bold">仅设计师可访问我的主页</p>
+              <button type="button" onClick={leaveProfilePages} className="mt-4 text-sm font-bold">
+                返回探索库
+              </button>
+            </div>
+          )}
+
+          {!onProfilePage && currentView === 'HOME' && (
             <div className="max-w-7xl mx-auto">
               <div className="mb-8 md:mb-10 mt-4 md:mt-6 bg-black text-white p-6 md:p-12 rounded-[30px] md:rounded-[40px] relative overflow-hidden group min-h-[14rem] md:h-64 flex items-center">
                 <div className="absolute top-0 right-0 w-64 h-64 bg-white/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 group-hover:scale-110 transition-transform duration-700"></div>
@@ -922,25 +1249,59 @@ const App: React.FC = () => {
                     m.brand.toLowerCase().includes(searchTerm.toLowerCase()) ||
                     m.specifications.toLowerCase().includes(searchTerm.toLowerCase());
                   return matchesCategory && matchesSearch;
-                })} 
-                onSelect={(m) => { 
-                  setSelectedMaterial(m); 
-                  setCurrentView('DETAILS'); 
-                  // Increment click count
-                  setLibrary(prev => prev.map(mat => mat.id === m.id ? { ...mat, clicks: mat.clicks + 1 } : mat));
-                }}
+                })}
+                publishedMoodboards={
+                  !selectedCategory
+                    ? publicMoodboards.filter((b) => {
+                        if (!searchTerm) return true;
+                        const q = searchTerm.toLowerCase();
+                        return (
+                          b.name.toLowerCase().includes(q) ||
+                          (b.ownerName?.toLowerCase().includes(q) ?? false)
+                        );
+                      })
+                    : []
+                }
+                onSelect={(m) => openMaterialDetail(m, 'home')}
+                onSelectMoodboard={openMoodboardFromFeed}
                 onSave={handleSaveMaterial}
                 savedIds={user.role === 'DESIGNER' ? savedMaterialIds : []}
                 moodboards={user.role === 'DESIGNER' ? moodboards : []}
+                collectedMoodboardIds={
+                  user.role === 'DESIGNER' ? collectedMoodboardIds : []
+                }
+                onToggleCollectMoodboard={
+                  user.role === 'DESIGNER' ? handleToggleCollectMoodboard : undefined
+                }
               />
             </div>
+          )}
+
+          {currentView === 'MOODBOARD_VIEW' && selectedMoodboard && (
+            <MoodBoardViewer
+              board={selectedMoodboard}
+              materials={library}
+              onBack={() => {
+                setSelectedMoodboard(null);
+                setCurrentView('HOME');
+              }}
+              onSelectMaterial={(m) => openMaterialDetail(m, 'moodboard')}
+              onFindSimilar={(item) => handleFindSimilar(item.name)}
+            />
           )}
 
           {currentView === 'DETAILS' && selectedMaterial && (
             <MaterialDetail 
               material={selectedMaterial} 
               user={user}
-              onBack={() => setCurrentView('HOME')}
+              backLabel={
+                materialDetailReturnTo === 'dashboard'
+                  ? '返回控制台'
+                  : materialDetailReturnTo === 'moodboard'
+                    ? '返回情绪板'
+                    : undefined
+              }
+              onBack={closeMaterialDetail}
               onDeductPoints={(amt) => handlePointChange(-amt, '申领材料小样')}
               onSampleRequest={handleSampleRequest}
               onInquiry={handleInquiry}
@@ -949,7 +1310,7 @@ const App: React.FC = () => {
             />
           )}
 
-          {currentView === 'MOODBOARD' && user.role === 'DESIGNER' && (
+          {!onProfilePage && currentView === 'MOODBOARD' && user.role === 'DESIGNER' && (
             <MoodBoardDesigner 
               user={user}
               points={points}
@@ -962,10 +1323,11 @@ const App: React.FC = () => {
               onDeductPoints={(amt, desc) => handlePointChange(-amt, desc)}
               onSaveMaterial={handleAddToMoodboard}
               onUnsaveMaterial={handleRemoveFromCollect}
+              onMoodboardPublished={refreshPublicMoodboards}
             />
           )}
 
-          {currentView === 'DASHBOARD' && (() => {
+          {!onProfilePage && currentView === 'DASHBOARD' && (() => {
             switch (user.dbRole) {
               case 'admin':
                 return (
@@ -993,7 +1355,7 @@ const App: React.FC = () => {
                     library={library}
                     onRechargeClick={() => setIsRechargeModalOpen(true)}
                     onOpenMoodboard={(id) => { setActiveMoodboardId(id); setCurrentView('MOODBOARD'); }}
-                    onViewMaterialDetail={(m) => { setSelectedMaterial(m); setCurrentView('DETAILS'); }}
+                    onViewMaterialDetail={(m) => openMaterialDetail(m, 'dashboard')}
                     inquiries={inquiries}
                     onInquiry={handleInquiry}
                     onSampleRequest={handleSampleRequest}

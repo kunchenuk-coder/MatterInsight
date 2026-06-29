@@ -10,7 +10,7 @@ const AuthShell: React.FC<AuthShellProps> = ({ children, subtitle }) => (
     <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-white/5 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2" />
     <div className="absolute bottom-0 left-0 w-[500px] h-[500px] bg-white/5 rounded-full blur-3xl translate-y-1/2 -translate-x-1/2" />
 
-    <div className="w-full max-w-md bg-[#393939] p-10 rounded-[40px] shadow-2xl relative z-10">
+    <div className="w-full max-w-md bg-[#393939] p-10 rounded-[40px] shadow-2xl relative z-10 overflow-hidden">
       <div className="text-center mb-8">
         <div className="text-2xl font-black bg-black text-white inline-block px-5 py-2 mb-4 tracking-tighter">
           物见 <span className="text-gray-400 font-light">|</span> MATTER INSIGHT

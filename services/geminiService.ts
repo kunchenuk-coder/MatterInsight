@@ -130,9 +130,9 @@ export async function detectSwatches(
         onRateLimitWait: opts?.onRateLimitWait,
       });
     } else {
-      text = await analyzeWithQwen(qwenKey!, imageDataUrl, SWATCH_PROMPT, {
+      text = (await analyzeWithQwen(qwenKey!, imageDataUrl, SWATCH_PROMPT, {
         onRateLimitWait: opts?.onRateLimitWait,
-      });
+      })).text;
     }
     return parseSwatchesFromText(text);
   } catch (e) {
@@ -214,9 +214,9 @@ export async function readManufacturerCodeFromImageStrip(
   } else {
     const k = getQwenApiKey();
     if (!k) throw new Error("未配置通义 Key");
-    text = await analyzeWithQwen(k, imageDataUrl, OCR_CODE_PROMPT, {
+    text = (await analyzeWithQwen(k, imageDataUrl, OCR_CODE_PROMPT, {
       onRateLimitWait: opts?.onRateLimitWait,
-    });
+    })).text;
   }
   return parseOcrCode(text);
 }

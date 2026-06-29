@@ -23,6 +23,7 @@ const ALLOWED_CATEGORIES = new Set([
   'project-photos',
   'verification',
   'local-materials',
+  'avatars',
   'general',
 ]);
 

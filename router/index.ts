@@ -14,12 +14,54 @@ export const LOGIN_PATH = '/';
 export const DESIGNER_DASHBOARD_PATH = '/designer-dashboard';
 export const SUPPLIER_DASHBOARD_PATH = '/supplier-dashboard';
 export const ADMIN_DASHBOARD_PATH = '/admin-dashboard';
+export const MY_PAGE_PATH = '/my-page';
 
 const DASHBOARD_PATHS = [
   DESIGNER_DASHBOARD_PATH,
   SUPPLIER_DASHBOARD_PATH,
   ADMIN_DASHBOARD_PATH,
 ] as const;
+
+export type AppPageRoute =
+  | { type: 'dashboard' }
+  | { type: 'my-page' }
+  | { type: 'designer'; id: string }
+  | { type: 'material'; id: string }
+  | { type: 'other' };
+
+export function getMaterialPath(id: string): string {
+  return `/material/${encodeURIComponent(id)}`;
+}
+
+export function parseMaterialId(pathname = window.location.pathname): string | null {
+  const normalized = pathname.replace(/\/+$/, '') || '/';
+  const match = normalized.match(/^\/material\/([^/]+)$/i);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+export function getDesignerPublicPath(id: string): string {
+  return `/designer/${id}`;
+}
+
+export function parseAppPageRoute(pathname = window.location.pathname): AppPageRoute {
+  const normalized = pathname.toLowerCase().replace(/\/+$/, '') || '/';
+  if (normalized === MY_PAGE_PATH) return { type: 'my-page' };
+  const designerMatch = normalized.match(/\/designer\/([0-9a-f-]{36})$/i);
+  if (designerMatch) return { type: 'designer', id: designerMatch[1] };
+  const materialId = parseMaterialId(pathname);
+  if (materialId) return { type: 'material', id: materialId };
+  if (isDashboardPath(normalized)) return { type: 'dashboard' };
+  return { type: 'other' };
+}
+
+export function navigateTo(path: string, replace = false): void {
+  if (replace) {
+    window.history.replaceState({}, '', path);
+  } else {
+    window.history.pushState({}, '', path);
+  }
+  window.dispatchEvent(new PopStateEvent('popstate'));
+}
 
 export type DashboardPath = (typeof DASHBOARD_PATHS)[number];
 
@@ -88,6 +130,11 @@ export function guardDashboardRoute(userDbRole: string | null | undefined): bool
   if (!role) {
     window.location.href = LOGIN_PATH;
     return false;
+  }
+
+  const pageRoute = parseAppPageRoute();
+  if (pageRoute.type === 'my-page' || pageRoute.type === 'designer' || pageRoute.type === 'material') {
+    return true;
   }
 
   const pathRole = getRoleFromDashboardPath();

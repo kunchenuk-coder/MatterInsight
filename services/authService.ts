@@ -10,6 +10,13 @@ import {
   userRoleToDbRole,
   type ProfileRow,
 } from './profileService';
+import { resolveUserDisplayName } from '../utils/profileDisplayName';
+import {
+  clearLocalDeviceSession,
+  ensureDeviceSessionOnRestore,
+  registerDeviceSession,
+  removeDeviceSession,
+} from './deviceSessionService';
 
 export type AuthResult =
   | { ok: true; user: User }
@@ -87,13 +94,15 @@ function mapProfileToUser(
     email: profile.email,
     role,
     dbRole,
-    name: profile.email.split('@')[0] || '用户',
+    name: resolveUserDisplayName({ company: profile.company, email: profile.email }),
+    company: profile.company?.trim() || undefined,
     points: role === 'DESIGNER' ? 1000 : role === 'ADMIN' ? 999999 : 0,
     // 材料商以数据库 is_verified 为准（管理员审核通过后解锁）；其余角色默认已验证。
     isVerified: isSupplier ? profile.is_verified === true : true,
     accountStatus: isSupplier ? supplierStatus : undefined,
     registeredPhone: profile.registered_phone ?? undefined,
     verificationDoc: profile.verification_doc_url ?? undefined,
+    avatar: profile.avatar ?? null,
     transactions: [],
     collections: [],
     ...(extras?.showWelcomeBonus ? { showWelcomeBonus: true } : {}),
@@ -161,6 +170,12 @@ export async function signUp(
     showWelcomeBonus: role === 'DESIGNER',
   });
 
+  const sessionOk = await registerDeviceSession(data.user.id, data.session?.access_token);
+  if (!sessionOk) {
+    await client.auth.signOut();
+    return { ok: false, error: '设备会话注册失败，请重试' };
+  }
+
   return { ok: true, user };
 }
 
@@ -197,11 +212,25 @@ export async function signIn(
     return { ok: false, error: registeredRoleMessage(actualRole) };
   }
 
+  const sessionOk = await registerDeviceSession(data.user.id, data.session.access_token);
+  if (!sessionOk) {
+    await client.auth.signOut();
+    return { ok: false, error: '设备会话注册失败，请重试' };
+  }
+
   return { ok: true, user: mapProfileToUser(profile) };
 }
 
-export async function signOut(): Promise<void> {
-  await getSupabase().auth.signOut();
+export async function signOut(options?: { removeDeviceRecord?: boolean }): Promise<void> {
+  const client = getSupabase();
+  const { data } = await client.auth.getSession();
+  const userId = data.session?.user?.id;
+  const removeDevice = options?.removeDeviceRecord !== false;
+  if (userId && removeDevice) {
+    await removeDeviceSession(userId);
+  }
+  clearLocalDeviceSession();
+  await client.auth.signOut();
 }
 
 /** 刷新页面时按 profiles 真实角色恢复（recovery 模式下一律不恢复进主页） */
@@ -214,6 +243,15 @@ export async function restoreSession(): Promise<User | null> {
 
   const profile = await requireProfile(data.session.user);
   if (!profile) {
+    await signOut();
+    return null;
+  }
+
+  const sessionOk = await ensureDeviceSessionOnRestore(
+    data.session.user.id,
+    data.session.access_token
+  );
+  if (!sessionOk) {
     await signOut();
     return null;
   }

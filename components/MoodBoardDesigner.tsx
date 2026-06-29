@@ -3,15 +3,20 @@ import html2canvas from 'html2canvas';
 // 检查下面这一行，确保包含 MoodBoardProps 里面用到的所有类型
 import { User, Material, MoodBoard, MoodBoardItem, Category, type LocalTemporaryMaterial } from '../types';
 import {
-  MATERIAL_ANALYSIS_PROMPT,
-  analyzeWithVisionFallback,
-  getDeepSeekApiKey,
-  getDeepSeekVisionModelName,
-  getGeminiApiKey,
-  getQwenApiKey,
   parseMaterialAnalysisText,
   type VisionSampleAnchor,
+  type VisionTokenUsage,
 } from '../utils/aiMaterialAnalysis';
+import {
+  analyzeWithVisionAgent,
+  getAvailableVisionAgents,
+  getAgentModelLabel,
+  getMaterialCountForDepth,
+  getPointsCost,
+  getTokenEstimate,
+  type RecognitionDepth,
+  type VisionAgentId,
+} from '../utils/aiVisionAgents';
 import {
   compressImage,
   compressFileToDataUrl,
@@ -37,6 +42,7 @@ import { isQuotaExceededError } from "../utils/moodboardStorage";
 import { uploadImage } from '../services/uploadService';
 import { fetchLocalMaterials, insertLocalMaterial } from '../services/localMaterialService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
+import MoodBoardPublishControls from './MoodBoardPublishControls';
 
 const DRAG_LOCAL_MATERIAL_MIME = "application/x-matter-local-material-id";
 
@@ -664,6 +670,8 @@ interface MoodBoardProps {
   onSaveMaterial?: (matId: string, moodboardId?: string, newMoodboardName?: string) => void;
   /** 取消收藏（仅从收藏列表移除，可配合画布移除卡片自行处理） */
   onUnsaveMaterial?: (matId: string) => void;
+  /** 情绪板发布成功后刷新首页公开列表 */
+  onMoodboardPublished?: () => void;
 }
 
 const MoodBoardDesigner: React.FC<MoodBoardProps> = ({ 
@@ -671,6 +679,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   activeMoodboardId, setActiveMoodboardId, onDeductPoints,
   onSaveMaterial,
   onUnsaveMaterial,
+  onMoodboardPublished,
 }) => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isEditingName, setIsEditingName] = useState(false);
@@ -724,6 +733,9 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   /** 手机端：点按样块连线点后，进入“在效果图上放置标注点”的全屏浮层（sampleId 为要连线的材料样块） */
   const [markerPlacing, setMarkerPlacing] = useState<{ sampleId: string } | null>(null);
   const [analysisStep, setAnalysisStep] = useState<1 | 2 | 3>(1); // 1 上传 2 识别中 3 已写入画布
+  const [selectedVisionAgentId, setSelectedVisionAgentId] = useState<VisionAgentId>('gemini');
+  const [recognitionDepth, setRecognitionDepth] = useState<RecognitionDepth>('basic');
+  const [lastVisionUsage, setLastVisionUsage] = useState<VisionTokenUsage | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [aiImage, setAiImage] = useState<string | null>(null);
   /** 未点击预览图时为 null，千问 RGB 前置用几何中心；点击后映射到原图百分比 */
@@ -1293,12 +1305,12 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     let newBoard: MoodBoard;
 
     if (freeBoards < 3) {
-      newBoard = { id: `mb_${Date.now()}`, name: `新建情绪板 ${moodboards.length + 1}`, items: [], isPaid: false, maxMaterials: 30 };
+      newBoard = { id: `mb_${Date.now()}`, name: `新建情绪板 ${moodboards.length + 1}`, items: [], isPaid: false, maxMaterials: 30, visibility: 'private' };
     } else {
       if (confirm('免费情绪板已达上限(3个)。是否消耗 50 积分创建一个高级情绪板？(限额60款材料)')) {
         if (points < 50) return alert('积分不足');
         onDeductPoints(50, '创建高级情绪板');
-        newBoard = { id: `mb_${Date.now()}`, name: `高级情绪板 ${moodboards.length + 1}`, items: [], isPaid: true, maxMaterials: 60 };
+        newBoard = { id: `mb_${Date.now()}`, name: `高级情绪板 ${moodboards.length + 1}`, items: [], isPaid: true, maxMaterials: 60, visibility: 'private' };
       } else return;
     }
     setMoodboards([...moodboards, newBoard]);
@@ -2687,12 +2699,17 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
       return;
     }
 
-    const geminiKey = getGeminiApiKey();
-    const qwenKey = getQwenApiKey();
-    const dsOk = !!(getDeepSeekApiKey() && getDeepSeekVisionModelName());
-
-    if (!geminiKey && !qwenKey && !dsOk) {
+    const availableAgents = getAvailableVisionAgents();
+    if (!availableAgents.length) {
       alert("未配置识别服务，请稍后再试。");
+      return;
+    }
+
+    const agent =
+      availableAgents.find((a) => a.id === selectedVisionAgentId) ?? availableAgents[0]!;
+    const pointCost = getPointsCost(agent, recognitionDepth);
+    if (points < pointCost) {
+      alert(`积分不足：本次识别需要 ${pointCost} 点，当前余额 ${points} 点。请充值后再试。`);
       return;
     }
 
@@ -2709,18 +2726,29 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
     setIsAnalyzing(true);
     setAnalysisStep(2);
+    setLastVisionUsage(null);
+
     try {
-      const modelText = await analyzeWithVisionFallback(
-        MATERIAL_ANALYSIS_PROMPT,
+      const result = await analyzeWithVisionAgent(
+        agent.id,
+        recognitionDepth,
         imageForApi,
         base64Part,
         mimeType,
         { sampleAnchor: aiVisionAnchor ?? undefined }
       );
 
+      onDeductPoints(
+        pointCost,
+        `智能识别(${agent.name}·${recognitionDepth === "deep" ? "深度10材质" : "基础3材质"})`
+      );
+
+      setLastVisionUsage(result.usage);
+      const maxItems = getMaterialCountForDepth(recognitionDepth);
+
       let annotationsRaw: unknown[];
       try {
-        annotationsRaw = parseMaterialAnalysisText(modelText);
+        annotationsRaw = parseMaterialAnalysisText(result.text, maxItems);
       } catch (parseErr) {
         console.warn("[AI] JSON 解析失败，改为仅导入效果图:", parseErr);
         placeEffectImageOnly(imageForApi, "空间效果图（手动标注）");
@@ -2833,6 +2861,26 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     setIsAIModalOpen(false);
     setAiImage(null);
     setAiVisionAnchor(null);
+  };
+
+  const availableVisionAgents = getAvailableVisionAgents();
+  const activeVisionAgent =
+    availableVisionAgents.find((a) => a.id === selectedVisionAgentId) ?? availableVisionAgents[0];
+  const visionPointCost = activeVisionAgent
+    ? getPointsCost(activeVisionAgent, recognitionDepth)
+    : 0;
+  const visionTokenEst = activeVisionAgent
+    ? getTokenEstimate(activeVisionAgent, recognitionDepth)
+    : null;
+
+  const closeAIModal = () => {
+    setIsAIModalOpen(false);
+    setAiImage(null);
+    setAiVisionAnchor(null);
+    setAnalysisStep(1);
+    setVisualAnnotations(null);
+    setMatchResults(null);
+    setLastVisionUsage(null);
   };
 
   const mobileItemGestureActive =
@@ -3127,6 +3175,13 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
             {activeBoard.isPaid && <span className="bg-yellow-400 text-black text-[9px] font-black px-2 py-0.5 rounded-full hidden sm:inline">PRO</span>}
           </div>
           <div className="flex items-center gap-2 flex-wrap justify-end">
+            <MoodBoardPublishControls
+              ownerId={user.id}
+              activeBoard={activeBoard}
+              activeMoodboardId={activeMoodboardId}
+              setMoodboards={setMoodboards}
+              onPublished={onMoodboardPublished}
+            />
             <button onClick={handleExport} className="bg-gray-100 text-black px-3 md:px-6 py-2 rounded-full text-[10px] md:text-xs font-bold hover:bg-black hover:text-white transition-all">生成材料表</button>
             <button onClick={handleGenerateImage} className="bg-black text-white px-3 md:px-6 py-2 rounded-full text-[10px] md:text-xs font-bold shadow-lg">生成大图</button>
           </div>
@@ -4283,135 +4338,231 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
       {/* AI 智能匹配弹窗 */}
       {isAIModalOpen && (
-        <div className="fixed inset-0 z-[8000] flex items-center justify-center bg-black/60 backdrop-blur-md p-4">
-          <div className="bg-white rounded-[40px] shadow-2xl flex flex-col md:flex-row max-w-4xl w-full overflow-hidden min-h-[500px]">
-            <div className="w-full md:w-1/2 p-12 flex flex-col justify-between border-b md:border-b-0 md:border-r border-gray-100">
-              <div>
-                <div className="bg-black text-white text-[10px] font-black px-3 py-1 rounded inline-block mb-6 tracking-tighter">AI INSIGHT</div>
-                <h2 className="text-4xl font-black text-black leading-tight mb-6">智能材质<br/>识别系统</h2>
-                <p className="text-gray-400 text-sm leading-relaxed font-medium">
-                  上传您的空间效果图，我们的 AI 将深度分析图像中的材质构成，并从您的收藏库及平台库中自动匹配最接近的实物材料。
+        <div className="fixed inset-0 z-[8000] flex items-end md:items-center justify-center bg-black/60 backdrop-blur-md p-0 md:p-4">
+          <div className="bg-white rounded-t-[28px] md:rounded-[40px] shadow-2xl w-full max-w-4xl max-h-[94dvh] md:max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="shrink-0 flex items-center justify-between px-5 py-3.5 border-b md:hidden">
+              <h2 className="text-base font-black">智能材质识别</h2>
+              <button type="button" onClick={closeAIModal} className="text-gray-400 p-1" aria-label="关闭">
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/></svg>
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto min-h-0 flex flex-col md:flex-row">
+              <div className="w-full md:w-[42%] p-5 md:p-10 border-b md:border-b-0 md:border-r border-gray-100 shrink-0">
+                <div className="hidden md:block">
+                  <div className="bg-black text-white text-[10px] font-black px-3 py-1 rounded inline-block mb-4 tracking-tighter">AI INSIGHT</div>
+                  <h2 className="text-3xl font-black text-black leading-tight mb-4">智能材质识别系统</h2>
+                </div>
+                <p className="text-gray-500 text-xs md:text-sm leading-relaxed font-medium">
+                  上传空间效果图，AI 分析材质构成并匹配材料库。1000 点为注册赠送免费额度，每次识别按所选 Agent 扣点。
+                </p>
+
+                <div className="hidden md:flex flex-col gap-3 mt-6">
+                  {[
+                    { step: 1, label: "上传效果图", active: analysisStep === 1 && !isAnalyzing },
+                    { step: 2, label: "AI 识别", active: isAnalyzing },
+                    { step: 3, label: "生成情绪板", active: analysisStep === 3 },
+                  ].map((s) => (
+                    <div key={s.step} className={`flex items-center gap-3 ${s.active ? "opacity-100" : "opacity-30"}`}>
+                      <div className="w-7 h-7 rounded-full bg-black text-white flex items-center justify-center text-[10px] font-bold">{s.step}</div>
+                      <span className="text-[10px] font-bold tracking-widest uppercase">{s.label}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-5 space-y-2">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">识别 Agent</p>
+                  {availableVisionAgents.length === 0 ? (
+                    <p className="text-xs text-red-500">未配置任何视觉 API Key</p>
+                  ) : (
+                    availableVisionAgents.map((agent) => {
+                      const selected = activeVisionAgent?.id === agent.id;
+                      const est = getTokenEstimate(agent, recognitionDepth);
+                      const cost = getPointsCost(agent, recognitionDepth);
+                      return (
+                        <button
+                          key={agent.id}
+                          type="button"
+                          disabled={isAnalyzing}
+                          onClick={() => setSelectedVisionAgentId(agent.id)}
+                          className={`w-full text-left rounded-xl border px-3 py-2.5 transition-all ${
+                            selected ? "border-black bg-black/[0.04] ring-1 ring-black/10" : "border-gray-200 bg-white"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-black text-black">{agent.name}</span>
+                            {agent.badge && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">{agent.badge}</span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-gray-500 mt-0.5">{agent.subtitle}</p>
+                          <p className="text-[10px] text-gray-400 mt-1 font-mono">
+                            {getAgentModelLabel(agent.id)} · ≈{est.total} tokens · {cost} 点/次
+                          </p>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+
+                <div className="mt-4 flex gap-2">
+                  <button
+                    type="button"
+                    disabled={isAnalyzing}
+                    onClick={() => setRecognitionDepth("basic")}
+                    className={`flex-1 py-2 rounded-xl text-[10px] font-bold border transition-all ${
+                      recognitionDepth === "basic"
+                        ? "bg-black text-white border-black"
+                        : "bg-white text-gray-600 border-gray-200"
+                    }`}
+                  >
+                    基础 · 3 材质
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isAnalyzing}
+                    onClick={() => setRecognitionDepth("deep")}
+                    className={`flex-1 py-2 rounded-xl text-[10px] font-bold border transition-all ${
+                      recognitionDepth === "deep"
+                        ? "bg-black text-white border-black"
+                        : "bg-white text-gray-600 border-gray-200"
+                    }`}
+                  >
+                    深度 · 10 材质
+                  </button>
+                </div>
+
+                <p className="mt-3 text-[10px] text-gray-400 leading-relaxed">
+                  余额 <span className="font-black text-black">{points}</span> 点
+                  {visionTokenEst && activeVisionAgent && (
+                    <> · 预计消耗 ≈{visionTokenEst.total} tokens（{visionPointCost} 点）</>
+                  )}
+                  {lastVisionUsage && (
+                    <> · 上次实际 {lastVisionUsage.totalTokens} tokens</>
+                  )}
                 </p>
               </div>
 
-              <div className="space-y-4 mt-8">
-                {[
-                  { step: 1, label: "上传效果图", active: analysisStep === 1 && !isAnalyzing },
-                  { step: 2, label: "AI 深度识别", active: isAnalyzing },
-                  { step: 3, label: "生成情绪板", active: analysisStep === 3 },
-                ].map(s => (
-                  <div key={s.step} className={`flex items-center gap-4 transition-opacity ${s.active ? "opacity-100" : "opacity-30"}`}>
-                    <div className="w-8 h-8 rounded-full bg-black text-white flex items-center justify-center text-xs font-bold">{s.step}</div>
-                    <span className="text-xs font-bold tracking-widest uppercase">{s.label}</span>
-                  </div>
-                ))}
-              </div>
+              <form
+                autoComplete="off"
+                onSubmit={(e) => e.preventDefault()}
+                className="w-full md:w-[58%] p-5 md:p-10 bg-gray-50 flex flex-col items-center relative min-h-0"
+              >
+                <button
+                  type="button"
+                  onClick={closeAIModal}
+                  className="absolute top-4 right-4 text-gray-300 hover:text-black transition-colors hidden md:block"
+                  aria-label="关闭"
+                >
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+
+                <div className="w-full max-w-[280px] max-h-[28vh] md:max-h-none md:aspect-square rounded-2xl md:rounded-3xl border-2 border-dashed border-gray-200 flex flex-col items-center justify-center overflow-hidden bg-white shadow-inner relative group shrink-0">
+                  {aiImage ? (
+                    <>
+                      <img
+                        src={aiImage}
+                        alt=""
+                        draggable={false}
+                        onContextMenu={(e) => e.preventDefault()}
+                        title="点击图片可指定颜色采样参考点"
+                        className="w-full h-full max-h-[28vh] md:max-h-none object-contain touch-none [-webkit-touch-callout:none]"
+                        onClick={(ev) => {
+                          if (isAnalyzing) return;
+                          setAiVisionAnchor(previewImageClickToVisionAnchor(ev));
+                        }}
+                      />
+                      {isAnalyzing && (
+                        <div className="absolute inset-0 bg-black/40 backdrop-blur-sm flex flex-col items-center justify-center text-white p-4 text-center">
+                          <div className="w-10 h-10 border-4 border-white/20 border-t-white rounded-full animate-spin mb-3" />
+                          <p className="text-xs font-bold">正在解析空间...</p>
+                          <p className="text-[10px] opacity-60 mt-1">匹配库中对应材质</p>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <label className="cursor-pointer flex flex-col items-center p-6">
+                      <input type="file" className="hidden" autoComplete="off" accept="image/*" onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        void (async () => {
+                          try {
+                            const url = await reencodeFileToDataUrl(file, AI_MODAL_IMAGE_QUALITY);
+                            setAiVisionAnchor(null);
+                            setAiImage(url);
+                          } catch {
+                            const reader = new FileReader();
+                            reader.onload = (event) => {
+                              setAiVisionAnchor(null);
+                              setAiImage(event.target?.result as string);
+                            };
+                            reader.readAsDataURL(file);
+                          }
+                        })();
+                      }} />
+                      <div className="w-14 h-14 bg-gray-50 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                        <svg className="w-7 h-7 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"/></svg>
+                      </div>
+                      <p className="text-xs font-bold text-gray-400">点击上传空间图</p>
+                    </label>
+                  )}
+                </div>
+
+                <div className="hidden md:flex flex-col w-full max-w-[280px] mt-8 gap-2">
+                  <button
+                    type="button"
+                    onClick={(e) => { e.preventDefault(); void handleAIAnalysis(); }}
+                    disabled={!aiImage || isAnalyzing || !activeVisionAgent}
+                    className={`w-full py-4 rounded-2xl font-black text-xs tracking-[0.15em] transition-all ${
+                      aiImage && !isAnalyzing && activeVisionAgent
+                        ? "bg-black text-white shadow-xl hover:scale-[1.02] active:scale-95"
+                        : "bg-gray-200 text-gray-400 cursor-not-allowed"
+                    }`}
+                  >
+                    {isAnalyzing ? "识别中…" : `开始识别（${visionPointCost} 点）`}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!aiImage || isAnalyzing}
+                    onClick={(e) => { e.preventDefault(); skipAIToManualPlacement(); }}
+                    className={`w-full py-3 rounded-2xl font-bold text-[10px] tracking-wide border ${
+                      aiImage && !isAnalyzing
+                        ? "border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+                        : "border-gray-100 bg-gray-100 text-gray-400 cursor-not-allowed"
+                    }`}
+                  >
+                    跳过 AI，手动生成情绪板
+                  </button>
+                </div>
+              </form>
             </div>
 
-            <form
-              autoComplete="off"
-              onSubmit={(e) => e.preventDefault()}
-              className="w-full md:w-1/2 p-12 bg-gray-50 flex flex-col items-center justify-center relative"
-            >
+            <div className="shrink-0 border-t bg-white p-4 space-y-2 md:hidden safe-area-pb">
               <button
                 type="button"
-                onClick={() => {
-                  setIsAIModalOpen(false);
-                  setAiImage(null);
-                  setAiVisionAnchor(null);
-                  setAnalysisStep(1);
-                  setVisualAnnotations(null);
-                  setMatchResults(null);
-                }}
-                className="absolute top-8 right-8 text-gray-300 hover:text-black transition-colors"
-              >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/></svg>
-              </button>
-
-              <div className="w-full max-w-[300px] aspect-square rounded-3xl border-2 border-dashed border-gray-200 flex flex-col items-center justify-center overflow-hidden bg-white shadow-inner relative group">
-                {aiImage ? (
-                  <>
-                    <img
-                      src={aiImage}
-                      alt=""
-                      title="点击图片可指定颜色采样参考点（千问前置 RGB）；未点击则用画面中心"
-                      className="w-full h-full object-contain"
-                      onClick={(ev) => {
-                        if (isAnalyzing) return;
-                        setAiVisionAnchor(previewImageClickToVisionAnchor(ev));
-                      }}
-                    />
-                    {isAnalyzing && (
-                      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm flex flex-col items-center justify-center text-white p-6 text-center">
-                        <div className="w-12 h-12 border-4 border-white/20 border-t-white rounded-full animate-spin mb-4" />
-                        <p className="text-sm font-bold">正在解析空间...</p>
-                        <p className="text-[10px] opacity-60">正在匹配库中对应材质</p>
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <label className="cursor-pointer flex flex-col items-center">
-                    <input type="file" className="hidden" autoComplete="off" accept="image/*" onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (!file) return;
-                      void (async () => {
-                        try {
-                          const url = await reencodeFileToDataUrl(file, AI_MODAL_IMAGE_QUALITY);
-                          setAiVisionAnchor(null);
-                          setAiImage(url);
-                        } catch {
-                          const reader = new FileReader();
-                          reader.onload = (event) => {
-                            setAiVisionAnchor(null);
-                            setAiImage(event.target?.result as string);
-                          };
-                          reader.readAsDataURL(file);
-                        }
-                      })();
-                    }} />
-                    <div className="w-16 h-16 bg-gray-50 rounded-2xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-                      <svg className="w-8 h-8 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"/></svg>
-                    </div>
-                    <p className="text-xs font-bold text-gray-400">点击上传空间图</p>
-                  </label>
-                )}
-              </div>
-
-              <button
-                type="button"
-                onClick={(e) => {
-                  console.log('AI识别按钮已点击');
-                  e.preventDefault();
-                  e.stopPropagation();
-                  void handleAIAnalysis();
-                }}
-                disabled={!aiImage || isAnalyzing}
-                className={`mt-10 w-full max-w-[300px] py-4 rounded-2xl font-black text-xs tracking-[0.2em] transition-all ${
-                  aiImage && !isAnalyzing
-                    ? "bg-black text-white shadow-xl hover:scale-105 active:scale-95"
+                onClick={(e) => { e.preventDefault(); void handleAIAnalysis(); }}
+                disabled={!aiImage || isAnalyzing || !activeVisionAgent}
+                className={`w-full py-3.5 rounded-2xl font-black text-xs tracking-wide transition-all ${
+                  aiImage && !isAnalyzing && activeVisionAgent
+                    ? "bg-black text-white shadow-lg active:scale-[0.98]"
                     : "bg-gray-200 text-gray-400 cursor-not-allowed"
                 }`}
               >
-                {isAnalyzing ? "ANALYZING..." : "START AI ANALYSIS"}
+                {isAnalyzing ? "识别中…" : `开始识别（${visionPointCost} 点）`}
               </button>
-
               <button
                 type="button"
                 disabled={!aiImage || isAnalyzing}
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  skipAIToManualPlacement();
-                }}
-                className={`mt-3 w-full max-w-[300px] py-3 rounded-2xl font-bold text-[10px] tracking-widest transition-all border ${
+                onClick={(e) => { e.preventDefault(); skipAIToManualPlacement(); }}
+                className={`w-full py-3 rounded-2xl font-bold text-xs border ${
                   aiImage && !isAnalyzing
-                    ? "border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+                    ? "border-gray-300 bg-white text-gray-700 active:bg-gray-50"
                     : "border-gray-100 bg-gray-100 text-gray-400 cursor-not-allowed"
                 }`}
               >
-                跳过 AI
+                跳过 AI，手动生成情绪板
               </button>
-            </form>
+            </div>
           </div>
         </div>
       )}

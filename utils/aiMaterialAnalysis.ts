@@ -19,6 +19,15 @@ export const MATERIAL_ANALYSIS_PROMPT =
   "matched_material_id 仅当能确定与某条已知库记录一致时填写；否则省略，但 main_name 与 parameter 必须与视觉一致以便系统按名称关联材料库。" +
   "坐标尽量指向材质所在区域中心。";
 
+/** 深度识别：最多 10 条材质（面向付费档位） */
+export const DEEP_MATERIAL_ANALYSIS_PROMPT =
+  "你是室内美学专家。分析图片中可见的材质区域。" +
+  "【硬性约束】最多只输出 10 个 JSON 对象，按视觉显著性排序：第 1 个为「主材质」，其余为局部/备选材质。" +
+  "【材料库对齐】main_name 必须写成「颜色/花色 + 品类」的完整商业称呼，禁止泛称。" +
+  "严格只输出 JSON 数组，不要 markdown。每个元素包含：" +
+  '{"x":0-100的数字,"y":0-100的数字,"main_name":"材质大类","parameter":"颜色或纹理描述","matched_material_id":"可选"}。' +
+  "坐标尽量指向材质所在区域中心。";
+
 /** 仅附加在「千问」材质识别请求中的坐标与颜色约束（Gemini 仍用 MATERIAL_ANALYSIS_PROMPT） */
 const QWEN_MATERIAL_VISION_APPENDIX =
   "【千问专属：像素落点与邻域颜色】\n" +
@@ -228,6 +237,24 @@ export function getQwenVisionModelName(): string {
 
 const ANALYSIS_TIMEOUT_MS = 90_000;
 
+/** API 返回的 token 用量（若接口未返回则为 null，由 UI 展示估算值） */
+export type VisionTokenUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
+
+export type VisionAnalysisResult = {
+  text: string;
+  provider: string;
+  modelId: string;
+  usage: VisionTokenUsage | null;
+};
+
+export function getAnalysisPromptForDepth(depth: 'basic' | 'deep'): string {
+  return depth === 'deep' ? DEEP_MATERIAL_ANALYSIS_PROMPT : MATERIAL_ANALYSIS_PROMPT;
+}
+
 export function getGeminiApiKey(): string | undefined {
   const viteKey = import.meta.env.VITE_GEMINI_API_KEY;
   if (viteKey && String(viteKey).trim()) return String(viteKey).trim();
@@ -345,21 +372,21 @@ export async function analyzeWithVisionFallback(
 
   if (geminiKey) {
     try {
-      return await analyzeWithGemini(geminiKey, geminiUserPrompt, base64Part, mimeType, opts);
+      return (await analyzeWithGemini(geminiKey, geminiUserPrompt, base64Part, mimeType, opts)).text;
     } catch (gemErr) {
       if (!shouldFallbackToQwen(gemErr)) throw gemErr;
       const qwenPrompt = await buildQwenMaterialUserPrompt(imageDataUrl, prompt, opts?.sampleAnchor);
       if (dsKey && dsModel) {
         try {
           console.warn("[AI] Gemini 不可用，尝试 DeepSeek:", gemErr);
-          return await analyzeWithDeepSeekVision(dsKey, imageDataUrl, qwenPrompt, opts);
+          return (await analyzeWithDeepSeekVision(dsKey, imageDataUrl, qwenPrompt, opts)).text;
         } catch (dsErr) {
           console.warn("[AI] DeepSeek 失败，切换千问:", dsErr);
         }
       }
       if (qwenKey) {
         console.warn("[AI] Gemini 不可用，已切换千问:", gemErr);
-        return await analyzeWithQwen(qwenKey, imageDataUrl, qwenPrompt, opts);
+        return (await analyzeWithQwen(qwenKey, imageDataUrl, qwenPrompt, opts)).text;
       }
       throw gemErr;
     }
@@ -368,16 +395,16 @@ export async function analyzeWithVisionFallback(
   const qwenPrompt = await buildQwenMaterialUserPrompt(imageDataUrl, prompt, opts?.sampleAnchor);
   if (dsKey && dsModel) {
     try {
-      return await analyzeWithDeepSeekVision(dsKey, imageDataUrl, qwenPrompt, opts);
+      return (await analyzeWithDeepSeekVision(dsKey, imageDataUrl, qwenPrompt, opts)).text;
     } catch (dsErr) {
       console.warn("[AI] DeepSeek 失败，切换千问:", dsErr);
     }
   }
   if (!qwenKey) throw new Error("NO_VISION_API_KEY");
-  return await analyzeWithQwen(qwenKey, imageDataUrl, qwenPrompt, opts);
+  return (await analyzeWithQwen(qwenKey, imageDataUrl, qwenPrompt, opts)).text;
 }
 
-export function parseMaterialAnalysisText(text: string): unknown[] {
+export function parseMaterialAnalysisText(text: string, maxItems = 3): unknown[] {
   const stripped = text.replace(/```json|```/gi, "").trim();
   let parsed: unknown;
   try {
@@ -395,7 +422,7 @@ export function parseMaterialAnalysisText(text: string): unknown[] {
       }
     }
   }
-  return Array.isArray(parsed) ? parsed.slice(0, 3) : [parsed];
+  return Array.isArray(parsed) ? parsed.slice(0, maxItems) : [parsed];
 }
 
 export async function analyzeWithGemini(
@@ -408,13 +435,15 @@ export async function analyzeWithGemini(
     /** 不传则使用全局室内设计师 System Prompt */
     systemInstruction?: string;
   }
-): Promise<string> {
+): Promise<VisionAnalysisResult> {
   const genAI = new GoogleGenerativeAI(apiKey);
   const tryModelNames = buildGeminiVisionModelTryList();
 
   let lastErr: unknown;
+  let usedModel = tryModelNames[0] ?? GEMINI_MODEL;
   for (let mi = 0; mi < tryModelNames.length; mi++) {
     const modelName = tryModelNames[mi]!;
+    usedModel = modelName;
     const model = genAI.getGenerativeModel({
       model: modelName,
       systemInstruction: opts?.systemInstruction ?? VISION_INTERIOR_DESIGNER_SYSTEM_PROMPT,
@@ -426,17 +455,31 @@ export async function analyzeWithGemini(
           { inlineData: { data: base64, mimeType } },
         ]);
         const response = await result.response;
-        return response.text();
+        const text = response.text();
+        const meta = response.usageMetadata;
+        const usage: VisionTokenUsage | null = meta
+          ? {
+              promptTokens: meta.promptTokenCount ?? 0,
+              completionTokens: meta.candidatesTokenCount ?? 0,
+              totalTokens: meta.totalTokenCount ?? 0,
+            }
+          : null;
+        return { text, usage };
       })();
       try {
-        const text = await withTimeout(run, ANALYSIS_TIMEOUT_MS, "GEMINI");
+        const { text, usage } = await withTimeout(run, ANALYSIS_TIMEOUT_MS, "GEMINI");
         logVisionProviderSuccess({
           provider: "Gemini",
           baseUrl: GEMINI_GENERATIVE_LANGUAGE_V1BETA_BASE,
           modelId: modelName,
           endpointPattern: `${GEMINI_GENERATIVE_LANGUAGE_V1BETA_BASE}/models/${modelName}:generateContent`,
         });
-        return text;
+        if (usage) {
+          console.info(
+            `[AI][Token] Gemini | in=${usage.promptTokens} out=${usage.completionTokens} total=${usage.totalTokens}`
+          );
+        }
+        return { text, provider: "Gemini", modelId: modelName, usage };
       } catch (e) {
         lastErr = e;
         if (attempt < GEMINI_RETRY_DELAYS_MS.length && isVisionRateLimitError(e)) {
@@ -453,7 +496,7 @@ export async function analyzeWithGemini(
       }
     }
   }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr ?? `Gemini failed: ${usedModel}`));
 }
 
 function normalizeQwenMessageContent(raw: unknown): string {
@@ -478,12 +521,13 @@ export async function analyzeWithQwen(
     onRateLimitWait?: (attempt: number, delayMs: number) => void;
     systemInstruction?: string;
   }
-): Promise<string> {
+): Promise<VisionAnalysisResult> {
   const imageUrl = dataUrlOrBase64.startsWith("data:")
     ? dataUrlOrBase64
     : `data:image/jpeg;base64,${dataUrlOrBase64}`;
 
   const systemText = opts?.systemInstruction ?? VISION_INTERIOR_DESIGNER_SYSTEM_PROMPT;
+  const modelId = getQwenVisionModelName();
 
   let lastErr: unknown;
   for (let attempt = 0; attempt <= QWEN_RETRY_DELAYS_MS.length; attempt++) {
@@ -495,7 +539,7 @@ export async function analyzeWithQwen(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: getQwenVisionModelName(),
+          model: modelId,
           messages: [
             { role: "system", content: systemText },
             {
@@ -516,23 +560,37 @@ export async function analyzeWithQwen(
 
       const data = (await res.json()) as {
         choices?: Array<{ message?: { content?: unknown } }>;
+        usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
       };
       const raw = data.choices?.[0]?.message?.content;
       const text = normalizeQwenMessageContent(raw);
       if (!text.trim()) {
         throw new Error("QWEN_EMPTY_RESPONSE");
       }
-      return text;
+      const u = data.usage;
+      const usage: VisionTokenUsage | null = u
+        ? {
+            promptTokens: u.prompt_tokens ?? 0,
+            completionTokens: u.completion_tokens ?? 0,
+            totalTokens: u.total_tokens ?? 0,
+          }
+        : null;
+      return { text, usage };
     })();
 
     try {
-      const text = await withTimeout(run, ANALYSIS_TIMEOUT_MS, "QWEN");
+      const { text, usage } = await withTimeout(run, ANALYSIS_TIMEOUT_MS, "QWEN");
       logVisionProviderSuccess({
         provider: "Qwen (DashScope OpenAI-compatible)",
         baseUrl: QWEN_CHAT_URL,
-        modelId: getQwenVisionModelName(),
+        modelId,
       });
-      return text;
+      if (usage) {
+        console.info(
+          `[AI][Token] Qwen | in=${usage.promptTokens} out=${usage.completionTokens} total=${usage.totalTokens}`
+        );
+      }
+      return { text, provider: "Qwen", modelId, usage };
     } catch (e) {
       lastErr = e;
       const retryable = isVisionRateLimitError(e);
@@ -559,7 +617,7 @@ export async function analyzeWithDeepSeekVision(
     onRateLimitWait?: (attempt: number, delayMs: number) => void;
     systemInstruction?: string;
   }
-): Promise<string> {
+): Promise<VisionAnalysisResult> {
   const model = getDeepSeekVisionModelName();
   if (!model) {
     throw new Error("DEEPSEEK_VISION_MODEL_NOT_CONFIGURED");
@@ -600,23 +658,37 @@ export async function analyzeWithDeepSeekVision(
 
       const data = (await res.json()) as {
         choices?: Array<{ message?: { content?: unknown } }>;
+        usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
       };
       const raw = data.choices?.[0]?.message?.content;
       const text = normalizeQwenMessageContent(raw);
       if (!text.trim()) {
         throw new Error("DEEPSEEK_EMPTY_RESPONSE");
       }
-      return text;
+      const u = data.usage;
+      const usage: VisionTokenUsage | null = u
+        ? {
+            promptTokens: u.prompt_tokens ?? 0,
+            completionTokens: u.completion_tokens ?? 0,
+            totalTokens: u.total_tokens ?? 0,
+          }
+        : null;
+      return { text, usage };
     })();
 
     try {
-      const text = await withTimeout(run, ANALYSIS_TIMEOUT_MS, "DEEPSEEK");
+      const { text, usage } = await withTimeout(run, ANALYSIS_TIMEOUT_MS, "DEEPSEEK");
       logVisionProviderSuccess({
         provider: "DeepSeek (OpenAI-compatible)",
         baseUrl: DEEPSEEK_CHAT_URL,
         modelId: model,
       });
-      return text;
+      if (usage) {
+        console.info(
+          `[AI][Token] DeepSeek | in=${usage.promptTokens} out=${usage.completionTokens} total=${usage.totalTokens}`
+        );
+      }
+      return { text, provider: "DeepSeek", modelId: model, usage };
     } catch (e) {
       lastErr = e;
       const retryable = isVisionRateLimitError(e);
@@ -652,19 +724,19 @@ export async function analyzeWithVisionProviderChain(
 
   if (geminiKey) {
     try {
-      return await analyzeWithGemini(geminiKey, userTextPrompt, base64Part, mimeType, opts);
+      return (await analyzeWithGemini(geminiKey, userTextPrompt, base64Part, mimeType, opts)).text;
     } catch (e) {
       if (!shouldFallbackToQwen(e)) throw e;
       if (dsKey && dsModel) {
         try {
           console.warn("[AI] Gemini 不可用，尝试 DeepSeek:", e);
-          return await analyzeWithDeepSeekVision(dsKey, imageDataUrl, userTextPrompt, opts);
+          return (await analyzeWithDeepSeekVision(dsKey, imageDataUrl, userTextPrompt, opts)).text;
         } catch (dsErr) {
           console.warn("[AI] DeepSeek 失败，切换千问:", dsErr);
         }
       }
       if (qwenKey) {
-        return await analyzeWithQwen(qwenKey, imageDataUrl, userTextPrompt, opts);
+        return (await analyzeWithQwen(qwenKey, imageDataUrl, userTextPrompt, opts)).text;
       }
       throw e;
     }
@@ -672,11 +744,11 @@ export async function analyzeWithVisionProviderChain(
 
   if (dsKey && dsModel) {
     try {
-      return await analyzeWithDeepSeekVision(dsKey, imageDataUrl, userTextPrompt, opts);
+      return (await analyzeWithDeepSeekVision(dsKey, imageDataUrl, userTextPrompt, opts)).text;
     } catch (dsErr) {
       console.warn("[AI] DeepSeek 失败，切换千问:", dsErr);
     }
   }
   if (!qwenKey) throw new Error("NO_VISION_API_KEY");
-  return await analyzeWithQwen(qwenKey, imageDataUrl, userTextPrompt, opts);
+  return (await analyzeWithQwen(qwenKey, imageDataUrl, userTextPrompt, opts)).text;
 }

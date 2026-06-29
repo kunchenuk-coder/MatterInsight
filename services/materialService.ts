@@ -1,5 +1,7 @@
 import type { Material, PendingMaterial } from '../types';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
+import { parseOssObjectKey } from '../utils/parseOssObjectKey';
+import { enrichMaterialsWithFreshImages } from './materialImageService';
 
 type MaterialRow = {
   id: string;
@@ -8,14 +10,34 @@ type MaterialRow = {
   data: Material | PendingMaterial;
   status: string;
   is_pending: boolean;
+  is_custom?: boolean | null;
+  oss_object_key?: string | null;
 };
 
+const MATERIAL_SELECT =
+  'id, user_id, supplier_id, data, status, is_pending, is_custom, oss_object_key';
+
+function mergeRowOssKey(
+  data: Material | PendingMaterial,
+  rowKey?: string | null,
+  isCustom?: boolean | null
+): Material | PendingMaterial {
+  const ossObjectKey =
+    rowKey ??
+    data.ossObjectKey ??
+    parseOssObjectKey(data.image) ??
+    undefined;
+  const withOss = ossObjectKey ? { ...data, ossObjectKey } : data;
+  if (isCustom === undefined || isCustom === null) return withOss;
+  return { ...withOss, isCustom: isCustom };
+}
+
 function rowToMaterial(row: MaterialRow): Material {
-  return row.data as Material;
+  return mergeRowOssKey(row.data, row.oss_object_key, row.is_custom) as Material;
 }
 
 function rowToPending(row: MaterialRow): PendingMaterial {
-  return row.data as PendingMaterial;
+  return mergeRowOssKey(row.data, row.oss_object_key, row.is_custom) as PendingMaterial;
 }
 
 /** 获取已发布材料库（探索页） */
@@ -24,7 +46,7 @@ export async function fetchPublishedMaterials(): Promise<Material[]> {
 
   const { data, error } = await getSupabase()
     .from('materials')
-    .select('id, user_id, supplier_id, data, status, is_pending')
+    .select(MATERIAL_SELECT)
     .eq('is_pending', false)
     .eq('status', '已发布');
 
@@ -32,7 +54,8 @@ export async function fetchPublishedMaterials(): Promise<Material[]> {
     console.error('[materialService] fetchPublished:', error.message);
     return [];
   }
-  return (data ?? []).map(rowToMaterial);
+  const materials = (data ?? []).map(rowToMaterial);
+  return enrichMaterialsWithFreshImages(materials);
 }
 
 /** 获取待审核材料（管理员） */
@@ -41,14 +64,15 @@ export async function fetchPendingMaterials(): Promise<PendingMaterial[]> {
 
   const { data, error } = await getSupabase()
     .from('materials')
-    .select('id, user_id, supplier_id, data, status, is_pending')
+    .select(MATERIAL_SELECT)
     .eq('is_pending', true);
 
   if (error) {
     console.error('[materialService] fetchPending:', error.message);
     return [];
   }
-  return (data ?? []).map(rowToPending);
+  const pending = (data ?? []).map(rowToPending);
+  return enrichMaterialsWithFreshImages(pending);
 }
 
 /** 获取某供应商自己的材料（已发布 + 待审/驳回） */
@@ -61,7 +85,7 @@ export async function fetchSupplierMaterials(
 
   const { data, error } = await getSupabase()
     .from('materials')
-    .select('id, user_id, supplier_id, data, status, is_pending')
+    .select(MATERIAL_SELECT)
     .eq('supplier_id', supplierId);
 
   if (error) {
@@ -75,7 +99,10 @@ export async function fetchSupplierMaterials(
     if (row.is_pending) pending.push(rowToPending(row as MaterialRow));
     else published.push(rowToMaterial(row as MaterialRow));
   }
-  return { published, pending };
+  return {
+    published: await enrichMaterialsWithFreshImages(published),
+    pending: await enrichMaterialsWithFreshImages(pending),
+  };
 }
 
 /** 供应商提交新材料（图片 URL 已上传至 OSS） */
@@ -92,6 +119,7 @@ export async function submitPendingMaterial(
     data: material,
     status: material.status,
     is_pending: true,
+    oss_object_key: material.ossObjectKey ?? parseOssObjectKey(material.image),
   });
 
   if (error) console.error('[materialService] submit:', error.message);
@@ -112,6 +140,7 @@ export async function approveMaterial(
       status: updated.status,
       is_pending: false,
       updated_at: new Date().toISOString(),
+      oss_object_key: updated.ossObjectKey ?? parseOssObjectKey(updated.image),
     })
     .eq('id', materialId);
 
@@ -132,6 +161,7 @@ export async function rejectMaterial(
       status: updated.status,
       is_pending: true,
       updated_at: new Date().toISOString(),
+      oss_object_key: updated.ossObjectKey ?? parseOssObjectKey(updated.image),
     })
     .eq('id', materialId);
 

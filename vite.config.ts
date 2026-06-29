@@ -6,6 +6,7 @@ import { createSpeechToTextMiddleware } from './server/speechToText';
 import { createUploadMiddleware } from './server/uploadHandler';
 import { createGetUploadUrlMiddleware } from './server/getUploadUrlHandler';
 import { createUploadAssetMiddleware } from './server/uploadAssetHandler';
+import { createGetReadUrlMiddleware } from './server/getReadUrlHandler';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -44,6 +45,12 @@ export default defineConfig(({ mode }) => {
           name: 'upload-asset-api',
           configureServer(server) {
             server.middlewares.use(createUploadAssetMiddleware());
+          },
+        },
+        {
+          name: 'get-read-url-api',
+          configureServer(server) {
+            server.middlewares.use(createGetReadUrlMiddleware());
           },
         },
       ],

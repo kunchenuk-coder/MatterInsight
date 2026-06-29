@@ -15,6 +15,31 @@ type AuthMode = 'login' | 'register' | 'forgot';
 
 const LOGIN_FAILED_MSG = '邮箱或密码错误';
 
+const AuthSpinner: React.FC<{ label: string }> = ({ label }) => (
+  <div className="absolute inset-0 z-20 bg-black/45 backdrop-blur-[2px] flex flex-col items-center justify-center gap-3 rounded-[40px]">
+    <div className="w-9 h-9 border-2 border-white/25 border-t-white rounded-full animate-spin" />
+    <p className="text-white/90 text-xs font-bold tracking-wide">{label}</p>
+  </div>
+);
+
+const AuthSubmitButton: React.FC<{
+  loading: boolean;
+  loadingLabel: string;
+  idleLabel: string;
+  className?: string;
+}> = ({ loading, loadingLabel, idleLabel, className = 'mt-2' }) => (
+  <button
+    type="submit"
+    disabled={loading}
+    className={`w-full bg-black text-white py-4 rounded-2xl font-bold shadow-xl shadow-black/20 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-80 disabled:hover:scale-100 flex items-center justify-center gap-2.5 ${className}`}
+  >
+    {loading && (
+      <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin shrink-0" />
+    )}
+    {loading ? loadingLabel : idleLabel}
+  </button>
+);
+
 const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
   const [mode, setMode] = useState<AuthMode>('login');
   const [role, setRole] = useState<UserRole>(adminPortal ? 'ADMIN' : 'DESIGNER');
@@ -114,9 +139,13 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
 
   const isRegisteredRole = isRegisteredRoleError(error);
 
+  const loadingLabel =
+    mode === 'forgot' ? '正在发送…' : mode === 'login' ? '正在验证身份…' : '正在创建账号…';
+
   if (mode === 'forgot') {
     return (
       <AuthShell subtitle="找回密码">
+        {loading && <AuthSpinner label={loadingLabel} />}
         <form onSubmit={handleForgotSubmit} className="space-y-4">
           <p className="text-gray-300 text-sm text-center leading-relaxed mb-2">
             输入注册邮箱，我们将发送官方重置密码链接至您的邮箱。
@@ -148,13 +177,11 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
             </div>
           )}
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-black text-white py-4 rounded-2xl font-bold mt-2 shadow-xl shadow-black/20 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-60"
-          >
-            {loading ? '发送中…' : '发送重置邮件'}
-          </button>
+          <AuthSubmitButton
+            loading={loading}
+            loadingLabel="发送中…"
+            idleLabel="发送重置邮件"
+          />
 
           <div className="text-center pt-2">
             <button
@@ -172,6 +199,7 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
 
   return (
     <AuthShell subtitle={adminPortal ? '管理控制台 · 仅限平台管理员' : undefined}>
+      {loading && <AuthSpinner label={loadingLabel} />}
       {adminPortal ? (
         <div className="mb-8 text-center">
           <div className="inline-flex items-center gap-2 bg-gray-100 px-6 py-3 rounded-2xl">
@@ -279,13 +307,12 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
           </div>
         )}
 
-        <button
-          type="submit"
-          disabled={loading}
-          className="w-full bg-black text-white py-4 rounded-2xl font-bold mt-4 shadow-xl shadow-black/20 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-60"
-        >
-          {loading ? '验证中…' : mode === 'login' ? '立即进入' : '创建账号'}
-        </button>
+        <AuthSubmitButton
+          loading={loading}
+          loadingLabel="验证中…"
+          idleLabel={mode === 'login' ? '立即进入' : '创建账号'}
+          className="mt-4"
+        />
       </form>
 
       {!adminPortal && (

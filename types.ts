@@ -29,6 +29,8 @@ export interface User {
   verificationDoc?: string;
   /** 我的收藏（材料 ID），与本地 saved_ids 同步 */
   collections?: string[];
+  /** profiles.avatar，设计师自定义头像 URL */
+  avatar?: string | null;
 }
 
 export interface DesignerComment {
@@ -109,6 +111,10 @@ export interface Material {
   saves: number;
   savedBy: string[]; // List of user IDs
   isAcknowledged?: boolean; // For supplier notification badge
+  /** OSS 对象键；展示时用于刷新过期预签名 URL */
+  ossObjectKey?: string;
+  /** 设计师本地上传、非官方系统库材料 */
+  isCustom?: boolean;
 }
 
 // Added PendingMaterial interface for supplier submission workflow
@@ -133,6 +139,8 @@ export interface PendingMaterial {
   status: MaterialStatus;
   auditLog: AuditLog[];
   isAcknowledged?: boolean; // For supplier notification badge
+  /** OSS 对象键；展示时用于刷新过期预签名 URL */
+  ossObjectKey?: string;
 }
 
 export interface Notification {
@@ -160,10 +168,14 @@ export interface LocalTemporaryMaterial {
   isEditedByUser: true;
   /** OSS 对象键 users/{userId}/assets/... */
   ossObjectKey?: string;
+  /** 可选稳定资源 URL（无 ossObjectKey / assetUrl 时仍用 imageUrl / image_url） */
+  assetUrl?: string;
   /** AI/人工审核状态，默认 pending_review */
   reviewStatus?: AssetReviewStatus;
   /** 预留：VR 场景 3D 模型路径 */
   model3dUrl?: string;
+  /** 设计师本地上传，非官方系统库 */
+  isCustom?: boolean;
 }
 
 /** @deprecated 使用 LocalTemporaryMaterial */
@@ -210,7 +222,24 @@ export interface MoodBoard {
   items: MoodBoardItem[];
   isPaid: boolean; // Free tier vs Paid tier
   maxMaterials: number;
+  /** @default 'private' — omitted on legacy local boards */
+  visibility?: MoodBoardVisibility;
+  /** visibility=public 仅表示允许发布；首页展示需 isPublished=true */
+  isPublished?: boolean;
+  publishedAt?: string;
+  /** 主效果图 URL（导出/成品图） */
+  mainRenderImage?: string;
+  /** 空间效果图 URL */
+  spaceImage?: string;
+  /** Populated on public listings only */
+  ownerId?: string;
+  /** Populated on public listings only */
+  ownerName?: string;
+  /** Populated on public listings only */
+  ownerAvatar?: string | null;
 }
+
+export type MoodBoardVisibility = 'private' | 'team' | 'public';
 
 export type InquiryStatus = 'PENDING' | 'QUOTED' | 'REJECTED' | 'COMPLETED';
 
@@ -227,6 +256,8 @@ export interface Inquiry {
   notes?: string;
   designerNotes?: string;
   history?: { price: string; date: string; notes: string }[]; // Added quote history
+  /** 设计师已读报价时间；未设置且 status=QUOTED 时计入未读 */
+  quoteReadAt?: string;
 }
 
 export interface SampleRequest {
@@ -248,7 +279,8 @@ export type UploadFolder =
   | 'variants'
   | 'project-photos'
   | 'verification'
-  | 'local-materials';
+  | 'local-materials'
+  | 'avatars';
 
 /** 资产 AI 审核状态 */
 export type AssetReviewStatus = 'pending_review' | 'approved' | 'rejected';
@@ -268,4 +300,35 @@ export interface UserAsset {
   metadata?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 设计师公开主页 */
+export interface DesignerSocialStats {
+  /** 关注我的用户数 */
+  followersCount: number;
+  /** 我关注的用户数 */
+  followingCount: number;
+  /** 他人收藏该设计师公开情绪板的总次数 */
+  moodboardFavoritesCount: number;
+}
+
+export interface DesignerProfile {
+  id: string;
+  avatar: string | null;
+  username: string;
+  company: string | null;
+  bio: string | null;
+  stats: DesignerSocialStats;
+  publicMoodboards: DesignerMoodboardSummary[];
+  /** 完整情绪板数据（用于详情跳转） */
+  boards: MoodBoard[];
+  projectThumbnails: string[];
+}
+
+export interface DesignerMoodboardSummary {
+  id: string;
+  name: string;
+  coverImage: string | null;
+  materialCount: number;
+  publishedAt?: string;
 }

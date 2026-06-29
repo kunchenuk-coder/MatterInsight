@@ -7,13 +7,25 @@ export interface ProfileRow {
   id: string;
   email: string;
   role: DbRole | string;
+  username?: string | null;
+  avatar?: string | null;
+  bio?: string | null;
+  company?: string | null;
   registered_phone?: string | null;
   verification_doc_url?: string | null;
   status?: string | null;
   is_verified?: boolean | null;
 }
 
-const PROFILE_COLUMNS = 'id, email, role, registered_phone, verification_doc_url, status, is_verified';
+export type DesignerProfileUpdate = {
+  avatar?: string | null;
+  username?: string;
+  company?: string | null;
+  bio?: string | null;
+};
+
+const PROFILE_COLUMNS =
+  'id, email, role, username, avatar, bio, company, registered_phone, verification_doc_url, status, is_verified';
 
 export function userRoleToDbRole(role: UserRole): DbRole {
   return role.toLowerCase() as DbRole;
@@ -93,6 +105,7 @@ export async function insertProfileOnSignup(
         id: userId,
         email,
         role: userRoleToDbRole(role),
+        username: email.split('@')[0] || 'user',
       },
       { onConflict: 'id' }
     );
@@ -166,6 +179,39 @@ export async function fetchPendingSuppliers(): Promise<ProfileRow[]> {
     return [];
   }
   return (data ?? []) as ProfileRow[];
+}
+
+/** 更新设计师公开资料（头像、用户名、公司名、简介） */
+export async function updateDesignerProfile(
+  userId: string,
+  patch: DesignerProfileUpdate
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!isSupabaseConfigured() || !userId) {
+    return { ok: false, error: '服务未配置' };
+  }
+
+  if (patch.bio && patch.bio.length > 100) {
+    return { ok: false, error: '简介不能超过 100 字' };
+  }
+
+  const row: Record<string, unknown> = {};
+  if (patch.avatar !== undefined) row.avatar = patch.avatar;
+  if (patch.username !== undefined) row.username = patch.username.trim();
+  if (patch.company !== undefined) row.company = patch.company;
+  if (patch.bio !== undefined) row.bio = patch.bio;
+
+  if (Object.keys(row).length === 0) return { ok: true };
+
+  const { error } = await getSupabase()
+    .from('profiles')
+    .update(row)
+    .eq('id', userId);
+
+  if (error) {
+    console.error('[profileService] updateDesignerProfile:', error.message);
+    return { ok: false, error: '保存失败，请稍后重试' };
+  }
+  return { ok: true };
 }
 
 export async function fetchVerificationRequestsForAdmin(): Promise<User[]> {

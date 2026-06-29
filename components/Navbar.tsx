@@ -1,12 +1,15 @@
 
 import React from 'react';
 import { User } from '../types';
+import { resolveUserDisplayName } from '../utils/profileDisplayName';
 
 interface NavbarProps {
   user: User;
   points: number;
   onLogoClick: () => void;
   onProfileClick: () => void;
+  onAvatarClick?: () => void;
+  onMyPageClick?: () => void;
   onMoodboardClick: () => void;
   onLogout: () => void;
   onRechargeClick: () => void;
@@ -15,10 +18,16 @@ interface NavbarProps {
   onSearchChange: (value: string) => void;
 }
 
+const defaultAvatarUrl = (userId: string) =>
+  `https://api.dicebear.com/7.x/avataaars/svg?seed=${userId}`;
+
 const Navbar: React.FC<NavbarProps> = ({ 
-  user, points, onLogoClick, onProfileClick, onMoodboardClick, onLogout, onRechargeClick, 
+  user, points, onLogoClick, onProfileClick, onAvatarClick, onMyPageClick, onMoodboardClick, onLogout, onRechargeClick, 
   notifications = 0, searchTerm, onSearchChange 
 }) => {
+  const avatarSrc = user.avatar?.trim() ? user.avatar.trim() : defaultAvatarUrl(user.id);
+  const handleAvatarClick = onAvatarClick ?? onProfileClick;
+  const displayName = resolveUserDisplayName({ company: user.company, email: user.email });
   return (
     <>
       <nav className="fixed top-0 left-0 right-0 bg-white/80 backdrop-blur-md border-b z-50 h-16 flex items-center px-3 md:px-6 justify-between gap-2">
@@ -36,6 +45,9 @@ const Navbar: React.FC<NavbarProps> = ({
             <button onClick={onLogoClick} className="hover:text-black transition-colors">探索库</button>
             {user.role === 'DESIGNER' && (
               <button onClick={onMoodboardClick} className="hover:text-black transition-colors">情绪板</button>
+            )}
+            {user.role === 'DESIGNER' && onMyPageClick && (
+              <button onClick={onMyPageClick} className="hover:text-black transition-colors">我的主页</button>
             )}
             <button onClick={onProfileClick} className="hover:text-black transition-colors">控制台</button>
           </div>
@@ -64,16 +76,16 @@ const Navbar: React.FC<NavbarProps> = ({
           
           <div className="hidden md:flex items-center gap-3">
             <div className="text-right hidden sm:block">
-              <div className="text-sm font-semibold">{user.name}</div>
+              <div className="text-sm font-semibold truncate max-w-[140px]">{displayName}</div>
               <div className="text-[10px] uppercase text-gray-400 font-bold tracking-wider">
                 {user.role === 'DESIGNER' ? '设计师' : user.role === 'ADMIN' ? '运营' : '材料商'}
               </div>
             </div>
             <div 
-              onClick={onProfileClick}
+              onClick={handleAvatarClick}
               className="relative w-10 h-10 rounded-full bg-gray-200 cursor-pointer overflow-visible border-2 border-white shadow-sm"
             >
-              <img src={`https://api.dicebear.com/7.x/avataaars/svg?seed=${user.id}`} alt="profile" className="w-full h-full rounded-full" />
+              <img src={avatarSrc} alt="profile" className="w-full h-full rounded-full object-cover" />
               {notifications > 0 && (
                 <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center border-2 border-white">
                   {notifications}
@@ -114,12 +126,16 @@ const Navbar: React.FC<NavbarProps> = ({
             )}
             <button
               type="button"
-              onClick={onProfileClick}
-              title="个人控制台"
-              aria-label="个人控制台"
-              className="relative w-9 h-9 rounded-xl flex items-center justify-center text-lg leading-none hover:bg-gray-100 active:scale-90 transition-all"
+              onClick={handleAvatarClick}
+              title={user.role === 'DESIGNER' ? '我的主页' : '个人控制台'}
+              aria-label={user.role === 'DESIGNER' ? '我的主页' : '个人控制台'}
+              className="relative w-9 h-9 rounded-xl flex items-center justify-center overflow-hidden hover:bg-gray-100 active:scale-90 transition-all"
             >
-              👤
+              {user.avatar?.trim() ? (
+                <img src={avatarSrc} alt="" className="w-full h-full object-cover rounded-xl" />
+              ) : (
+                <span className="text-lg leading-none">👤</span>
+              )}
               {notifications > 0 && (
                 <span className="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-[9px] font-black min-w-[16px] h-4 px-1 rounded-full flex items-center justify-center border border-white">
                   {notifications}
