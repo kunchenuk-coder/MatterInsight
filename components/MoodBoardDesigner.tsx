@@ -40,7 +40,7 @@ import {
 } from '../utils/localDesignerMaterials';
 import { isQuotaExceededError } from "../utils/moodboardStorage";
 import { uploadImage } from '../services/uploadService';
-import { fetchLocalMaterials, insertLocalMaterial } from '../services/localMaterialService';
+import { fetchLocalMaterials, insertLocalMaterial, deleteLocalMaterial } from '../services/localMaterialService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 import MoodBoardPublishControls from './MoodBoardPublishControls';
 
@@ -745,6 +745,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   const [localMaterialsList, setLocalMaterialsList] = useState<LocalTemporaryMaterial[]>(
     () => loadLocalDesignerMaterials(user.id)
   );
+  const [localMaterialUploading, setLocalMaterialUploading] = useState(false);
   const [matchResults, setMatchResults] = useState<{ material: Material; remark: string; coords: {x: number, y: number}, logic: string }[] | null>(null);
   const [visualAnnotations, setVisualAnnotations] = useState<any[] | null>(null);
   const [aiRecommendations, setAiRecommendations] = useState<Material[]>([]);
@@ -1910,11 +1911,13 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
   /** 左侧上传：只入库，不直接上画布 */
   const registerLocalMaterialFromSidebar = async (file: File) => {
+    if (localMaterialUploading) return;
+    setLocalMaterialUploading(true);
+    setSelectedCategory("LOCAL");
     try {
       const entry = await buildLocalTemporaryFromFile(file);
       if (!entry?.imageUrl) return;
       if (!commitLocalMaterialToCatalog(entry)) return;
-      setSelectedCategory("LOCAL");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
       if (msg.includes("QuotaExceeded") || msg.includes("IMAGE_TOO_LARGE")) {
@@ -1922,7 +1925,25 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
       } else {
         alert("图片处理失败，请换一张较小的图片重试。");
       }
+    } finally {
+      setLocalMaterialUploading(false);
     }
+  };
+
+  const removeLocalMaterialFromCatalog = async (localMaterialId: string) => {
+    if (!window.confirm("确定删除该本地材料？")) return;
+    if (isSupabaseConfigured()) {
+      await deleteLocalMaterial(user.id, localMaterialId);
+    }
+    setLocalMaterialsList((prev) => {
+      const next = prev.filter((x) => x.id !== localMaterialId);
+      try {
+        saveLocalDesignerMaterials(user.id, next);
+      } catch (e) {
+        if (isQuotaExceededError(e)) showStorageQuotaAlertOnce();
+      }
+      return next;
+    });
   };
 
   const addLocalMaterialCardFromCatalog = (
@@ -1938,11 +1959,13 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
   /** 画布右键：入库 + 在点击位置生成卡片 */
   const insertLocalCanvasMaterial = async (file: File, boardX: number, boardY: number) => {
+    if (localMaterialUploading) return;
+    setLocalMaterialUploading(true);
+    setSelectedCategory("LOCAL");
     try {
       const entry = await buildLocalTemporaryFromFile(file);
       if (!entry?.imageUrl) return;
       if (!commitLocalMaterialToCatalog(entry)) return;
-      setSelectedCategory("LOCAL");
       placeLocalMaterialOnBoard(entry, boardX, boardY);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
@@ -1951,6 +1974,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
       } else {
         alert("图片处理失败，请换一张较小的图片重试。");
       }
+    } finally {
+      setLocalMaterialUploading(false);
     }
   };
 
@@ -2990,7 +3015,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               <h3 className="text-[10px] font-black uppercase text-gray-400 tracking-widest">从收藏库添加</h3>
               <div className="flex items-center gap-2">
                 <label
-                  className="cursor-pointer bg-gray-100 p-1.5 rounded-lg hover:bg-black hover:text-white transition-all shadow-sm"
+                  className={`cursor-pointer bg-gray-100 p-1.5 rounded-lg hover:bg-black hover:text-white transition-all shadow-sm ${localMaterialUploading ? "pointer-events-none opacity-50" : ""}`}
                   title="上传本地材料（仅加入左侧「本地材料」列表）"
                 >
                   <input
@@ -2998,6 +3023,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                     type="file"
                     accept="image/*"
                     className="hidden"
+                    disabled={localMaterialUploading}
                     onChange={async (e) => {
                       const file = e.target.files?.[0];
                       e.target.value = "";
@@ -3005,9 +3031,13 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                       await registerLocalMaterialFromSidebar(file);
                     }}
                   />
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                  </svg>
+                  {localMaterialUploading ? (
+                    <div className="h-3 w-3 border-2 border-gray-300 border-t-black rounded-full animate-spin" />
+                  ) : (
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                    </svg>
+                  )}
                 </label>
               </div>
             </div>
@@ -3039,12 +3069,18 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
                 {selectedCategory === "LOCAL" ? (
                   <div className="space-y-4">
-                    {localMaterialsList.length === 0 ? (
+                    {localMaterialUploading && (
+                      <div className="flex items-center justify-center gap-2 rounded-xl bg-amber-50 border border-amber-100 py-3 px-4">
+                        <div className="w-4 h-4 border-2 border-amber-200 border-t-amber-700 rounded-full animate-spin shrink-0" />
+                        <p className="text-[10px] text-amber-800 font-bold">正在上传本地材料…</p>
+                      </div>
+                    )}
+                    {localMaterialsList.length === 0 && !localMaterialUploading ? (
                       <div className="p-8 text-center">
                         <p className="text-[10px] text-gray-400 font-bold">暂无本地材料</p>
                         <p className="text-[9px] text-gray-300 mt-1">点击右上角上传或画布右键「上传本地材料」</p>
                       </div>
-                    ) : (
+                    ) : localMaterialsList.length > 0 ? (
                       <div className="grid grid-cols-1 gap-2">
                         {localMaterialsList.map((loc) => (
                           <div
@@ -3068,7 +3104,20 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                                 规格: {loc.spec || LOCAL_TEMP_DEFAULT_SPEC}
                               </p>
                             </div>
-                            <div className="bg-black text-white p-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void removeLocalMaterialFromCatalog(loc.id);
+                              }}
+                              className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 opacity-70 group-hover:opacity-100 transition-all shrink-0"
+                              title="删除本地材料"
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                              </svg>
+                            </button>
+                            <div className="bg-black text-white p-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
                               <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 4v16m8-8H4" />
                               </svg>
@@ -3076,7 +3125,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                           </div>
                         ))}
                       </div>
-                    )}
+                    ) : null}
                   </div>
                 ) : (
                 (() => {
@@ -4563,6 +4612,14 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                 跳过 AI，手动生成情绪板
               </button>
             </div>
+          </div>
+        </div>
+      )}
+      {localMaterialUploading && (
+        <div className="absolute inset-0 z-[350] flex items-center justify-center bg-black/10 pointer-events-none">
+          <div className="flex flex-col items-center gap-3 rounded-2xl bg-white px-8 py-6 shadow-2xl border border-gray-100">
+            <div className="w-10 h-10 border-4 border-gray-200 border-t-black rounded-full animate-spin" />
+            <p className="text-xs font-bold text-gray-600">正在上传本地材料…</p>
           </div>
         </div>
       )}

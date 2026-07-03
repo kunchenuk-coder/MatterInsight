@@ -1,4 +1,5 @@
 import type { Material, PendingMaterial } from '../types';
+import type { MaterialHumanDna } from '../types/materialDetail';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 import { parseOssObjectKey } from '../utils/parseOssObjectKey';
 import { enrichMaterialsWithFreshImages } from './materialImageService';
@@ -182,4 +183,101 @@ export async function deleteMaterial(
     .eq('supplier_id', supplierId);
 
   return !error;
+}
+
+/** Material JSON blob stored in `materials.data`, including Human DNA extension */
+export type MaterialDataPayload = Material & { humanDna?: MaterialHumanDna };
+
+export function buildMaterialDataPayload(
+  material: Material,
+  humanDna: MaterialHumanDna
+): MaterialDataPayload {
+  return { ...material, humanDna };
+}
+
+export function readHumanDnaFromMaterial(material: Material): MaterialHumanDna | undefined {
+  return (material as MaterialDataPayload).humanDna;
+}
+
+export type MaterialPersistResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Save supplier edits as draft — not visible in designer explore until republished.
+ * Row status: `draft` (English key for workflow; distinct from 已发布 RLS).
+ */
+export async function saveMaterialDraft(
+  supplierId: string,
+  materialId: string,
+  material: Material,
+  humanDna: MaterialHumanDna
+): Promise<MaterialPersistResult> {
+  const payload = buildMaterialDataPayload(material, humanDna);
+
+  if (!isSupabaseConfigured()) {
+    console.info('[materialService] saveMaterialDraft (local mock)', {
+      material_id: materialId,
+      status: 'draft',
+      data: payload,
+    });
+    return { ok: true };
+  }
+
+  const { error } = await getSupabase()
+    .from('materials')
+    .update({
+      data: payload,
+      status: 'draft',
+      is_pending: false,
+      updated_at: new Date().toISOString(),
+      oss_object_key: material.ossObjectKey ?? parseOssObjectKey(material.image),
+    })
+    .eq('id', materialId)
+    .eq('supplier_id', supplierId);
+
+  if (error) {
+    console.error('[materialService] saveMaterialDraft:', error.message);
+    return { ok: false, error: error.message };
+  }
+  return { ok: true };
+}
+
+/**
+ * Re-publish live material — overwrites public row with latest images, tags, and parameters.
+ * Row status: `已发布` (matches explore RLS + fetchPublishedMaterials).
+ */
+export async function republishMaterial(
+  supplierId: string,
+  materialId: string,
+  material: Material,
+  humanDna: MaterialHumanDna
+): Promise<MaterialPersistResult> {
+  const payload = buildMaterialDataPayload({ ...material }, humanDna);
+
+  if (!isSupabaseConfigured()) {
+    console.info('[materialService] republishMaterial (local mock)', {
+      material_id: materialId,
+      status: 'published',
+      db_status: '已发布',
+      data: payload,
+    });
+    return { ok: true };
+  }
+
+  const { error } = await getSupabase()
+    .from('materials')
+    .update({
+      data: payload,
+      status: '已发布',
+      is_pending: false,
+      updated_at: new Date().toISOString(),
+      oss_object_key: material.ossObjectKey ?? parseOssObjectKey(material.image),
+    })
+    .eq('id', materialId)
+    .eq('supplier_id', supplierId);
+
+  if (error) {
+    console.error('[materialService] republishMaterial:', error.message);
+    return { ok: false, error: error.message };
+  }
+  return { ok: true };
 }

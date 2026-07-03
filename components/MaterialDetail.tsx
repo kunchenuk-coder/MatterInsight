@@ -1,32 +1,159 @@
 
-import React, { useState } from 'react';
-import { Material, User, Inquiry, SampleRequest } from '../types';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Material, User, Inquiry, SampleRequest, MaterialStatus } from '../types';
+import { toMaterialDetail, buildHumanDnaSnapshot } from '../data/materialDetailMock';
+import {
+  buildMaterialDataPayload,
+  republishMaterial,
+  saveMaterialDraft,
+} from '../services/materialService';
 import { isSupplierUser } from '../services/inquiryService';
+import { resolveMaterialDetailPermissions } from '../utils/materialDetailPermissions';
+import MaterialDetailTopSection from './MaterialDetailTopSection';
+import MaterialMoodTagsSection from './MaterialMoodTagsSection';
+import MaterialInspirationStoriesSection from './MaterialInspirationStoriesSection';
+import MaterialEvaluationsSection from './MaterialEvaluationsSection';
+import MaterialManageActionBar from './MaterialManageActionBar';
+import type { MaterialHumanDna, MaterialEvaluations } from '../types/materialDetail';
+import {
+  hasUserRatedMaterial,
+  submitMaterialEvaluation,
+} from '../services/materialEvaluationService';
 
 interface MaterialDetailProps {
   material: Material;
   user: User | null;
   isPublicView?: boolean;
   backLabel?: string;
+  editMode?: boolean;
+  fromSupplierDashboard?: boolean;
   onBack: () => void;
   onDeductPoints: (amt: number) => void;
   onSampleRequest: (materialId: string, address: string, contactName: string, phone: string) => void;
   onInquiry: (materialId: string, moodBoardId: string, notes?: string) => void;
   inquiries: Inquiry[];
   sampleRequests: SampleRequest[];
+  onMaterialUpdated?: (material: Material) => void;
 }
 
 const MaterialDetail: React.FC<MaterialDetailProps> = ({ 
   material, user, onBack, onDeductPoints, onSampleRequest, onInquiry,
-  inquiries, sampleRequests, isPublicView = false, backLabel
+  inquiries, sampleRequests, isPublicView = false, backLabel,
+  editMode = false, fromSupplierDashboard = false, onMaterialUpdated,
 }) => {
   const [selectedVariant, setSelectedVariant] = useState((material.variants && material.variants[0]) || { id: 'default', colorCode: '#FFFFFF', imageUrl: material.image, name: '默认' });
   const [isQuoting, setIsQuoting] = useState(false);
   const [isRequestingSample, setIsRequestingSample] = useState(false);
   const [sampleForm, setSampleForm] = useState({ address: '', contactName: user?.name || '', phone: '' });
   const [quoteForm, setQuoteForm] = useState({ project: '', address: '', area: '', date: '', notes: '' });
-  const [zoomedImage, setZoomedImage] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
+  const [isRepublishing, setIsRepublishing] = useState(false);
+  const [toast, setToast] = useState<{ message: string; tone: 'success' | 'error' } | null>(null);
+
+  const materialDetail = useMemo(() => toMaterialDetail(material), [material]);
+  const [applicationCases, setApplicationCases] = useState(materialDetail.application_cases);
+  const [moodTags, setMoodTags] = useState(materialDetail.mood_tags);
+  const [inspirationStories, setInspirationStories] = useState(materialDetail.inspiration_stories);
+  const [evaluations, setEvaluations] = useState<MaterialEvaluations>(materialDetail.evaluations);
+  const [evaluationVoteCount, setEvaluationVoteCount] = useState(
+    materialDetail.evaluation_vote_count ?? 0
+  );
+  const [hasSubmittedRating, setHasSubmittedRating] = useState(false);
+  const supplierViewer = isSupplierUser(user);
+  const permissions = useMemo(
+    () =>
+      resolveMaterialDetailPermissions({
+        user,
+        material,
+        isPublicView,
+        editMode,
+        fromSupplierDashboard,
+      }),
+    [user, material, isPublicView, editMode, fromSupplierDashboard]
+  );
+  const isManageMode = permissions.canManageApplicationCases;
+
+  const humanDnaSnapshot = useCallback((): MaterialHumanDna => {
+    return buildHumanDnaSnapshot({
+      ...material,
+      ...materialDetail,
+      application_cases: applicationCases,
+      mood_tags: moodTags,
+      inspiration_stories: inspirationStories,
+      evaluations,
+      evaluation_vote_count: evaluationVoteCount,
+    });
+  }, [material, materialDetail, applicationCases, moodTags, inspirationStories, evaluations, evaluationVoteCount]);
+
+  const persistToLibrary = useCallback(
+    (statusLabel: 'draft' | '已发布') => {
+      const humanDna = humanDnaSnapshot();
+      const updated = buildMaterialDataPayload(
+        { ...material, status: statusLabel === 'draft' ? material.status : MaterialStatus.PUBLISHED },
+        humanDna
+      );
+      onMaterialUpdated?.(updated);
+      return updated;
+    },
+    [humanDnaSnapshot, material, onMaterialUpdated]
+  );
+
+  const showToast = (message: string, tone: 'success' | 'error') => {
+    setToast({ message, tone });
+    window.setTimeout(() => setToast(null), 3200);
+  };
+
+  const handleSaveDraft = async () => {
+    if (!user || !isManageMode) return;
+    setIsSavingDraft(true);
+    const humanDna = humanDnaSnapshot();
+    const result = await saveMaterialDraft(user.id, material.id, material, humanDna);
+    setIsSavingDraft(false);
+    if (!result.ok) {
+      showToast(result.error || '草稿保存失败', 'error');
+      return;
+    }
+    persistToLibrary('draft');
+    showToast('草稿已保存，尚未对设计师公开', 'success');
+  };
+
+  const handleRepublish = async () => {
+    if (!user || !isManageMode) return;
+    setIsRepublishing(true);
+    const humanDna = humanDnaSnapshot();
+    const result = await republishMaterial(user.id, material.id, material, humanDna);
+    setIsRepublishing(false);
+    if (!result.ok) {
+      showToast(result.error || '发布失败', 'error');
+      return;
+    }
+    persistToLibrary('已发布');
+    showToast('材料已成功再次发布，设计师可见最新版本', 'success');
+  };
+
+  useEffect(() => {
+    setApplicationCases(materialDetail.application_cases);
+    setMoodTags(materialDetail.mood_tags);
+    setInspirationStories(materialDetail.inspiration_stories);
+    setEvaluations(materialDetail.evaluations);
+    setEvaluationVoteCount(materialDetail.evaluation_vote_count ?? 0);
+  }, [
+    material.id,
+    materialDetail.application_cases,
+    materialDetail.mood_tags,
+    materialDetail.inspiration_stories,
+    materialDetail.evaluations,
+    materialDetail.evaluation_vote_count,
+  ]);
+
+  useEffect(() => {
+    if (user?.role === 'DESIGNER') {
+      setHasSubmittedRating(hasUserRatedMaterial(user.id, material.id));
+    } else {
+      setHasSubmittedRating(false);
+    }
+  }, [user?.id, user?.role, material.id]);
 
   // Generate Matter-ID
   const getCategoryAbbr = (cat: string) => {
@@ -44,11 +171,50 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
     ? material.brand 
     : material.brand.split('').map((c, i) => i === 0 || i === material.brand.length - 1 ? c : '*').join('');
 
-  // Check if rating is allowed
-  const canRate = user && user.role === 'DESIGNER' && (
-    sampleRequests.some(req => req.materialId === material.id && req.designerId === user.id && req.status === 'COMPLETED') ||
-    inquiries.some(inq => inq.materialId === material.id && inq.designerId === user.id && inq.status === 'COMPLETED')
-  );
+  // Check if rating is allowed — designers may rate directly from detail page (one-time submit).
+  const handleSubmitEvaluation = async (submission: MaterialEvaluations) => {
+    if (!user || user.role !== 'DESIGNER') return;
+
+    const result = await submitMaterialEvaluation({
+      userId: user.id,
+      materialId: material.id,
+      material,
+      submission,
+      currentEvaluations: evaluations,
+      voteCount: evaluationVoteCount,
+    });
+
+    if (!result.ok) {
+      showToast(result.error, 'error');
+      return;
+    }
+
+    setEvaluations(result.evaluations);
+    setEvaluationVoteCount(result.voteCount);
+    setHasSubmittedRating(true);
+    onMaterialUpdated?.(result.material);
+    showToast('评分已提交，综合评估已更新', 'success');
+  };
+
+  const handleInspirationStoriesChange = (stories: typeof inspirationStories) => {
+    setInspirationStories(stories);
+    if (permissions.canSubmitBrandStory) {
+      onMaterialUpdated?.(
+        buildMaterialDataPayload(
+          material,
+          buildHumanDnaSnapshot({
+            ...material,
+            ...materialDetail,
+            application_cases: applicationCases,
+            mood_tags: moodTags,
+            inspiration_stories: stories,
+            evaluations,
+            evaluation_vote_count: evaluationVoteCount,
+          })
+        )
+      );
+    }
+  };
 
   const handleShare = () => {
     const shareUrl = `${window.location.origin}${window.location.pathname}#/share/${material.id}`;
@@ -57,8 +223,6 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
       setTimeout(() => setCopySuccess(false), 2000);
     });
   };
-
-  const supplierViewer = isSupplierUser(user);
 
   const handleSampleOrder = (e: React.FormEvent) => {
     e.preventDefault();
@@ -84,8 +248,21 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
   };
 
   return (
-    <div className="max-w-6xl mx-auto py-8">
-      <div className="flex justify-between items-center mb-6">
+    <div className="max-w-6xl mx-auto px-4 sm:px-6 py-4 sm:py-8 relative">
+      {toast && (
+        <div
+          className={`fixed top-6 left-1/2 -translate-x-1/2 z-[300] px-6 py-3 rounded-2xl text-sm font-bold shadow-2xl backdrop-blur-md border transition-opacity ${
+            toast.tone === 'success'
+              ? 'bg-emerald-600/95 text-white border-emerald-400/30'
+              : 'bg-red-600/95 text-white border-red-400/30'
+          }`}
+          role="status"
+        >
+          {toast.message}
+        </div>
+      )}
+
+      <div className="flex flex-wrap justify-between items-center gap-3 mb-4 sm:mb-5">
         <button 
           onClick={onBack}
           className="flex items-center gap-2 text-gray-500 hover:text-black transition-colors"
@@ -93,37 +270,56 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
           <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
-          {backLabel ?? (isPublicView ? '探索公开库' : '返回列表')}
+          {backLabel ?? (isPublicView ? '探索公开库' : isManageMode ? '返回材料商后台' : '返回列表')}
         </button>
-        <div className="flex items-center gap-3">
-          <button 
-            onClick={handleShare}
-            className={`flex items-center gap-2 px-6 py-1.5 rounded-full text-xs font-bold transition-all ${copySuccess ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'}`}
-          >
-            {copySuccess ? '✓ 已复制链接' : '📢 分享材料'}
-          </button>
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+          {isManageMode && (
+            <MaterialManageActionBar
+              onSaveDraft={handleSaveDraft}
+              onRepublish={handleRepublish}
+              isSavingDraft={isSavingDraft}
+              isRepublishing={isRepublishing}
+              className="order-last sm:order-none w-full sm:w-auto justify-end"
+            />
+          )}
+          {!isManageMode && (
+            <button 
+              onClick={handleShare}
+              className={`flex items-center gap-2 px-6 py-1.5 rounded-full text-xs font-bold transition-all ${copySuccess ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'}`}
+            >
+              {copySuccess ? '✓ 已复制链接' : '📢 分享材料'}
+            </button>
+          )}
           {!isPublicView && (
-            <div className="bg-gray-100 px-4 py-1.5 rounded-full hidden sm:block">
+            <div className="flex items-center gap-2">
+              {permissions.showManageModeBanner && (
+                <span className="bg-violet-100 text-violet-800 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider">
+                  材料商编辑模式
+                </span>
+              )}
+              <div className="bg-gray-100 px-4 py-1.5 rounded-full hidden sm:block">
               <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Matter-ID: </span>
               <span className="text-xs font-black text-black">{matterId}</span>
+              </div>
             </div>
           )}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 bg-white p-8 rounded-3xl shadow-sm border border-gray-100">
-        {/* Left: Info */}
-        <div className="lg:col-span-5 flex flex-col gap-8">
-          <div className="relative group">
-            <img 
-              src={selectedVariant.imageUrl || material.image} 
-              alt={material.name} 
-              className="w-full aspect-[4/5] object-cover rounded-2xl shadow-lg border border-gray-200 transition-all duration-500" 
-              style={{ filter: `drop-shadow(0 0 10px ${selectedVariant.colorCode}44)` }}
-            />
+      <div className="bg-white p-4 sm:p-8 rounded-2xl sm:rounded-3xl shadow-sm border border-gray-100">
+        <MaterialDetailTopSection
+          mainImageUrl={selectedVariant.imageUrl || material.image}
+          mainImageAlt={material.name}
+          colorAccent={selectedVariant.colorCode}
+          aiTrainedStatus={materialDetail.ai_trained_status}
+          applicationCases={applicationCases}
+          isSupplierEditMode={isManageMode}
+          onApplicationCasesChange={isManageMode ? setApplicationCases : undefined}
+          canUploadApplicationCases={permissions.canUploadApplicationCases}
+          variantPicker={
             <div className="absolute bottom-4 left-4 right-4 flex flex-wrap gap-2 bg-black/20 backdrop-blur-md p-3 rounded-2xl">
               {material.variants?.map(v => (
-                <button 
+                <button
                   key={v.id}
                   onClick={() => setSelectedVariant(v)}
                   title={v.name}
@@ -132,11 +328,15 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
                 />
               ))}
             </div>
-          </div>
+          }
+        />
 
-          <div className="space-y-6">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 lg:gap-8">
+        {/* Left: Info + MOOD */}
+        <div className="lg:col-span-5 flex flex-col gap-4 sm:gap-5 order-1">
+          <div className="space-y-4 sm:space-y-5">
             <div>
-              <h1 className="text-3xl font-bold mb-1">{material.name}</h1>
+              <h1 className="text-2xl sm:text-3xl font-bold mb-1">{material.name}</h1>
               <p className="text-gray-500 font-medium">
                 <span className={!isPublicView && !hasRequestedSample && !hasInquired && (!user || (user.role !== 'ADMIN' && user.company !== material.brand)) ? 'blur-[4px] select-none' : ''}>
                   {displayBrand}
@@ -172,7 +372,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
             </div>
 
             {!supplierViewer && (
-              <div className="flex gap-4">
+              <div className="flex flex-col sm:flex-row gap-3 sm:gap-4">
                 <button 
                   onClick={() => {
                     if (isPublicView) {
@@ -207,75 +407,60 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
               </div>
             )}
           </div>
+
+          <MaterialMoodTagsSection
+            moodTags={moodTags}
+            onMoodTagsChange={
+              permissions.canAddBrandMoodTags || permissions.canInteractMoodTags
+                ? setMoodTags
+                : undefined
+            }
+            user={user}
+            isPublicView={isPublicView}
+            materialId={material.id}
+            interactive={permissions.canInteractMoodTags}
+            canAddCustomMoodTags={permissions.canAddCustomMoodTags}
+            canAddBrandMoodTags={permissions.canAddBrandMoodTags}
+            compact
+          />
         </div>
 
-        {/* Right: Projects & Ratings */}
-        <div className="lg:col-span-7 flex flex-col gap-8">
-          <div>
-            <h2 className="text-xl font-bold mb-4">应用案例</h2>
-            <div className="flex flex-col gap-6 overflow-y-auto max-h-[600px] pr-4 custom-scrollbar">
-              {material.projectPhotos.map((p, idx) => (
-                <div 
-                  key={idx} 
-                  className="relative rounded-2xl overflow-hidden group cursor-zoom-in"
-                  onClick={() => setZoomedImage(p)}
-                >
-                  <img src={p} className="w-full h-auto object-cover" />
-                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-6">
-                    <div className="text-white">
-                      <p className="font-bold text-lg">某高端住宅项目</p>
-                      <p className="text-sm opacity-80">2023 · 上海浦东 · 350㎡</p>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Zoomed Image Modal */}
-          {zoomedImage && (
-            <div 
-              className="fixed inset-0 bg-black/90 backdrop-blur-xl z-[200] flex items-center justify-center p-4 cursor-zoom-out"
-              onClick={() => setZoomedImage(null)}
-            >
-              <button 
-                onClick={() => setZoomedImage(null)}
-                className="absolute top-10 right-10 text-white text-4xl hover:scale-110 transition-transform"
-              >✕</button>
-              <img 
-                src={zoomedImage} 
-                className="max-w-full max-h-full object-contain rounded-xl shadow-2xl" 
-                onClick={(e) => e.stopPropagation()}
-              />
-            </div>
-          )}
-
-          <div className="bg-gray-50 p-6 rounded-2xl border border-gray-100">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-lg font-bold">材料综合评估</h2>
-              {user.role === 'DESIGNER' && !canRate && (
-                <span className="text-[10px] text-gray-400 font-bold bg-white px-3 py-1 rounded-full border">完成订单后可评分</span>
-              )}
-              {canRate && (
-                <button className="text-xs font-bold bg-black text-white px-4 py-1.5 rounded-full hover:scale-105 transition-transform">
-                  立即评分
-                </button>
-              )}
-            </div>
-            <div className="space-y-4">
-              {Object.entries(material.ratings).map(([key, val]) => (
-                <div key={key} className="flex items-center gap-4">
-                  <span className="w-20 text-xs font-bold text-gray-500 uppercase">{key === 'aesthetic' ? '美观' : key === 'durable' ? '耐用' : key === 'service' ? '服务' : key === 'cleanliness' ? '易洁' : '推荐'}</span>
-                  <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
-                    {/* Fix: Explicitly cast val to number to resolve arithmetic operation error */}
-                    <div className="h-full bg-black rounded-full" style={{ width: `${((val as number) / 5) * 100}%` }}></div>
-                  </div>
-                  <span className="text-xs font-bold">{val}</span>
-                </div>
-              ))}
-            </div>
-          </div>
+        {/* Right: Evaluations only */}
+        <div className="lg:col-span-7 flex flex-col gap-4 sm:gap-5 order-2">
+          <MaterialEvaluationsSection
+            evaluations={evaluations}
+            readOnly={permissions.evaluationsReadOnly}
+            showAggregateLabel={permissions.showAggregateEvaluations}
+            interactive={permissions.canUseEvaluationSliders}
+            hasSubmitted={hasSubmittedRating}
+            onSubmitRating={handleSubmitEvaluation}
+          />
         </div>
+        </div>
+
+        <MaterialInspirationStoriesSection
+          stories={inspirationStories}
+          onStoriesChange={handleInspirationStoriesChange}
+          user={user}
+          isPublicView={isPublicView}
+          materialId={material.id}
+          material={material}
+          canSubmitDesignerStory={permissions.canSubmitDesignerStory}
+          canSubmitBrandStory={permissions.canSubmitBrandStory}
+          materialSupplierId={material.supplierId}
+          persistBrandStories={permissions.canSubmitBrandStory && isManageMode}
+        />
+
+        {isManageMode && (
+          <div className="mt-6 pt-5 border-t border-gray-100 flex justify-end">
+            <MaterialManageActionBar
+              onSaveDraft={handleSaveDraft}
+              onRepublish={handleRepublish}
+              isSavingDraft={isSavingDraft}
+              isRepublishing={isRepublishing}
+            />
+          </div>
+        )}
       </div>
 
       {/* Sample Request Dialog */}

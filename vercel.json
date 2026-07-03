@@ -13,6 +13,10 @@
     "api/get-upload-url.ts": {
       "memory": 512,
       "maxDuration": 15
+    },
+    "api/get-read-url.ts": {
+      "memory": 512,
+      "maxDuration": 15
     }
   }
 }

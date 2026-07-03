@@ -1,4 +1,4 @@
-import { parseOssObjectKey, isSignedOssUrl } from '../utils/parseOssObjectKey';
+import { parseOssObjectKey, isSignedOssUrl, isOssUrl } from '../utils/parseOssObjectKey';
 
 const MAX_BATCH = 50;
 
@@ -24,7 +24,14 @@ export async function fetchReadUrlsForObjectKeys(
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ objectKeys: chunk }),
       });
-      if (!res.ok) continue;
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        console.warn(
+          `[assetReadUrlService] get-read-url HTTP ${res.status}:`,
+          errText.slice(0, 200)
+        );
+        continue;
+      }
       const json = (await res.json()) as { urls?: Record<string, string> };
       for (const [key, url] of Object.entries(json.urls ?? {})) {
         if (url) out.set(key, url);
@@ -43,6 +50,10 @@ export function resolveUrlFromMap(
 ): string {
   const key = objectKey ? parseOssObjectKey(objectKey) : parseOssObjectKey(currentUrl);
   if (key && urlMap.has(key)) return urlMap.get(key)!;
+  // 刷新失败时，禁止回退到过期的 OSS 签名 URL 或 http 混合内容地址
+  if (currentUrl && (isSignedOssUrl(currentUrl) || isOssUrl(currentUrl))) {
+    return '';
+  }
   return currentUrl ?? '';
 }
 
@@ -66,6 +77,7 @@ export function collectResolvableOssKeys(
 
 function isStableImageUrl(url: string): boolean {
   if (url.startsWith('data:')) return true;
+  if (/aliyuncs\.com/i.test(url) || url.startsWith('users/')) return false;
   if (!isSignedOssUrl(url)) return true;
   return false;
 }

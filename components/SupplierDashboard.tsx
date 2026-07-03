@@ -30,6 +30,7 @@ interface SupplierDashboardProps {
   sampleRequests: SampleRequest[];
   onShipSample: (requestId: string) => void;
   onRequestVerification: (phone: string, doc: string) => void;
+  onViewMaterialDetail: (material: Material) => void;
 }
 
 const UPLOAD_FOLDER: Record<'image' | 'projectPhotos' | 'variants', 'materials' | 'project-photos' | 'variants'> = {
@@ -40,7 +41,7 @@ const UPLOAD_FOLDER: Record<'image' | 'projectPhotos' | 'variants', 'materials' 
 
 const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
   user, library, setLibrary, pendingList, setPendingMaterials, onSubmitForReview, onRechargeClick, inquiries, onQuote,
-  sampleRequests, onShipSample, onRequestVerification
+  sampleRequests, onShipSample, onRequestVerification, onViewMaterialDetail
 }) => {
   const [isPublishing, setIsPublishing] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -496,7 +497,19 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
 
             {/* Approved Products */}
             {supplierProducts.map(product => (
-              <div key={product.id} className="bg-gray-50 rounded-3xl p-4 border border-gray-100 group relative">
+              <div
+                key={product.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => onViewMaterialDetail(product)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onViewMaterialDetail(product);
+                  }
+                }}
+                className="bg-gray-50 rounded-3xl p-4 border border-gray-100 group relative cursor-pointer hover:border-black/20 hover:shadow-md transition-all"
+              >
                 {product.isAcknowledged === false && (
                   <div className="absolute top-4 right-4 w-3 h-3 bg-red-500 rounded-full border-2 border-white z-20"></div>
                 )}
@@ -510,7 +523,11 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                   </div>
                 </div>
                 <button 
-                  onClick={() => handleDeleteProduct(product.id)}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteProduct(product.id);
+                  }}
                   className="absolute top-6 right-6 bg-white/90 backdrop-blur p-2 rounded-full text-red-500 opacity-0 group-hover:opacity-100 transition-all shadow-lg"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">

@@ -24,10 +24,18 @@ export function isSignedOssUrl(url: string | null | undefined): boolean {
   );
 }
 
-/** 无需刷新的稳定图片地址（data URL、Unsplash、公开 OSS 等） */
+/** 是否为阿里云 OSS 地址（含 http/https、签名或裸 key） */
+export function isOssUrl(url: string | null | undefined): boolean {
+  if (!url?.trim()) return false;
+  if (url.trim().startsWith('users/')) return true;
+  return /aliyuncs\.com/i.test(url);
+}
+
+/** 无需刷新的稳定图片地址（data URL、Unsplash 等）；OSS 一律走签名刷新 */
 export function isStableImageUrl(url: string | null | undefined): boolean {
   if (!url?.trim()) return false;
   if (url.startsWith('data:')) return true;
+  if (isOssUrl(url)) return false;
   if (isSignedOssUrl(url)) return false;
   return true;
 }

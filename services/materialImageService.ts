@@ -62,7 +62,12 @@ export async function enrichMaterialsWithFreshImages<T extends Material | Pendin
   if (objectKeys.length === 0) return materials;
 
   const urlMap = await fetchReadUrlsForObjectKeys(objectKeys);
-  if (urlMap.size === 0) return materials;
+  if (urlMap.size === 0) {
+    console.warn(
+      '[materialImageService] OSS read URL refresh returned empty; check /api/get-read-url and ALIYUN_OSS_* env on server'
+    );
+    return materials.map((m) => applyUrlMapToMaterial(m, urlMap));
+  }
 
   return materials.map((m) => applyUrlMapToMaterial(m, urlMap));
 }

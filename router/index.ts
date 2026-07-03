@@ -8,6 +8,7 @@
 
 import type { DbRole } from '../types';
 import { normalizeDbRole } from '../services/profileService';
+import { isAdminPortal } from '../utils/authRoutes';
 
 export const LOGIN_PATH = '/';
 
@@ -29,8 +30,18 @@ export type AppPageRoute =
   | { type: 'material'; id: string }
   | { type: 'other' };
 
-export function getMaterialPath(id: string): string {
-  return `/material/${encodeURIComponent(id)}`;
+export function getMaterialPath(id: string, options?: { mode?: 'edit' }): string {
+  const base = `/material/${encodeURIComponent(id)}`;
+  if (options?.mode === 'edit') return `${base}?mode=edit`;
+  return base;
+}
+
+export function parseMaterialEditMode(search = window.location.search): boolean {
+  return new URLSearchParams(search).get('mode') === 'edit';
+}
+
+export function getMaterialPathWithSearch(pathname: string, search = window.location.search): string {
+  return search ? `${pathname}${search}` : pathname;
 }
 
 export function parseMaterialId(pathname = window.location.pathname): string | null {
@@ -100,6 +111,21 @@ export function redirectToRoleDashboard(
   }
   window.dispatchEvent(new PopStateEvent('popstate'));
   return path;
+}
+
+/**
+ * 管理员入口（/admin 或 admin 子域）：仅 admin 可进入后台；非 admin 返回 null（由调用方 signOut）。
+ * 普通登录页仍走 redirectToRoleDashboard。
+ */
+export function redirectAfterAuth(
+  dbRole: string | null | undefined,
+  replace = false
+): DashboardPath | null {
+  if (isAdminPortal()) {
+    if (normalizeDbRole(dbRole) !== 'admin') return null;
+    return redirectToRoleDashboard('admin', replace);
+  }
+  return redirectToRoleDashboard(dbRole, replace);
 }
 
 export function isDashboardPath(pathname = window.location.pathname): boolean {

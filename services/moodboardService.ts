@@ -113,58 +113,64 @@ export async function syncMoodboards(
 ): Promise<boolean> {
   if (!isSupabaseConfigured() || !userId) return false;
 
-  const supabase = getSupabase();
+  try {
+    const supabase = getSupabase();
 
-  const { data: existing, error: fetchError } = await supabase
-    .from('moodboards')
-    .select('id')
-    .eq('user_id', userId);
-
-  if (fetchError) {
-    console.error('[moodboardService] sync fetch ids:', fetchError.message);
-    return false;
-  }
-
-  const localIds = new Set(boards.map((b) => b.id));
-  const idsToDelete = (existing ?? [])
-    .map((row) => row.id)
-    .filter((id) => !localIds.has(id));
-
-  if (idsToDelete.length > 0) {
-    const { error: delError } = await supabase
+    const { data: existing, error: fetchError } = await supabase
       .from('moodboards')
-      .delete()
-      .in('id', idsToDelete);
-    if (delError) {
-      console.error('[moodboardService] sync delete removed:', delError.message);
+      .select('id')
+      .eq('user_id', userId);
+
+    if (fetchError) {
+      console.error('[moodboardService] sync fetch ids:', fetchError.message);
       return false;
     }
-  }
 
-  if (boards.length === 0) return true;
+    const localIds = new Set(boards.map((b) => b.id));
+    const idsToDelete = (existing ?? [])
+      .map((row) => row.id)
+      .filter((id) => !localIds.has(id));
 
-  const rows = boards.map((b) => ({
-    id: b.id,
-    user_id: userId,
-    name: b.name,
-    items: b.items,
-    is_paid: b.isPaid,
-    max_materials: b.maxMaterials,
-    visibility: b.visibility ?? DEFAULT_MOODBOARD_VISIBILITY,
-    is_published: b.isPublished ?? false,
-    published_at: b.publishedAt ?? null,
-    updated_at: new Date().toISOString(),
-  }));
+    if (idsToDelete.length > 0) {
+      const { error: delError } = await supabase
+        .from('moodboards')
+        .delete()
+        .in('id', idsToDelete);
+      if (delError) {
+        console.error('[moodboardService] sync delete removed:', delError.message);
+        return false;
+      }
+    }
 
-  const { error: upsertError } = await supabase
-    .from('moodboards')
-    .upsert(rows, { onConflict: 'id' });
+    if (boards.length === 0) return true;
 
-  if (upsertError) {
-    console.error('[moodboardService] sync upsert:', upsertError.message);
+    const rows = boards.map((b) => ({
+      id: b.id,
+      user_id: userId,
+      name: b.name,
+      items: b.items,
+      is_paid: b.isPaid,
+      max_materials: b.maxMaterials,
+      visibility: b.visibility ?? DEFAULT_MOODBOARD_VISIBILITY,
+      is_published: b.isPublished ?? false,
+      published_at: b.publishedAt ?? null,
+      updated_at: new Date().toISOString(),
+    }));
+
+    const { error: upsertError } = await supabase
+      .from('moodboards')
+      .upsert(rows, { onConflict: 'id' });
+
+    if (upsertError) {
+      console.error('[moodboardService] sync upsert:', upsertError.message);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error('[moodboardService] sync upsert:', message);
     return false;
   }
-  return true;
 }
 
 /** 单条 upsert 情绪板 */
@@ -339,6 +345,21 @@ export function publishMoodBoard(board: MoodBoard): MoodBoard {
     visibility: 'public',
     isPublished: true,
     publishedAt: new Date().toISOString(),
+  });
+}
+
+export function applyMoodBoardVisibility(
+  board: MoodBoard,
+  visibility: MoodBoardVisibility
+): MoodBoard {
+  if (visibility === 'public') {
+    return publishMoodBoard({ ...board, visibility: 'public' });
+  }
+  return withDefaultVisibility({
+    ...board,
+    visibility,
+    isPublished: false,
+    publishedAt: undefined,
   });
 }
 

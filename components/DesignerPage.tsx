@@ -74,11 +74,12 @@ const DesignerPage: React.FC<DesignerPageProps> = ({
   onBack,
   onProfileUpdated,
 }) => {
+  const isOwner = mode === 'owner' && viewerId === designerId;
   const [profile, setProfile] = useState<DesignerProfile | null>(null);
   const [publicBoards, setPublicBoards] = useState<MoodBoard[]>([]);
   const [collected, setCollected] = useState<MoodBoard[]>([]);
   const [tab, setTab] = useState<TabKey>('boards');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!isOwner);
   const [saving, setSaving] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editUsername, setEditUsername] = useState('');
@@ -101,37 +102,50 @@ const DesignerPage: React.FC<DesignerPageProps> = ({
     setProfile((prev) => (prev ? { ...prev, avatar: url } : prev));
   };
 
-  const isOwner = mode === 'owner' && viewerId === designerId;
-
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+
+    if (isOwner) {
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
+
+    const loadTimeout = window.setTimeout(() => {
+      if (!cancelled) setLoading(false);
+    }, 10000);
 
     void (async () => {
-      if (isOwner) {
-        const p = await getDesignerProfile(designerId);
-        const cols = await getCollectedMoodboards(designerId);
-        if (!cancelled) {
+      try {
+        if (isOwner) {
+          const [p, cols] = await Promise.all([
+            getDesignerProfile(designerId),
+            getCollectedMoodboards(designerId),
+          ]);
+          if (cancelled) return;
           setProfile(p);
           setPublicBoards(p?.boards ?? []);
           setCollected(cols);
           setEditUsername(resolveDisplayName(p?.company, p?.username));
           setEditBio(p?.bio ?? '');
           setEditAvatar(p?.avatar ?? '');
-          setLoading(false);
-        }
-      } else {
-        const p = await getDesignerProfile(designerId);
-        if (!cancelled) {
+        } else {
+          const p = await getDesignerProfile(designerId);
+          if (cancelled) return;
           setProfile(p);
           setPublicBoards(p?.boards ?? []);
-          setLoading(false);
         }
+      } catch (err) {
+        console.error('[DesignerPage] load failed:', err);
+      } finally {
+        if (!cancelled) setLoading(false);
+        window.clearTimeout(loadTimeout);
       }
     })();
 
     return () => {
       cancelled = true;
+      window.clearTimeout(loadTimeout);
     };
   }, [designerId, isOwner]);
 
