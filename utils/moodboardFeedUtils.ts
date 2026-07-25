@@ -1,6 +1,4 @@
 import type { Material, MoodBoard, MoodBoardItem } from '../types';
-import type { InspirationStory } from '../types/materialDetail';
-import { collectApprovedInspirationStories } from './inspirationFeedUtils';
 
 function spaceDrawingItem(board: MoodBoard): MoodBoardItem | undefined {
   if (board.spaceImage) return undefined;
@@ -125,15 +123,9 @@ export function getMoodboardFeedMaterials(
 
 export type FeedEntry =
   | { kind: 'material'; material: Material; sortKey: number }
-  | { kind: 'moodboard'; board: MoodBoard; sortKey: number }
-  | {
-      kind: 'inspiration';
-      story: InspirationStory;
-      material: Material;
-      sortKey: number;
-    };
+  | { kind: 'moodboard'; board: MoodBoard; sortKey: number };
 
-/** 材料、灵感故事与已发布 Moodboard 混合瀑布流 */
+/** 材料与已发布 Moodboard 混合（按间隔插入 Moodboard，Moodboard 按 published_at 降序） */
 export function buildMixedFeed(
   materials: Material[],
   moodboards: MoodBoard[]
@@ -144,19 +136,15 @@ export function buildMixedFeed(
       (a.publishedAt ? new Date(a.publishedAt).getTime() : 0)
   );
 
-  const inspirations = collectApprovedInspirationStories(materials);
-
   const result: FeedEntry[] = [];
   let boardIdx = 0;
-  let inspirationIdx = 0;
   const interval = Math.max(
     1,
-    Math.min(4, Math.ceil(materials.length / Math.max(1, boards.length + inspirations.length)))
+    Math.min(4, Math.ceil(materials.length / Math.max(1, boards.length)))
   );
 
   materials.forEach((material, index) => {
     result.push({ kind: 'material', material, sortKey: index });
-
     if ((index + 1) % interval === 0 && boardIdx < boards.length) {
       result.push({
         kind: 'moodboard',
@@ -164,17 +152,6 @@ export function buildMixedFeed(
         sortKey: boardIdx,
       });
       boardIdx += 1;
-    }
-
-    if ((index + 1) % (interval + 1) === 0 && inspirationIdx < inspirations.length) {
-      const item = inspirations[inspirationIdx];
-      result.push({
-        kind: 'inspiration',
-        story: item.story,
-        material: item.material,
-        sortKey: inspirationIdx,
-      });
-      inspirationIdx += 1;
     }
   });
 
@@ -185,17 +162,6 @@ export function buildMixedFeed(
       sortKey: boardIdx,
     });
     boardIdx += 1;
-  }
-
-  while (inspirationIdx < inspirations.length) {
-    const item = inspirations[inspirationIdx];
-    result.push({
-      kind: 'inspiration',
-      story: item.story,
-      material: item.material,
-      sortKey: inspirationIdx,
-    });
-    inspirationIdx += 1;
   }
 
   return result;

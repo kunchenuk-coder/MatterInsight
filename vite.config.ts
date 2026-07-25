@@ -7,6 +7,7 @@ import { createUploadMiddleware } from './server/uploadHandler';
 import { createGetUploadUrlMiddleware } from './server/getUploadUrlHandler';
 import { createUploadAssetMiddleware } from './server/uploadAssetHandler';
 import { createGetReadUrlMiddleware } from './server/getReadUrlHandler';
+import { createInpaintMiddleware } from './server/inpaintHandler';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -14,9 +15,19 @@ export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, __dirname, '');
     Object.assign(process.env, env);
 
+    // Mirror server flag → client so only ENABLE_AI_MATERIAL_REPLACEMENT needs setting.
+    // Default false (feature paused for production).
+    const aiMaterialReplacement =
+      env.VITE_ENABLE_AI_MATERIAL_REPLACEMENT ??
+      env.ENABLE_AI_MATERIAL_REPLACEMENT ??
+      'false';
+
     return {
       envDir: __dirname,
       envPrefix: 'VITE_',
+      define: {
+        'import.meta.env.VITE_ENABLE_AI_MATERIAL_REPLACEMENT': JSON.stringify(aiMaterialReplacement),
+      },
       server: {
         port: 3000,
         host: '0.0.0.0',
@@ -51,6 +62,12 @@ export default defineConfig(({ mode }) => {
           name: 'get-read-url-api',
           configureServer(server) {
             server.middlewares.use(createGetReadUrlMiddleware());
+          },
+        },
+        {
+          name: 'inpaint-api',
+          configureServer(server) {
+            server.middlewares.use(createInpaintMiddleware());
           },
         },
       ],

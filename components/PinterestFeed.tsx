@@ -63,44 +63,6 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
   return (
     <div className="columns-2 md:columns-3 lg:columns-4 gap-6 space-y-6 pb-20">
       {feed.map((entry) => {
-        if (entry.kind === 'inspiration') {
-          const { story, material: storyMaterial } = entry;
-          return (
-            <div
-              key={`story-${story.id}`}
-              onClick={() => onSelect(storyMaterial)}
-              className="break-inside-avoid relative group cursor-pointer overflow-hidden rounded-2xl bg-gradient-to-br from-gray-900 to-gray-800 text-white border border-gray-800 shadow-sm hover:shadow-xl transition-all duration-300"
-            >
-              <div className="p-5 sm:p-6">
-                <div className="flex items-center gap-2 mb-3">
-                  <span className="text-[9px] font-black uppercase tracking-[0.2em] text-white/50">
-                    Inspiration
-                  </span>
-                  <span className="text-[9px] bg-white/10 px-2 py-0.5 rounded-full font-bold">
-                    灵感故事
-                  </span>
-                </div>
-                <p className="text-sm leading-relaxed line-clamp-6 text-white/90 mb-4">
-                  {story.text}
-                </p>
-                <div className="flex items-center gap-3 pt-3 border-t border-white/10">
-                  {storyMaterial.image && (
-                    <img
-                      src={storyMaterial.image}
-                      alt={storyMaterial.name}
-                      className="w-10 h-10 rounded-lg object-cover shrink-0"
-                    />
-                  )}
-                  <div className="min-w-0">
-                    <p className="text-xs font-bold truncate">{storyMaterial.name}</p>
-                    <p className="text-[10px] text-white/50 truncate">{storyMaterial.brand}</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          );
-        }
-
         if (entry.kind === 'moodboard') {
           const board = entry.board;
           const cover = getMoodboardCoverImage(board, materials);

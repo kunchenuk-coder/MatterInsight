@@ -42,6 +42,12 @@ import { isQuotaExceededError } from "../utils/moodboardStorage";
 import { uploadImage } from '../services/uploadService';
 import { fetchLocalMaterials, insertLocalMaterial, deleteLocalMaterial } from '../services/localMaterialService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
+import { requestInpaint, createInpaintRequestId } from '../services/inpaintService';
+import { generateLocalSamMask, warmupLocalSam } from '../services/localSamService';
+import {
+  AI_MATERIAL_REPLACEMENT_COMING_SOON_LABEL,
+  isAiMaterialReplacementEnabled,
+} from '../utils/featureFlags';
 import MoodBoardPublishControls from './MoodBoardPublishControls';
 
 const DRAG_LOCAL_MATERIAL_MIME = "application/x-matter-local-material-id";
@@ -49,6 +55,31 @@ const DRAG_LOCAL_MATERIAL_MIME = "application/x-matter-local-material-id";
 type SidebarMaterialFilter = Category | "ALL" | "LOCAL";
 
 const LOCAL_MATERIAL_NAME_PLACEHOLDER = "未命名本地材料";
+
+interface PendingInpaintMaterial {
+  drawingId: string;
+  materialName: string;
+  materialImageUrl: string;
+  materialPrompt: string;
+  sourceImageUrl: string;
+}
+
+interface InpaintMaskPreview extends PendingInpaintMaterial {
+  maskDataUrl: string;
+  overlayDataUrl: string;
+  clickPercent: { xPercent: number; yPercent: number };
+  areaRatio: number;
+}
+
+interface AppliedInpaintState {
+  imageUrl: string;
+  materialName: string;
+  materialPrompt: string;
+}
+
+function buildMaterialPrompt(materialName: string): string {
+  return `${materialName} texture`;
+}
 
 function isLocalBoardMaterial(item: MoodBoardItem): boolean {
   return !!(item.isLocalStorageMaterial ?? item.isLocalOnly ?? item.localMaterialId);
@@ -770,6 +801,43 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   const canvasRef = useRef<HTMLDivElement>(null);
   const canvasLocalUploadRef = useRef<HTMLInputElement>(null);
   const sidebarLocalUploadRef = useRef<HTMLInputElement>(null);
+
+  /** 拖拽重绘：拖入材质后进入点击选区模式，使用本地 SAM 生成蒙版，再提交后端重绘。 */
+  /** Feature flag：默认关闭，不进入 SAM/Inpaint 流程、不调用 Replicate。 */
+  const aiMaterialReplacementEnabled = isAiMaterialReplacementEnabled();
+  const drawingImgRef = useRef<HTMLImageElement>(null);
+  const [isFluxDragging, setIsFluxDragging] = useState(false);
+  const [aiReplacementComingSoon, setAiReplacementComingSoon] = useState<string | null>(null);
+  const [pendingInpaintMaterial, setPendingInpaintMaterial] = useState<PendingInpaintMaterial | null>(null);
+  const [maskPreview, setMaskPreview] = useState<InpaintMaskPreview | null>(null);
+  const [isSamLoading, setIsSamLoading] = useState(false);
+  const [isInpaintLoading, setIsInpaintLoading] = useState(false);
+  /** 同步锁：防止连点 / StrictMode 在 state 更新前发出第二次 /api/inpaint */
+  const isInpaintingRef = useRef(false);
+  const [inpaintError, setInpaintError] = useState<string | null>(null);
+  const [appliedInpaintByDrawing, setAppliedInpaintByDrawing] = useState<Record<string, AppliedInpaintState>>({});
+  const [fluxTags, setFluxTags] = useState<string[]>([]);
+  /** Bounding Box 框选（百分比坐标，相对效果图 bounding box），存在时 SAM 优先使用 Box Prompt */
+  const [selectionBox, setSelectionBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [liveSelectionBox, setLiveSelectionBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const boxDragRef = useRef<{ startXPercent: number; startYPercent: number; imgEl: HTMLImageElement; moved: boolean } | null>(null);
+  const suppressDrawingClickRef = useRef(false);
+  /** Mask 人工修正（类似 PowerPoint 抠图）：Add Area / Remove Area */
+  const [maskEditMode, setMaskEditMode] = useState<'add' | 'remove' | null>(null);
+  const [refinePoints, setRefinePoints] = useState<Array<{ xPercent: number; yPercent: number; label: 0 | 1 }>>([]);
+  const refinePointsRef = useRef(refinePoints);
+  useEffect(() => {
+    refinePointsRef.current = refinePoints;
+  }, [refinePoints]);
+  /** 生成初始 Mask 时的基础 Prompt（自然像素），用于叠加 Add/Remove 点后重新分割 */
+  const inpaintBaseRef = useRef<{
+    naturalWidth: number;
+    naturalHeight: number;
+    clickX?: number;
+    clickY?: number;
+    box?: { x1: number; y1: number; x2: number; y2: number };
+  } | null>(null);
+  const brushDragRef = useRef<{ imgEl: HTMLImageElement; label: 0 | 1; points: Array<{ xPercent: number; yPercent: number }>; moved: boolean } | null>(null);
 
   const [canvasZoom, setCanvasZoom] = useState(1);
   const canvasZoomRef = useRef(1);
@@ -1608,6 +1676,469 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     }
     e.preventDefault();
     e.dataTransfer.dropEffect = "copy";
+  };
+
+  const resolveDraggedMaterialPreview = (
+    e: React.DragEvent
+  ): { name: string; imageUrl: string } | null => {
+    const localId = readDraggedLocalMaterialId(e);
+    if (localId) {
+      const entry = localMaterialsList.find((x) => x.id === localId);
+      if (entry?.imageUrl) {
+        return { name: entry.name || LOCAL_TEMP_DEFAULT_NAME, imageUrl: entry.imageUrl };
+      }
+    }
+    const libraryId = readDraggedLibraryMaterialId(e);
+    if (libraryId) {
+      const mat = materials.find((m) => m.id === libraryId);
+      if (mat?.image) return { name: mat.name, imageUrl: mat.image };
+    }
+    return null;
+  };
+
+  /** 拖拽事件是否携带可用于重绘的材质 */
+  const dragHasMaterialPayload = (e: React.DragEvent): boolean => {
+    const types = Array.from(e.dataTransfer.types || []);
+    return (
+      types.includes(DRAG_MATERIAL_MIME) ||
+      types.includes(DRAG_LOCAL_MATERIAL_MIME) ||
+      types.includes("text/plain")
+    );
+  };
+
+  useEffect(() => {
+    if (!pendingInpaintMaterial) return;
+    void warmupLocalSam().catch(() => {
+      // Model load failures are surfaced when the user clicks to segment.
+    });
+  }, [pendingInpaintMaterial]);
+
+  const getAppliedDrawingImage = useCallback(
+    (drawingId: string, fallbackImageUrl?: string) =>
+      appliedInpaintByDrawing[drawingId]?.imageUrl ?? fallbackImageUrl ?? "",
+    [appliedInpaintByDrawing]
+  );
+
+  /** 将指针位置换算为相对效果图 bounding box 的百分比坐标 */
+  const pointerToDrawingPercent = (
+    clientX: number,
+    clientY: number,
+    imageEl?: HTMLImageElement | null
+  ): { xPercent: number; yPercent: number } | null => {
+    const img = imageEl ?? drawingImgRef.current;
+    if (!img) return null;
+    const rect = img.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    return {
+      xPercent: Math.min(100, Math.max(0, ((clientX - rect.left) / rect.width) * 100)),
+      yPercent: Math.min(100, Math.max(0, ((clientY - rect.top) / rect.height) * 100)),
+    };
+  };
+
+  /** 拖入材质时只高亮效果图，落下后进入点击选区模式。 */
+  const handleDrawingDragOver = (e: React.DragEvent) => {
+    if (!dragHasMaterialPayload(e)) return;
+    // Keep drop target alive even when feature is off (to show "即将上线").
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    if (!aiMaterialReplacementEnabled) return;
+    if (!isFluxDragging) setIsFluxDragging(true);
+  };
+
+  const handleDrawingDragLeave = () => {
+    setIsFluxDragging(false);
+  };
+
+  /** 材料落到效果图后，等待用户点击目标表面再本地分割。 */
+  const handleDrawingDrop = (e: React.DragEvent, drawing: MoodBoardItem) => {
+    if (isFinalMode || isExporting) return;
+    if (!dragHasMaterialPayload(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setIsFluxDragging(false);
+
+    // Feature flag OFF：不进入 SAM / Inpaint，不调用 Replicate。
+    if (!aiMaterialReplacementEnabled) {
+      setAiReplacementComingSoon(AI_MATERIAL_REPLACEMENT_COMING_SOON_LABEL);
+      window.setTimeout(() => setAiReplacementComingSoon(null), 3200);
+      return;
+    }
+
+    const preview = resolveDraggedMaterialPreview(e);
+    if (!preview) return;
+
+    setInpaintError(null);
+    setMaskPreview(null);
+    setPendingInpaintMaterial({
+      drawingId: drawing.id,
+      materialName: preview.name,
+      materialImageUrl: preview.imageUrl,
+      materialPrompt: buildMaterialPrompt(preview.name),
+      sourceImageUrl: getAppliedDrawingImage(drawing.id, drawing.imageUrl),
+    });
+    setFluxTags((prev) => [...prev, "空间重绘", preview.name, "点击选区"]);
+  };
+
+  const cancelInpaintSelection = useCallback(() => {
+    setPendingInpaintMaterial(null);
+    setMaskPreview(null);
+    setIsSamLoading(false);
+    setIsInpaintLoading(false);
+    isInpaintingRef.current = false;
+    setInpaintError(null);
+    setSelectionBox(null);
+    setLiveSelectionBox(null);
+    boxDragRef.current = null;
+    suppressDrawingClickRef.current = false;
+    setMaskEditMode(null);
+    setRefinePoints([]);
+    inpaintBaseRef.current = null;
+    brushDragRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    cancelInpaintSelection();
+    setIsFluxDragging(false);
+    setAppliedInpaintByDrawing({});
+  }, [activeBoard?.id, cancelInpaintSelection]);
+
+  const handleDrawingSelectMask = async (
+    event: React.MouseEvent<HTMLImageElement>,
+    drawing: MoodBoardItem
+  ) => {
+    if (!pendingInpaintMaterial || pendingInpaintMaterial.drawingId !== drawing.id) return;
+    if (isSamLoading || isInpaintLoading) return;
+
+    const imageEl = event.currentTarget;
+    const point = pointerToDrawingPercent(event.clientX, event.clientY, imageEl);
+    if (!point) return;
+
+    const naturalWidth = imageEl.naturalWidth || imageEl.width;
+    const naturalHeight = imageEl.naturalHeight || imageEl.height;
+    const pixelX = (point.xPercent / 100) * naturalWidth;
+    const pixelY = (point.yPercent / 100) * naturalHeight;
+
+    setInpaintError(null);
+    setIsSamLoading(true);
+    // 新的一次分割：清空之前的 Add/Remove 修正点，记录基础 Prompt
+    setMaskEditMode(null);
+    setRefinePoints([]);
+    inpaintBaseRef.current = {
+      naturalWidth,
+      naturalHeight,
+      clickX: pixelX,
+      clickY: pixelY,
+    };
+
+    try {
+      const result = await generateLocalSamMask({
+        imageUrl: pendingInpaintMaterial.sourceImageUrl,
+        clickX: pixelX,
+        clickY: pixelY,
+      });
+      setMaskPreview({
+        ...pendingInpaintMaterial,
+        maskDataUrl: result.maskDataUrl,
+        overlayDataUrl: result.overlayDataUrl,
+        clickPercent: point,
+        areaRatio: result.areaRatio,
+      });
+    } catch (error) {
+      setMaskPreview(null);
+      setInpaintError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSamLoading(false);
+    }
+  };
+
+  /** Box Prompt：用框选矩形（百分比）换算为原图像素后交给本地 SAM */
+  const runSamWithBox = async (
+    imageEl: HTMLImageElement,
+    boxPercent: { x: number; y: number; width: number; height: number }
+  ) => {
+    if (!pendingInpaintMaterial) return;
+    if (isSamLoading || isInpaintLoading) return;
+
+    const naturalWidth = imageEl.naturalWidth || imageEl.width;
+    const naturalHeight = imageEl.naturalHeight || imageEl.height;
+    const box = {
+      x1: (boxPercent.x / 100) * naturalWidth,
+      y1: (boxPercent.y / 100) * naturalHeight,
+      x2: ((boxPercent.x + boxPercent.width) / 100) * naturalWidth,
+      y2: ((boxPercent.y + boxPercent.height) / 100) * naturalHeight,
+    };
+
+    setInpaintError(null);
+    setIsSamLoading(true);
+    // 新的一次分割：清空之前的 Add/Remove 修正点，记录基础 Prompt
+    setMaskEditMode(null);
+    setRefinePoints([]);
+    inpaintBaseRef.current = {
+      naturalWidth,
+      naturalHeight,
+      box,
+    };
+
+    try {
+      const result = await generateLocalSamMask({
+        imageUrl: pendingInpaintMaterial.sourceImageUrl,
+        box,
+      });
+      setMaskPreview({
+        ...pendingInpaintMaterial,
+        maskDataUrl: result.maskDataUrl,
+        overlayDataUrl: result.overlayDataUrl,
+        clickPercent: {
+          xPercent: boxPercent.x + boxPercent.width / 2,
+          yPercent: boxPercent.y + boxPercent.height / 2,
+        },
+        areaRatio: result.areaRatio,
+      });
+    } catch (error) {
+      setMaskPreview(null);
+      setInpaintError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSamLoading(false);
+    }
+  };
+
+  /** 智能选区模式下，在效果图上按下开始框选（不移动图片） */
+  const beginDrawingBoxDrag = (
+    event: React.MouseEvent<HTMLImageElement>,
+    drawing: MoodBoardItem
+  ) => {
+    if (!pendingInpaintMaterial || pendingInpaintMaterial.drawingId !== drawing.id) return;
+    if (isSamLoading || isInpaintLoading || maskPreview) return;
+    const imgEl = event.currentTarget;
+    const start = pointerToDrawingPercent(event.clientX, event.clientY, imgEl);
+    if (!start) return;
+    event.stopPropagation();
+    event.preventDefault();
+    boxDragRef.current = {
+      startXPercent: start.xPercent,
+      startYPercent: start.yPercent,
+      imgEl,
+      moved: false,
+    };
+    setSelectionBox(null);
+    setLiveSelectionBox(null);
+  };
+
+  /** 框选拖拽的移动/松开在 window 上处理，保证鼠标移出图片也能正确结束 */
+  useEffect(() => {
+    if (!pendingInpaintMaterial) return;
+
+    const rectFromDrag = (clientX: number, clientY: number) => {
+      const drag = boxDragRef.current;
+      if (!drag) return null;
+      const cur = pointerToDrawingPercent(clientX, clientY, drag.imgEl);
+      if (!cur) return null;
+      return {
+        x: Math.min(drag.startXPercent, cur.xPercent),
+        y: Math.min(drag.startYPercent, cur.yPercent),
+        width: Math.abs(cur.xPercent - drag.startXPercent),
+        height: Math.abs(cur.yPercent - drag.startYPercent),
+      };
+    };
+
+    const onMove = (e: MouseEvent) => {
+      const drag = boxDragRef.current;
+      if (!drag) return;
+      const rect = rectFromDrag(e.clientX, e.clientY);
+      if (!rect) return;
+      if (rect.width > 1 || rect.height > 1) drag.moved = true;
+      setLiveSelectionBox(rect);
+    };
+
+    const onUp = (e: MouseEvent) => {
+      const drag = boxDragRef.current;
+      if (!drag) return;
+      boxDragRef.current = null;
+      const rect = rectFromDrag(e.clientX, e.clientY);
+      setLiveSelectionBox(null);
+      // 位移过小视为点击，交回既有 Point Click 逻辑（onClick 触发）
+      if (!rect || !drag.moved || rect.width < 1 || rect.height < 1) return;
+      setSelectionBox(rect);
+      suppressDrawingClickRef.current = true;
+      void runSamWithBox(drag.imgEl, rect);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [pendingInpaintMaterial, isSamLoading, isInpaintLoading, maskPreview]);
+
+  /** 叠加当前 Add/Remove 点后重新调用 SAM 生成 Mask（不改变基础 Prompt） */
+  const regenerateMaskWithRefinements = useCallback(
+    async (nextRefinePoints: Array<{ xPercent: number; yPercent: number; label: 0 | 1 }>) => {
+      const base = inpaintBaseRef.current;
+      if (!base || !pendingInpaintMaterial) return;
+
+      setInpaintError(null);
+      setIsSamLoading(true);
+      try {
+        const points = nextRefinePoints.map((p) => ({
+          x: (p.xPercent / 100) * base.naturalWidth,
+          y: (p.yPercent / 100) * base.naturalHeight,
+          label: p.label,
+        }));
+        const result = await generateLocalSamMask({
+          imageUrl: pendingInpaintMaterial.sourceImageUrl,
+          clickX: base.clickX,
+          clickY: base.clickY,
+          box: base.box,
+          points,
+        });
+        setMaskPreview((prev) =>
+          prev
+            ? {
+                ...prev,
+                maskDataUrl: result.maskDataUrl,
+                overlayDataUrl: result.overlayDataUrl,
+                areaRatio: result.areaRatio,
+              }
+            : prev
+        );
+      } catch (error) {
+        setInpaintError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setIsSamLoading(false);
+      }
+    },
+    [pendingInpaintMaterial]
+  );
+
+  /** 编辑模式下点击 Mask：Add=正点(label 1)，Remove=负点(label 0)，随即重算 Mask */
+  const handleMaskEditClick = (
+    event: React.MouseEvent<HTMLImageElement>,
+    drawing: MoodBoardItem
+  ) => {
+    if (!maskEditMode || !maskPreview || maskPreview.drawingId !== drawing.id) return;
+    if (isSamLoading || isInpaintLoading) return;
+    const point = pointerToDrawingPercent(event.clientX, event.clientY, event.currentTarget);
+    if (!point) return;
+    const label: 0 | 1 = maskEditMode === 'add' ? 1 : 0;
+    const next = [...refinePoints, { xPercent: point.xPercent, yPercent: point.yPercent, label }];
+    setRefinePoints(next);
+    void regenerateMaskWithRefinements(next);
+  };
+
+  /** 编辑模式下按下开始涂抹（拖拽采样多个点，松开后一次性重算 Mask） */
+  const beginMaskBrush = (
+    event: React.MouseEvent<HTMLImageElement>,
+    drawing: MoodBoardItem
+  ) => {
+    if (!maskEditMode || !maskPreview || maskPreview.drawingId !== drawing.id) return;
+    if (isSamLoading || isInpaintLoading) return;
+    const imgEl = event.currentTarget;
+    const start = pointerToDrawingPercent(event.clientX, event.clientY, imgEl);
+    if (!start) return;
+    event.stopPropagation();
+    event.preventDefault();
+    brushDragRef.current = {
+      imgEl,
+      label: maskEditMode === 'add' ? 1 : 0,
+      points: [{ xPercent: start.xPercent, yPercent: start.yPercent }],
+      moved: false,
+    };
+  };
+
+  /** 涂抹拖拽的移动/松开在 window 上处理，松开后一次性把采样点交给 SAM */
+  useEffect(() => {
+    if (!maskPreview || !maskEditMode) return;
+
+    const onMove = (e: MouseEvent) => {
+      const drag = brushDragRef.current;
+      if (!drag) return;
+      const cur = pointerToDrawingPercent(e.clientX, e.clientY, drag.imgEl);
+      if (!cur) return;
+      const last = drag.points[drag.points.length - 1];
+      const dist = Math.hypot(cur.xPercent - last.xPercent, cur.yPercent - last.yPercent);
+      if (dist >= 3) {
+        drag.points.push({ xPercent: cur.xPercent, yPercent: cur.yPercent });
+        drag.moved = true;
+      }
+    };
+
+    const onUp = () => {
+      const drag = brushDragRef.current;
+      if (!drag) return;
+      brushDragRef.current = null;
+      // 未移动视为单击，交给 onClick 处理
+      if (!drag.moved) return;
+      suppressDrawingClickRef.current = true;
+      const added = drag.points.map((p) => ({
+        xPercent: p.xPercent,
+        yPercent: p.yPercent,
+        label: drag.label,
+      }));
+      const next = [...refinePointsRef.current, ...added];
+      setRefinePoints(next);
+      void regenerateMaskWithRefinements(next);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [maskPreview, maskEditMode, regenerateMaskWithRefinements]);
+
+  const confirmInpaintSelection = async () => {
+    if (!aiMaterialReplacementEnabled) {
+      setInpaintError(AI_MATERIAL_REPLACEMENT_COMING_SOON_LABEL);
+      return;
+    }
+    if (!maskPreview) return;
+    // Ref lock first — state alone can race on rapid double-clicks.
+    if (isInpaintingRef.current || isInpaintLoading) return;
+    isInpaintingRef.current = true;
+
+    const requestId = createInpaintRequestId();
+    console.log("[inpaint] request start: requestId:", requestId);
+
+    setInpaintError(null);
+    setIsInpaintLoading(true);
+
+    try {
+      const response = await requestInpaint({
+        original_image_url: maskPreview.sourceImageUrl,
+        mask_image_base64: maskPreview.maskDataUrl,
+        material_prompt: maskPreview.materialPrompt,
+        material_image_url: maskPreview.materialImageUrl,
+        request_id: requestId,
+      });
+
+      if (response.success === false) {
+        setInpaintError(response.error);
+        return;
+      }
+
+      const imageUrl = response.imageUrl;
+      setAppliedInpaintByDrawing((prev) => ({
+        ...prev,
+        [maskPreview.drawingId]: {
+          imageUrl,
+          materialName: maskPreview.materialName,
+          materialPrompt: maskPreview.materialPrompt,
+        },
+      }));
+      setFluxTags((prev) => [...prev, maskPreview.materialName, "SAM 蒙版", "Replicate"]);
+      setPendingInpaintMaterial(null);
+      setMaskPreview(null);
+      setSelectionBox(null);
+      setLiveSelectionBox(null);
+      setMaskEditMode(null);
+      setRefinePoints([]);
+      inpaintBaseRef.current = null;
+    } finally {
+      isInpaintingRef.current = false;
+      setIsInpaintLoading(false);
+    }
   };
 
   const applyLocalMaterialToSample = (sampleId: string, localMaterialId: string) => {
@@ -2583,11 +3114,47 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     requestAnimationFrame(() => requestAnimationFrame(() => runScroll(z)));
   };
 
+  /**
+   * Prefer OSS URL for effect images so localStorage never stores huge data: URLs.
+   * Falls back to a compressed data URL only when upload is unavailable.
+   */
+  const resolveEffectImageForBoard = async (effectImageDataUrl: string): Promise<string> => {
+    const compressed = await reencodeDataUrlSameDimensions(
+      effectImageDataUrl,
+      MOODBOARD_IMAGE_QUALITY
+    );
+    if (!compressed.startsWith("data:")) return compressed;
+
+    try {
+      const comma = compressed.indexOf(",");
+      const header = compressed.slice(0, Math.max(0, comma));
+      const mimeMatch = header.match(/^data:([^;]+);/);
+      const mime = mimeMatch?.[1] || "image/jpeg";
+      const binary = atob(compressed.slice(comma + 1));
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      const ext = mime.includes("png") ? "png" : "jpg";
+      const file = new File([bytes], `effect_${Date.now()}.${ext}`, { type: mime });
+      const uploaded = await uploadImage(file, "materials");
+      if (uploaded.isRemote && uploaded.url && !uploaded.url.startsWith("data:")) {
+        return uploaded.url;
+      }
+    } catch (err) {
+      console.warn("[moodboard] effect image OSS upload failed, keeping session data URL:", err);
+    }
+    return compressed;
+  };
+
   /** 仅中央导入效果图（AI 失败或手动跳过），可缩放、可标点、可引线连材质 */
   const placeEffectImageOnly = (effectImageDataUrl: string, remark = "空间效果图") => {
     void (async () => {
-      const img = await reencodeDataUrlSameDimensions(effectImageDataUrl, MOODBOARD_IMAGE_QUALITY);
-      const { width: dw, height: dh } = await measureDataUrlContainedBox(img, EFFECT_DRAWING_MAX_W, EFFECT_DRAWING_MAX_H);
+      const img = await resolveEffectImageForBoard(effectImageDataUrl);
+      const { width: dw, height: dh } = await measureDataUrlContainedBox(
+        // measure works for both data URLs and remote URLs via Image()
+        img,
+        EFFECT_DRAWING_MAX_W,
+        EFFECT_DRAWING_MAX_H
+      );
       setMoodboards((prev) => {
         const board = prev.find((b) => b.id === activeMoodboardId) ?? prev[0];
         if (!board) return prev;
@@ -2622,7 +3189,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     if (!annotations.length) return;
 
     void (async () => {
-      const compressedEffect = await reencodeDataUrlSameDimensions(effectImageDataUrl, MOODBOARD_IMAGE_QUALITY);
+      const compressedEffect = await resolveEffectImageForBoard(effectImageDataUrl);
       const { width: dw, height: dh } = await measureDataUrlContainedBox(
         compressedEffect,
         EFFECT_DRAWING_MAX_W,
@@ -2969,6 +3536,36 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
             ))}
           </div>
         </div>
+        {fluxTags.length > 0 && (
+          <div className="px-6 py-4 border-b shrink-0 bg-[#05050a]">
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-[9px] font-black uppercase tracking-widest text-cyan-400/80">
+                拖拽重绘 · 已应用标签
+              </h4>
+              <button
+                type="button"
+                onClick={() => {
+                  setFluxTags([]);
+                  setAppliedInpaintByDrawing({});
+                  cancelInpaintSelection();
+                }}
+                className="text-[9px] font-bold text-white/30 hover:text-white/60"
+              >
+                清除
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {Array.from(new Set(fluxTags)).map((tag, idx) => (
+                <span
+                  key={`${tag}_${idx}`}
+                  className="px-2.5 py-1 rounded-full bg-cyan-500/10 border border-cyan-400/30 text-[10px] font-bold text-cyan-300"
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="flex-1 overflow-y-auto p-4 space-y-6">
           {/* AI Recommendations Section */}
           {aiRecommendations.length > 0 && (
@@ -3391,6 +3988,13 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               ? localMaterialsList.find((l) => l.id === item.localMaterialId)
               : null;
             const display = isSample ? getCardDisplay(item, mat, localCatalogEntry) : null;
+            const drawingInpaint = isDrawing ? appliedInpaintByDrawing[item.id] : null;
+            const drawingImageSrc = isDrawing
+              ? getAppliedDrawingImage(item.id, item.imageUrl)
+              : item.imageUrl;
+            const drawingSelectionActive =
+              isDrawing && pendingInpaintMaterial?.drawingId === item.id;
+            const drawingMaskPreview = isDrawing && maskPreview?.drawingId === item.id ? maskPreview : null;
             
             return (
               <div 
@@ -3435,6 +4039,10 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                 <div 
                   onMouseDown={(e) => {
                     if (isFinalMode) return;
+                    if (isDrawing && drawingSelectionActive) {
+                      e.stopPropagation();
+                      return;
+                    }
                     if (isDrawing && !panArmed()) e.stopPropagation();
                     handleStartAction(e, item.id, "move");
                   }}
@@ -3474,14 +4082,52 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                   ) : (
                     <>
                       {isDrawing ? (
+                        <>
                         <img
-                          src={item.imageUrl}
+                          ref={drawingImgRef}
+                          src={drawingImageSrc}
                           alt=""
                           draggable={false}
                           onContextMenu={(e) => e.preventDefault()}
-                          className="w-full h-auto rounded-2xl shadow-xl cursor-move pointer-events-auto select-none transition-all touch-none [-webkit-touch-callout:none]"
+                          className={`w-full h-auto rounded-2xl shadow-xl pointer-events-auto select-none transition-all touch-none [-webkit-touch-callout:none] ${
+                            drawingSelectionActive ? 'cursor-crosshair' : 'cursor-move'
+                          }`}
+                          onDragOver={!isFinalMode ? handleDrawingDragOver : undefined}
+                          onDragLeave={!isFinalMode ? handleDrawingDragLeave : undefined}
+                          onDrop={!isFinalMode ? (e) => handleDrawingDrop(e, item) : undefined}
+                          onMouseDown={
+                            drawingSelectionActive && !isSamLoading && !isInpaintLoading
+                              ? (e) => {
+                                  if (drawingMaskPreview) {
+                                    // Mask 编辑模式下按下开始涂抹；非编辑模式忽略
+                                    if (maskEditMode) beginMaskBrush(e, item);
+                                    return;
+                                  }
+                                  beginDrawingBoxDrag(e, item);
+                                }
+                              : undefined
+                          }
+                          onClick={
+                            drawingSelectionActive && !isSamLoading && !isInpaintLoading
+                              ? (e) => {
+                                  e.stopPropagation();
+                                  // 涂抹/框选刚结束时，忽略随后触发的 click
+                                  if (suppressDrawingClickRef.current) {
+                                    suppressDrawingClickRef.current = false;
+                                    return;
+                                  }
+                                  if (drawingMaskPreview) {
+                                    // 已有 Mask 预览：在编辑模式下点击=Add/Remove 一个点
+                                    if (maskEditMode) handleMaskEditClick(e, item);
+                                    return;
+                                  }
+                                  void handleDrawingSelectMask(e, item);
+                                }
+                              : undefined
+                          }
                           onDoubleClick={(e) => {
                             e.stopPropagation();
+                            if (drawingSelectionActive) return;
                             if (isFinalMode || !canvasRef.current) return;
                             if (panArmed()) return;
                             const { x: cx, y: cy } = clientToBoard(e.clientX, e.clientY);
@@ -3517,6 +4163,185 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                             ]);
                           }}
                         />
+                        {(isFluxDragging || drawingSelectionActive || drawingMaskPreview || isSamLoading || isInpaintLoading) && (
+                          <div
+                            className={`absolute inset-0 rounded-2xl pointer-events-none z-[7] transition-all ${
+                              drawingSelectionActive || isSamLoading || isInpaintLoading
+                                ? 'bg-black/20 ring-2 ring-cyan-300/70'
+                                : 'bg-cyan-500/10 ring-1 ring-cyan-300/40'
+                            }`}
+                          />
+                        )}
+                        {drawingSelectionActive && (liveSelectionBox ?? selectionBox) && !drawingMaskPreview && (() => {
+                          const box = (liveSelectionBox ?? selectionBox)!;
+                          return (
+                            <div
+                              className="absolute z-[8] rounded-md border-2 border-cyan-400 bg-cyan-400/15 pointer-events-none"
+                              style={{
+                                left: `${box.x}%`,
+                                top: `${box.y}%`,
+                                width: `${box.width}%`,
+                                height: `${box.height}%`,
+                              }}
+                            />
+                          );
+                        })()}
+                        {drawingMaskPreview && (
+                          <img
+                            src={drawingMaskPreview.overlayDataUrl}
+                            alt=""
+                            draggable={false}
+                            className="absolute inset-0 w-full h-full rounded-2xl pointer-events-none z-[8]"
+                          />
+                        )}
+                        {drawingMaskPreview && refinePoints.map((p, i) => (
+                          <span
+                            key={`refine_${i}`}
+                            className={`absolute z-[9] w-3 h-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow pointer-events-none ${
+                              p.label === 1 ? 'bg-emerald-500' : 'bg-red-500'
+                            }`}
+                            style={{ left: `${p.xPercent}%`, top: `${p.yPercent}%` }}
+                          />
+                        ))}
+                        {aiReplacementComingSoon && isDrawing && (
+                          <div className="absolute left-4 right-4 top-4 z-[11] pointer-events-none">
+                            <div className="self-start inline-flex px-3 py-2 rounded-2xl bg-black/75 text-white text-[11px] font-bold backdrop-blur-md border border-white/15">
+                              {aiReplacementComingSoon}
+                            </div>
+                          </div>
+                        )}
+                        {(drawingSelectionActive || drawingMaskPreview || isSamLoading || isInpaintLoading || drawingInpaint || (inpaintError && drawingSelectionActive)) && (
+                          <div className="absolute left-4 right-4 top-4 z-[9] flex flex-col gap-2 pointer-events-none">
+                            {(drawingSelectionActive || drawingMaskPreview || isSamLoading || isInpaintLoading) && (
+                              <div className="self-start px-3 py-2 rounded-2xl bg-black/70 text-white text-[11px] font-bold backdrop-blur-md border border-white/10">
+                                {isSamLoading
+                                  ? '本地 SAM 正在识别选区...'
+                                  : isInpaintLoading
+                                    ? 'Replicate 正在重绘中...'
+                                    : drawingMaskPreview
+                                      ? maskEditMode === 'add'
+                                        ? '添加区域：点击/涂抹要补进蒙版的位置'
+                                        : maskEditMode === 'remove'
+                                          ? '删除区域：点击/涂抹要移出蒙版的位置'
+                                          : `确认替换区域 · ${(drawingMaskPreview.areaRatio * 100).toFixed(1)}% · 可用 +/- 修正`
+                                      : `已拖入 ${pendingInpaintMaterial?.materialName ?? '材质'}，点击或拖拽框选要替换的表面`}
+                              </div>
+                            )}
+                            {drawingInpaint && !drawingSelectionActive && !drawingMaskPreview && !isInpaintLoading && (
+                              <div className="self-start px-3 py-1.5 rounded-full bg-emerald-500/15 text-emerald-300 text-[10px] font-bold border border-emerald-400/30 backdrop-blur-md">
+                                ✓ 已应用 {drawingInpaint.materialName}
+                              </div>
+                            )}
+                            {inpaintError && (
+                              <div className="self-start px-3 py-2 rounded-2xl bg-red-500/15 text-red-200 text-[11px] font-bold border border-red-300/30 backdrop-blur-md">
+                                {inpaintError}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        {drawingMaskPreview && !isInpaintLoading && (
+                          <div className="absolute left-1/2 bottom-14 -translate-x-1/2 z-[10] flex items-center gap-2 pointer-events-auto">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setMaskEditMode((m) => (m === 'add' ? null : 'add'));
+                              }}
+                              className={`px-3 py-1.5 rounded-full text-[11px] font-bold shadow-lg border ${
+                                maskEditMode === 'add'
+                                  ? 'bg-emerald-500 text-white border-emerald-300'
+                                  : 'bg-white/90 text-black border-transparent'
+                              }`}
+                            >
+                              + 添加区域
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setMaskEditMode((m) => (m === 'remove' ? null : 'remove'));
+                              }}
+                              className={`px-3 py-1.5 rounded-full text-[11px] font-bold shadow-lg border ${
+                                maskEditMode === 'remove'
+                                  ? 'bg-red-500 text-white border-red-300'
+                                  : 'bg-white/90 text-black border-transparent'
+                              }`}
+                            >
+                              - 删除区域
+                            </button>
+                            {refinePoints.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setRefinePoints([]);
+                                  void regenerateMaskWithRefinements([]);
+                                }}
+                                className="px-3 py-1.5 rounded-full bg-black/70 text-white text-[11px] font-bold shadow-lg"
+                              >
+                                清除修正 ({refinePoints.length})
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        {drawingMaskPreview && (
+                          <div className="absolute left-1/2 bottom-4 -translate-x-1/2 z-[10] flex items-center gap-2 pointer-events-auto">
+                            <button
+                              type="button"
+                              disabled={isInpaintLoading}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (isInpaintLoading) return;
+                                setMaskPreview(null);
+                                setInpaintError(null);
+                                setSelectionBox(null);
+                                setLiveSelectionBox(null);
+                                setMaskEditMode(null);
+                                setRefinePoints([]);
+                                inpaintBaseRef.current = null;
+                              }}
+                              className="px-4 py-2 rounded-full bg-white/90 text-black text-[11px] font-bold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              重新框选/点选
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isInpaintLoading}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void confirmInpaintSelection();
+                              }}
+                              className="px-4 py-2 rounded-full bg-cyan-500 text-white text-[11px] font-bold shadow-lg disabled:opacity-70 disabled:cursor-not-allowed"
+                            >
+                              {isInpaintLoading ? "正在生成中..." : "确认替换"}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isInpaintLoading}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (isInpaintLoading) return;
+                                cancelInpaintSelection();
+                              }}
+                              className="px-4 py-2 rounded-full bg-black/70 text-white text-[11px] font-bold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              取消
+                            </button>
+                          </div>
+                        )}
+                        {drawingSelectionActive && !drawingMaskPreview && !isSamLoading && !isInpaintLoading && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              cancelInpaintSelection();
+                            }}
+                            className="absolute right-4 bottom-4 z-[10] px-4 py-2 rounded-full bg-black/70 text-white text-[11px] font-bold shadow-lg pointer-events-auto"
+                          >
+                            退出选区
+                          </button>
+                        )}
+                        </>
                       ) : (display?.imageUrl ?? item.imageUrl ?? localCatalogEntry?.imageUrl ?? mat?.image) ? (
                         <div className="relative w-full overflow-hidden rounded-2xl" style={{ height: isSample ? item.height : undefined }}>
                           <img

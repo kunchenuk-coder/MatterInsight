@@ -26,10 +26,8 @@ interface MaterialMoodTagsSectionProps {
   canAddCustomMoodTags?: boolean;
   canAddBrandMoodTags?: boolean;
   compact?: boolean;
-}
-
-async function incrementMoodTagVector(_materialId: string, _tag: string): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  /** Fired when a designer clicks a mood tag (+1 interaction). */
+  onMoodTagInteract?: (tagName: string, tag: MaterialMoodTag) => void;
 }
 
 export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = ({
@@ -42,6 +40,7 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
   canAddCustomMoodTags = false,
   canAddBrandMoodTags = false,
   compact = false,
+  onMoodTagInteract,
 }) => {
   const [tags, setTags] = useState(materialMoodTagsSorted(moodTags));
   const [bubbles, setBubbles] = useState<BubbleBurst[]>([]);
@@ -102,8 +101,9 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
   const handleTagClick = (tagName: string, event: React.MouseEvent<HTMLButtonElement>) => {
     if (!isDesignerInteractive) return;
     spawnBubble(tagName, event);
+    const target = tags.find((t) => t.tag === tagName);
     commitTags(tags.map((t) => (t.tag === tagName ? { ...t, count: t.count + 1 } : t)));
-    void incrementMoodTagVector(materialId, tagName);
+    if (target) onMoodTagInteract?.(tagName, target);
   };
 
   const handleAddTag = () => {

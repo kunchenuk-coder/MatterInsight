@@ -56,8 +56,8 @@ function persistLocalDeviceSession(sessionId: string, deviceType: DeviceType): v
 async function fetchDeviceSessionRow(
   userId: string,
   deviceType: DeviceType
-): Promise<DeviceSessionRow | null> {
-  if (!isSupabaseConfigured()) return null;
+): Promise<{ row: DeviceSessionRow | null; failed: boolean }> {
+  if (!isSupabaseConfigured()) return { row: null, failed: false };
 
   const { data, error } = await getSupabase()
     .from('user_device_sessions')
@@ -67,10 +67,10 @@ async function fetchDeviceSessionRow(
     .maybeSingle();
 
   if (error) {
-    console.error('[deviceSessionService] fetch:', error.message);
-    return null;
+    console.warn('[deviceSessionService] fetch:', error.message);
+    return { row: null, failed: true };
   }
-  return data as DeviceSessionRow | null;
+  return { row: data as DeviceSessionRow | null, failed: false };
 }
 
 /**
@@ -85,6 +85,9 @@ export async function registerDeviceSession(
   const deviceType = detectDeviceType();
   const sessionId = generateSessionId();
   const tokenFingerprint = fingerprintAccessToken(accessToken);
+
+  // 先写本地，避免 upsert 触发 Realtime 时 localId 尚未更新而被误判顶号
+  persistLocalDeviceSession(sessionId, deviceType);
 
   const { error } = await getSupabase()
     .from('user_device_sessions')
@@ -101,10 +104,10 @@ export async function registerDeviceSession(
 
   if (error) {
     console.error('[deviceSessionService] register:', error.message);
+    clearLocalDeviceSession();
     return false;
   }
 
-  persistLocalDeviceSession(sessionId, deviceType);
   return true;
 }
 
@@ -114,7 +117,7 @@ export async function removeDeviceSession(userId: string): Promise<void> {
 
   const deviceType = getLocalDeviceType() ?? detectDeviceType();
   const localId = getLocalDeviceSessionId();
-  const row = await fetchDeviceSessionRow(userId, deviceType);
+  const { row, failed } = await fetchDeviceSessionRow(userId, deviceType);
   if (!row) return;
   if (localId && row.session_id !== localId) return;
 
@@ -132,16 +135,24 @@ export async function removeDeviceSession(userId: string): Promise<void> {
 
 /**
  * 校验本机 session_id 是否仍为库中有效会话。
+ * 网络/RLS 查询失败时不踢人；本地指纹丢失时尝试静默补登记。
  */
 export async function validateDeviceSession(userId: string): Promise<boolean> {
   if (!isSupabaseConfigured() || !userId) return true;
 
   const deviceType = getLocalDeviceType() ?? detectDeviceType();
   const localId = getLocalDeviceSessionId();
-  if (!localId) return false;
+  const { row, failed } = await fetchDeviceSessionRow(userId, deviceType);
 
-  const row = await fetchDeviceSessionRow(userId, deviceType);
-  if (!row) return false;
+  if (failed) return true;
+
+  const { data: sess } = await getSupabase().auth.getSession();
+  const accessToken = sess.session?.access_token ?? null;
+
+  if (!localId || !row) {
+    return registerDeviceSession(userId, accessToken);
+  }
+
   return row.session_id === localId;
 }
 
@@ -156,7 +167,9 @@ export async function ensureDeviceSessionOnRestore(
 
   const deviceType = detectDeviceType();
   const localId = getLocalDeviceSessionId();
-  const row = await fetchDeviceSessionRow(userId, deviceType);
+  const { row, failed } = await fetchDeviceSessionRow(userId, deviceType);
+
+  if (failed) return true;
 
   if (!localId) {
     return registerDeviceSession(userId, accessToken);
@@ -196,9 +209,19 @@ export function subscribeDeviceSessionGuard(
         const row = payload.new as DeviceSessionRow;
         if (row.device_type !== deviceType) return;
         const localId = getLocalDeviceSessionId();
-        if (!localId || row.session_id !== localId) {
-          onKicked();
-        }
+        if (row.session_id === localId) return;
+
+        void (async () => {
+          const { data: sess } = await getSupabase().auth.getSession();
+          const fp = fingerprintAccessToken(sess.session?.access_token);
+          if (fp && fp === row.access_token) {
+            persistLocalDeviceSession(row.session_id, row.device_type);
+            return;
+          }
+          if (!localId || row.session_id !== localId) {
+            onKicked();
+          }
+        })();
       }
     )
     .on(

@@ -19,6 +19,7 @@ import {
   hasUserRatedMaterial,
   submitMaterialEvaluation,
 } from '../services/materialEvaluationService';
+import useMaterialEventLog from '../hooks/useMaterialEventLog';
 
 interface MaterialDetailProps {
   material: Material;
@@ -61,6 +62,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
   );
   const [hasSubmittedRating, setHasSubmittedRating] = useState(false);
   const supplierViewer = isSupplierUser(user);
+  const { logEventSafe } = useMaterialEventLog(user?.id);
   const permissions = useMemo(
     () =>
       resolveMaterialDetailPermissions({
@@ -89,14 +91,29 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
   const persistToLibrary = useCallback(
     (statusLabel: 'draft' | '已发布') => {
       const humanDna = humanDnaSnapshot();
+      const nextStatus =
+        statusLabel === 'draft'
+          ? ('draft' as MaterialStatus)
+          : MaterialStatus.PUBLISHED;
       const updated = buildMaterialDataPayload(
-        { ...material, status: statusLabel === 'draft' ? material.status : MaterialStatus.PUBLISHED },
+        { ...material, status: nextStatus },
         humanDna
       );
       onMaterialUpdated?.(updated);
       return updated;
     },
     [humanDnaSnapshot, material, onMaterialUpdated]
+  );
+
+  const handleMoodTagInteract = useCallback(
+    (tagName: string, tag: { is_custom?: boolean; is_brand_official?: boolean }) => {
+      logEventSafe(material.id, 'TAG_MOOD_X2', {
+        tag: tagName,
+        is_custom: tag.is_custom,
+        is_brand_official: tag.is_brand_official,
+      });
+    },
+    [logEventSafe, material.id]
   );
 
   const showToast = (message: string, tone: 'success' | 'error') => {
@@ -332,8 +349,8 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
         />
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 lg:gap-8">
-        {/* Left: Info + MOOD */}
-        <div className="lg:col-span-5 flex flex-col gap-4 sm:gap-5 order-1">
+        {/* 1–2. Material information */}
+        <div className="lg:col-span-5 order-1 lg:row-start-1">
           <div className="space-y-4 sm:space-y-5">
             <div>
               <h1 className="text-2xl sm:text-3xl font-bold mb-1">{material.name}</h1>
@@ -407,7 +424,34 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
               </div>
             )}
           </div>
+        </div>
 
+        {/* Right column: overall rating + inspiration story (material detail only) */}
+        <div className="lg:col-span-7 lg:col-start-6 lg:row-start-1 lg:row-span-2 order-2 flex flex-col gap-4 sm:gap-5">
+          <MaterialEvaluationsSection
+            evaluations={evaluations}
+            readOnly={permissions.evaluationsReadOnly}
+            showAggregateLabel={permissions.showAggregateEvaluations}
+            interactive={permissions.canUseEvaluationSliders}
+            hasSubmitted={hasSubmittedRating}
+            onSubmitRating={handleSubmitEvaluation}
+          />
+          <MaterialInspirationStoriesSection
+            stories={inspirationStories}
+            onStoriesChange={handleInspirationStoriesChange}
+            user={user}
+            isPublicView={isPublicView}
+            materialId={material.id}
+            material={material}
+            canSubmitDesignerStory={permissions.canSubmitDesignerStory}
+            canSubmitBrandStory={permissions.canSubmitBrandStory}
+            materialSupplierId={material.supplierId}
+            persistBrandStories={permissions.canSubmitBrandStory && isManageMode}
+          />
+        </div>
+
+        {/* MOOD tags — remaining content */}
+        <div className="lg:col-span-5 order-3 lg:row-start-2">
           <MaterialMoodTagsSection
             moodTags={moodTags}
             onMoodTagsChange={
@@ -421,35 +465,11 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
             interactive={permissions.canInteractMoodTags}
             canAddCustomMoodTags={permissions.canAddCustomMoodTags}
             canAddBrandMoodTags={permissions.canAddBrandMoodTags}
+            onMoodTagInteract={permissions.canInteractMoodTags ? handleMoodTagInteract : undefined}
             compact
           />
         </div>
-
-        {/* Right: Evaluations only */}
-        <div className="lg:col-span-7 flex flex-col gap-4 sm:gap-5 order-2">
-          <MaterialEvaluationsSection
-            evaluations={evaluations}
-            readOnly={permissions.evaluationsReadOnly}
-            showAggregateLabel={permissions.showAggregateEvaluations}
-            interactive={permissions.canUseEvaluationSliders}
-            hasSubmitted={hasSubmittedRating}
-            onSubmitRating={handleSubmitEvaluation}
-          />
         </div>
-        </div>
-
-        <MaterialInspirationStoriesSection
-          stories={inspirationStories}
-          onStoriesChange={handleInspirationStoriesChange}
-          user={user}
-          isPublicView={isPublicView}
-          materialId={material.id}
-          material={material}
-          canSubmitDesignerStory={permissions.canSubmitDesignerStory}
-          canSubmitBrandStory={permissions.canSubmitBrandStory}
-          materialSupplierId={material.supplierId}
-          persistBrandStories={permissions.canSubmitBrandStory && isManageMode}
-        />
 
         {isManageMode && (
           <div className="mt-6 pt-5 border-t border-gray-100 flex justify-end">

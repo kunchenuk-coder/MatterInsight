@@ -2,7 +2,12 @@ import type { MoodBoard, MoodBoardItem } from "../types";
 import { dataUrlByteSize } from "./imageCompression";
 
 const DRAFT_CACHE_PREFIX = "matter_insight_mb_draft_";
-const LARGE_DATA_URL_BYTES = 120 * 1024;
+/** Soft cap for localStorage moodboard payloads (bytes of JSON string). */
+export const LOCALSTORAGE_PAYLOAD_MAX_BYTES = 500 * 1024;
+
+function isDataUrl(value: unknown): value is string {
+  return typeof value === "string" && value.startsWith("data:");
+}
 
 function isLocalBoardItem(item: MoodBoardItem): boolean {
   return !!(item.isLocalStorageMaterial ?? item.isLocalOnly);
@@ -22,12 +27,23 @@ export function clearMoodboardDraftCaches(): void {
   }
 }
 
-/** 配额不足时瘦身情绪板 payload，避免反复写入失败 */
+/**
+ * Strip heavy / binary fields before writing moodboards to localStorage.
+ * Keeps http(s) URLs; drops data: URLs, mask base64, and duplicate snapshots.
+ */
 export function pruneMoodboardsForQuota(boards: MoodBoard[]): MoodBoard[] {
   return boards.map((board) => ({
     ...board,
     items: board.items.map((item) => {
       const next: MoodBoardItem = { ...item };
+
+      // Never persist inline images / masks in localStorage.
+      if (isDataUrl(next.imageUrl)) {
+        delete next.imageUrl;
+      }
+      if (isDataUrl(next.snapshotImageUrl)) {
+        delete next.snapshotImageUrl;
+      }
       if (
         next.snapshotImageUrl &&
         next.imageUrl &&
@@ -35,16 +51,38 @@ export function pruneMoodboardsForQuota(boards: MoodBoard[]): MoodBoard[] {
       ) {
         delete next.snapshotImageUrl;
       }
-      if (isLocalBoardItem(next) && next.imageUrl && dataUrlByteSize(next.imageUrl) > LARGE_DATA_URL_BYTES) {
+
+      // Extra safety for local-only cards that somehow still carry large strings.
+      if (
+        isLocalBoardItem(next) &&
+        next.imageUrl &&
+        dataUrlByteSize(next.imageUrl) > 32 * 1024
+      ) {
         delete next.imageUrl;
         delete next.snapshotImageUrl;
       }
+
       return next;
     }),
   }));
 }
 
-/** 按体积从大到小剥离效果图 data URL，直到能写入或无可剥 */
+/** Lightweight meta-only boards (no item payloads) for last-resort persistence. */
+export function toMoodboardMetaOnly(boards: MoodBoard[]): MoodBoard[] {
+  return boards.map((b) => ({
+    id: b.id,
+    name: b.name,
+    items: [],
+    isPaid: b.isPaid,
+    maxMaterials: b.maxMaterials,
+    visibility: b.visibility,
+    isPublished: b.isPublished,
+    publishedAt: b.publishedAt,
+    ownerId: b.ownerId,
+  }));
+}
+
+/** 按体积从大到小剥离效果图 URL（含残留 data URL），直到能写入或无可剥 */
 export function stripLargestDrawingImages(
   boards: MoodBoard[],
   maxStrip = 3
@@ -53,7 +91,11 @@ export function stripLargestDrawingImages(
   for (const b of boards) {
     for (const i of b.items) {
       if (i.type === "drawing" && i.imageUrl) {
-        entries.push({ boardId: b.id, itemId: i.id, size: dataUrlByteSize(i.imageUrl) });
+        entries.push({
+          boardId: b.id,
+          itemId: i.id,
+          size: dataUrlByteSize(i.imageUrl),
+        });
       }
     }
   }
@@ -65,7 +107,11 @@ export function stripLargestDrawingImages(
     ...b,
     items: b.items.map((i) =>
       stripIds.has(i.id)
-        ? { ...i, imageUrl: undefined, remark: i.remark || "效果图（已释放缓存以节省空间）" }
+        ? {
+            ...i,
+            imageUrl: undefined,
+            remark: i.remark || "效果图（已释放缓存以节省空间）",
+          }
         : i
     ),
   }));
@@ -75,4 +121,13 @@ export function isQuotaExceededError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const e = err as { name?: string; code?: number };
   return e.name === "QuotaExceededError" || e.code === 22;
+}
+
+/** Estimate JSON payload size in bytes (UTF-16-ish string length ≈ bytes for ASCII-heavy JSON). */
+export function estimateJsonBytes(data: unknown): number {
+  try {
+    return JSON.stringify(data).length;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
 }

@@ -1,6 +1,12 @@
 
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { User, Material, Category, PendingMaterial, SampleRequest, MaterialStatus } from '../types';
+import { fetchReadUrlsForObjectKeys, resolveUrlFromMap } from '../services/assetReadUrlService';
+import { parseOssObjectKey } from '../utils/parseOssObjectKey';
+import {
+  fetchDesignersForAdmin,
+  type AdminDesignerRow,
+} from '../services/profileService';
 
 interface AdminDashboardProps {
   user: User;
@@ -25,13 +31,71 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [viewingSupplierProducts, setViewingSupplierProducts] = useState<string | null>(null);
   const [viewingPendingMaterial, setViewingPendingMaterial] = useState<PendingMaterial | null>(null);
   const [viewingVerificationDoc, setViewingVerificationDoc] = useState<User | null>(null);
+  const [verificationDocDisplayUrl, setVerificationDocDisplayUrl] = useState('');
+  const [verificationDocLoading, setVerificationDocLoading] = useState(false);
   const [auditAction, setAuditAction] = useState<{ id: string, type: 'APPROVE' | 'REJECT' } | null>(null);
   const [auditComment, setAuditComment] = useState('');
+  const [designers, setDesigners] = useState<AdminDesignerRow[]>([]);
+  const [designersLoading, setDesignersLoading] = useState(false);
 
-  const designers = [
-    { id: 'd1', name: '陈设计师', points: 850, transactions: 12, income: 2500, status: 'Active' },
-    { id: 'd2', name: '李木子', points: 420, transactions: 5, income: 1200, status: 'Active' }
-  ];
+  const loadDesigners = useCallback(async () => {
+    setDesignersLoading(true);
+    try {
+      const rows = await fetchDesignersForAdmin();
+      setDesigners(rows);
+    } finally {
+      setDesignersLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (subTab === 'DESIGNERS') {
+      void loadDesigners();
+    }
+  }, [subTab, loadDesigners]);
+
+  const openVerificationDoc = async (req: User) => {
+    setViewingVerificationDoc(req);
+    setVerificationDocDisplayUrl('');
+    const stored = req.verificationDoc?.trim();
+    if (!stored) return;
+
+    const key = parseOssObjectKey(stored);
+    if (!key && (stored.startsWith('data:') || stored.startsWith('http'))) {
+      setVerificationDocDisplayUrl(stored);
+      return;
+    }
+
+    setVerificationDocLoading(true);
+    try {
+      const urlMap = await fetchReadUrlsForObjectKeys([key ?? stored]);
+      const resolved = resolveUrlFromMap(stored, key, urlMap);
+      setVerificationDocDisplayUrl(resolved);
+    } finally {
+      setVerificationDocLoading(false);
+    }
+  };
+
+  const closeVerificationDoc = () => {
+    setViewingVerificationDoc(null);
+    setVerificationDocDisplayUrl('');
+    setVerificationDocLoading(false);
+  };
+
+  const formatLastActive = (iso: string | null) => {
+    if (!iso) return '—';
+    try {
+      return new Date(iso).toLocaleString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    } catch {
+      return '—';
+    }
+  };
 
   // Derive total income from library points needed or simulate based on actual interactions
   const totalClicks = library.reduce((acc, m) => acc + (m.clicks || 0), 0);
@@ -134,33 +198,65 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                  <tr className="bg-gray-50 border-b text-[10px] font-black uppercase text-gray-400 tracking-widest">
                    <th className="p-6">注册名</th>
                    <th className="p-6">剩余积分</th>
-                   <th className="p-6">交易总额</th>
+                   <th className="p-6">粉丝 / 关注</th>
                    <th className="p-6">最后活跃</th>
                    <th className="p-6 text-right">管理操作</th>
                  </tr>
                </thead>
                <tbody>
-                 {designers.map(d => (
+                 {designersLoading ? (
+                   <tr>
+                     <td colSpan={5} className="p-16 text-center text-gray-400 text-sm font-medium">
+                       正在加载设计师数据…
+                     </td>
+                   </tr>
+                 ) : designers.length === 0 ? (
+                   <tr>
+                     <td colSpan={5} className="p-16 text-center text-gray-400 text-sm">
+                       暂无已注册设计师
+                     </td>
+                   </tr>
+                 ) : (
+                 designers.map(d => (
                    <tr key={d.id} className="border-b hover:bg-gray-50 transition-colors">
                      <td className="p-6">
                         <p className="font-bold">{d.name}</p>
-                        <p className="text-[10px] text-gray-400">designer_{d.id}@mail.com</p>
+                        <p className="text-[10px] text-gray-400 break-all">{d.email}</p>
                      </td>
                      <td className="p-6 font-black">{d.points}</td>
-                     <td className="p-6 font-black">¥ {d.income}</td>
-                     <td className="p-6 text-xs text-gray-400">2024-05-18 14:22</td>
+                     <td className="p-6 font-black tabular-nums">
+                       {d.followersCount} / {d.followingCount}
+                     </td>
+                     <td className="p-6 text-xs text-gray-400">{formatLastActive(d.lastActive)}</td>
                      <td className="p-6 text-right space-x-4">
                        <button className="text-xs font-bold text-blue-600 hover:underline">对话记录</button>
                        <button className="text-xs font-bold text-red-500 hover:underline">禁言评论</button>
                        <button className="text-xs font-bold bg-black text-white px-3 py-1 rounded-lg">修改积分</button>
                      </td>
                    </tr>
-                 ))}
+                 ))
+                 )}
                </tbody>
              </table>
              <div className="p-8 bg-gray-50 border-t flex justify-between items-center">
                <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">设计师总数: {designers.length} 位</p>
-               <button onClick={() => exportCSV(designers, 'designers_report.csv')} className="bg-white border px-6 py-2 rounded-xl text-xs font-bold shadow-sm">导出 Excel 数据表</button>
+               <button
+                 onClick={() =>
+                   exportCSV(
+                     designers.map((d) => ({
+                       ID: d.id,
+                       注册名: d.name,
+                       邮箱: d.email,
+                       剩余积分: d.points,
+                       粉丝数: d.followersCount,
+                       关注数: d.followingCount,
+                       最后活跃: formatLastActive(d.lastActive),
+                     })),
+                     'designers_report.csv'
+                   )
+                 }
+                 className="bg-white border px-6 py-2 rounded-xl text-xs font-bold shadow-sm"
+               >导出 Excel 数据表</button>
              </div>
           </div>
         )}
@@ -432,7 +528,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                      {req.verificationDoc ? (
                        <button
                          type="button"
-                         onClick={() => setViewingVerificationDoc(req)}
+                         onClick={() => void openVerificationDoc(req)}
                          className="text-xs font-bold text-blue-600 hover:underline"
                        >
                          查看证件大图
@@ -484,7 +580,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                      <td className="p-6 font-black">{req.registeredPhone}</td>
                      <td className="p-6">
                         <button 
-                          onClick={() => setViewingVerificationDoc(req)}
+                          onClick={() => void openVerificationDoc(req)}
                           className="text-xs font-bold text-blue-600 hover:underline"
                         >
                           查看证件大图
@@ -514,13 +610,25 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* Verification Doc Modal */}
       {viewingVerificationDoc && (
-        <div className="fixed inset-0 bg-black/90 backdrop-blur-xl z-[200] flex items-center justify-center p-6" onClick={() => setViewingVerificationDoc(null)}>
+        <div className="fixed inset-0 bg-black/90 backdrop-blur-xl z-[200] flex items-center justify-center p-6" onClick={closeVerificationDoc}>
           <div className="max-w-4xl w-full" onClick={e => e.stopPropagation()}>
             <div className="flex justify-between items-center mb-4 text-white">
-              <h3 className="text-xl font-bold">{viewingVerificationDoc.company} - 认证证件</h3>
-              <button onClick={() => setViewingVerificationDoc(null)} className="text-3xl">✕</button>
+              <h3 className="text-xl font-bold">{viewingVerificationDoc.company || viewingVerificationDoc.email} - 认证证件</h3>
+              <button type="button" onClick={closeVerificationDoc} className="text-3xl">✕</button>
             </div>
-            <img src={viewingVerificationDoc.verificationDoc} className="w-full h-auto rounded-2xl shadow-2xl border border-white/10" alt="verification doc" />
+            {verificationDocLoading ? (
+              <div className="py-24 text-center text-white/70 text-sm font-medium">正在加载证件图片…</div>
+            ) : verificationDocDisplayUrl ? (
+              <img
+                src={verificationDocDisplayUrl}
+                className="w-full h-auto rounded-2xl shadow-2xl border border-white/10"
+                alt="verification doc"
+              />
+            ) : (
+              <div className="py-24 text-center text-white/60 text-sm">
+                无法加载证件图片，请确认材料商已上传且 OSS 读取配置正常
+              </div>
+            )}
           </div>
         </div>
       )}

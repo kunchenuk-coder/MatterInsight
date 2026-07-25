@@ -1,5 +1,6 @@
 import type { User, UserRole, DbRole } from '../types';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
+import { resolveDesignerDisplayName } from '../utils/profileDisplayName';
 
 export type { DbRole };
 
@@ -214,7 +215,90 @@ export async function updateDesignerProfile(
   return { ok: true };
 }
 
+/** 待审核供应商：已提交证件且尚未通过认证（排除 is_verified / status=approved） */
 export async function fetchVerificationRequestsForAdmin(): Promise<User[]> {
-  const rows = await fetchPendingSuppliers();
-  return rows.map(profileRowToVerificationUser);
+  if (!isSupabaseConfigured()) return [];
+
+  const { data, error } = await getSupabase()
+    .from('profiles')
+    .select(PROFILE_COLUMNS)
+    .eq('role', 'supplier')
+    .eq('is_verified', false)
+    .not('verification_doc_url', 'is', null)
+    .order('email', { ascending: true });
+
+  if (error) {
+    console.error('[profileService] fetchVerificationRequestsForAdmin:', error.message);
+    return [];
+  }
+
+  return (data ?? [])
+    .filter((row) => row.is_verified !== true && row.status !== 'approved')
+    .map((row) => profileRowToVerificationUser(row as ProfileRow));
+}
+
+/** Admin 设计师管理：来自 profiles 的真实注册数据 + 社交统计 */
+export interface AdminDesignerRow {
+  id: string;
+  name: string;
+  email: string;
+  points: number;
+  followersCount: number;
+  followingCount: number;
+  lastActive: string | null;
+}
+
+export async function fetchDesignersForAdmin(): Promise<AdminDesignerRow[]> {
+  if (!isSupabaseConfigured()) return [];
+
+  const { data, error } = await getSupabase()
+    .from('profiles')
+    .select('id, email, role, username, company, points, updated_at, created_at')
+    .eq('role', 'designer')
+    .order('updated_at', { ascending: false, nullsFirst: false });
+
+  if (error) {
+    console.error('[profileService] fetchDesignersForAdmin:', error.message);
+    return [];
+  }
+
+  const rows = data ?? [];
+  const enriched = await Promise.all(
+    rows.map(async (row) => {
+      let followersCount = 0;
+      let followingCount = 0;
+
+      const { data: statsData, error: statsError } = await getSupabase().rpc(
+        'designer_social_stats',
+        { p_designer_id: row.id }
+      );
+
+      if (!statsError && statsData) {
+        const statsRow = Array.isArray(statsData) ? statsData[0] : statsData;
+        followersCount = Number(statsRow?.followers_count ?? 0);
+        followingCount = Number(statsRow?.following_count ?? 0);
+      }
+
+      const lastActive =
+        (row.updated_at as string | null) ??
+        (row.created_at as string | null) ??
+        null;
+
+      return {
+        id: row.id as string,
+        name: resolveDesignerDisplayName({
+          company: row.company as string | null,
+          username: row.username as string | null,
+          email: row.email as string,
+        }),
+        email: row.email as string,
+        points: Number(row.points ?? 0),
+        followersCount,
+        followingCount,
+        lastActive,
+      };
+    })
+  );
+
+  return enriched;
 }

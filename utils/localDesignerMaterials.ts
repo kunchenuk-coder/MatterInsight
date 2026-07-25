@@ -50,7 +50,28 @@ export function saveLocalDesignerMaterials(
   items: LocalTemporaryMaterial[]
 ): void {
   if (!designerId) return;
-  localStorage.setItem(storageKey(designerId), JSON.stringify(items));
+  // Never persist inline base64 material images in localStorage.
+  const light = items.map((item) => {
+    if (typeof item.imageUrl === "string" && item.imageUrl.startsWith("data:")) {
+      const { imageUrl: _drop, ...rest } = item;
+      return { ...rest, imageUrl: "" } as LocalTemporaryMaterial;
+    }
+    return item;
+  }).filter((item) => !!item.imageUrl);
+
+  const json = JSON.stringify(light);
+  console.log("storage payload size:", json.length, "key:", storageKey(designerId));
+  if (json.length > 500 * 1024) {
+    console.warn("Skipped localStorage save because payload too large", {
+      key: storageKey(designerId),
+      size: json.length,
+    });
+    throw Object.assign(new Error("Payload too large for localStorage"), {
+      name: "QuotaExceededError",
+      code: 22,
+    });
+  }
+  localStorage.setItem(storageKey(designerId), json);
 }
 
 export function createLocalTemporaryMaterial(

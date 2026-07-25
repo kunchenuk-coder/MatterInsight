@@ -16,9 +16,12 @@ import AdminDashboard from './components/AdminDashboard';
 import RechargeModal from './components/RechargeModal';
 import {
   clearMoodboardDraftCaches,
+  estimateJsonBytes,
   isQuotaExceededError,
+  LOCALSTORAGE_PAYLOAD_MAX_BYTES,
   pruneMoodboardsForQuota,
   stripLargestDrawingImages,
+  toMoodboardMetaOnly,
 } from './utils/moodboardStorage';
 import { isSupabaseConfigured } from './services/supabaseClient';
 import { restoreSession, signOut, onAuthStateChange } from './services/authService';
@@ -169,6 +172,18 @@ const App: React.FC = () => {
   const saveToLocal = (key: string, data: unknown, designerUserId?: string) => {
     const storageKey = designerUserId ? designerStorageKey(designerUserId, key) : `matter_insight_${key}`;
     const write = (payload: unknown) => {
+      const size = estimateJsonBytes(payload);
+      console.log("storage payload size:", size, "key:", storageKey);
+      if (size > LOCALSTORAGE_PAYLOAD_MAX_BYTES) {
+        console.warn(
+          "Skipped localStorage save because payload too large",
+          { key: storageKey, size, max: LOCALSTORAGE_PAYLOAD_MAX_BYTES }
+        );
+        throw Object.assign(new Error("Payload too large for localStorage"), {
+          name: "QuotaExceededError",
+          code: 22,
+        });
+      }
       localStorage.setItem(storageKey, JSON.stringify(payload));
     };
 
@@ -208,17 +223,7 @@ const App: React.FC = () => {
         );
         if (key === 'moodboards' && designerUserId) {
           try {
-            const metaOnly = (payload as MoodBoard[]).map((b) => ({
-              id: b.id,
-              name: b.name,
-              items: [],
-              isPaid: b.isPaid,
-              maxMaterials: b.maxMaterials,
-              visibility: b.visibility,
-              isPublished: b.isPublished,
-              publishedAt: b.publishedAt,
-            }));
-            write(metaOnly);
+            write(toMoodboardMetaOnly(payload as MoodBoard[]));
           } catch {
             /* 完全跳过，不阻断渲染 */
           }
@@ -1092,21 +1097,25 @@ const App: React.FC = () => {
   };
 
   const handleVerifySupplier = async (userId: string) => {
-    setVerificationRequests(prev => prev.filter(u => u.id !== userId));
-    setVerifiedUserIds(prev => [...prev, userId]);
-    
     if (isSupabaseConfigured()) {
-      await approveSupplier(userId);
+      const ok = await approveSupplier(userId);
+      if (!ok) {
+        alert('认证状态写入失败，请重试');
+        void refreshVerificationRequestsFromCloud();
+        return;
+      }
+    } else {
+      setVerifiedUserIds((prev) => [...prev, userId]);
     }
-    
-    // Add notification for the user
+
+    setVerificationRequests((prev) => prev.filter((u) => u.id !== userId));
+
     addNotification(userId, '认证通过', '恭喜！您的供应商认证申请已通过，现在可以发布材料并接收询价了。', 'AUDIT');
-    
-    // If the current user is the one being verified, update their state immediately
+
     if (user && user.id === userId) {
-      setUser({ ...user, isVerified: true });
+      setUser({ ...user, isVerified: true, accountStatus: 'approved' });
     }
-    
+
     alert('供应商认证已通过！');
   };
 

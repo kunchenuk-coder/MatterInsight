@@ -17,6 +17,10 @@
     "api/get-read-url.ts": {
       "memory": 512,
       "maxDuration": 15
+    },
+    "api/inpaint.ts": {
+      "memory": 1024,
+      "maxDuration": 30
     }
   }
 }

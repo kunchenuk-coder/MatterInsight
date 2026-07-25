@@ -199,6 +199,13 @@ export function readHumanDnaFromMaterial(material: Material): MaterialHumanDna |
   return (material as MaterialDataPayload).humanDna;
 }
 
+function extractOfficialMoodTags(humanDna: MaterialHumanDna): string[] {
+  return humanDna.mood_tags
+    .filter((t) => t.is_brand_official)
+    .map((t) => t.tag)
+    .slice(0, 3);
+}
+
 export type MaterialPersistResult = { ok: true } | { ok: false; error: string };
 
 /**
@@ -228,6 +235,7 @@ export async function saveMaterialDraft(
       data: payload,
       status: 'draft',
       is_pending: false,
+      official_mood_tags: extractOfficialMoodTags(humanDna),
       updated_at: new Date().toISOString(),
       oss_object_key: material.ossObjectKey ?? parseOssObjectKey(material.image),
     })
@@ -269,6 +277,7 @@ export async function republishMaterial(
       data: payload,
       status: '已发布',
       is_pending: false,
+      official_mood_tags: extractOfficialMoodTags(humanDna),
       updated_at: new Date().toISOString(),
       oss_object_key: material.ossObjectKey ?? parseOssObjectKey(material.image),
     })

@@ -4,7 +4,8 @@ import {
   readHumanDnaFromMaterial,
   republishMaterial,
 } from './materialService';
-import { isSupabaseConfigured } from './supabaseClient';
+import { getSupabase, isSupabaseConfigured } from './supabaseClient';
+import { logMaterialEvent } from './eventLogService';
 import { toMaterialDetail } from '../data/materialDetailMock';
 
 export interface SubmitInspirationStoryPayload {
@@ -61,27 +62,46 @@ export async function submitInspirationStory(
       ? 'approved'
       : 'pending';
 
-  const apiPayload = {
+  if (isSupabaseConfigured()) {
+    const { data, error } = await getSupabase().rpc('submit_inspiration_story', {
+      p_material_id: payload.material_id,
+      p_story_text: payload.story_text,
+      p_is_brand_story: payload.is_brand_story ?? false,
+    });
+
+    if (error) {
+      console.error('[inspirationStoryService] submit_inspiration_story:', error.message);
+      throw new Error(error.message);
+    }
+
+    const row = data as { id: string; author_id: string; text: string; status: InspirationStory['status'] };
+    return {
+      id: row.id,
+      author_id: row.author_id,
+      text: row.text,
+      status: row.status ?? status,
+    };
+  }
+
+  console.info('[inspirationStoryService] submitInspirationStory (local mock)', {
     material_id: payload.material_id,
+    status,
+  });
+
+  logMaterialEvent(payload.author_id, payload.material_id, 'SUBMIT_STORY_X3', {
     story_text: payload.story_text,
     status,
-  };
-
-  console.group('[inspirationStoryService] submitInspirationStory');
-  console.log('Persisted in materials.data.humanDna.inspiration_stories');
-  console.log('Request body:', apiPayload);
-  console.groupEnd();
+    is_brand_story: payload.is_brand_story ?? false,
+  });
 
   await new Promise((resolve) => setTimeout(resolve, 80));
 
-  const story: InspirationStory = {
+  return {
     id: `story_${Date.now()}`,
     author_id: payload.author_id,
     text: payload.story_text,
     status,
   };
-
-  return story;
 }
 
 /** Resolve display label for story author (mock until profiles join). */
