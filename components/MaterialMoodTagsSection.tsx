@@ -8,6 +8,7 @@ import {
   MAX_SUPPLIER_BRAND_MOOD_TAGS,
   MOOD_TAG_RELIABILITY_PENALTY,
 } from '../utils/moodTagModeration';
+import { persistMaterialMoodTag, voteMaterialMoodTag } from '../services/moodTagService';
 
 interface BubbleBurst {
   id: string;
@@ -50,6 +51,7 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
   const [designerReliability, setDesignerReliability] = useState(100);
   const [reliabilityNotice, setReliabilityNotice] = useState<string | null>(null);
   const [showAddHint, setShowAddHint] = useState(false);
+  const [persistBusy, setPersistBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const bubbleIdRef = useRef(0);
 
@@ -98,16 +100,27 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
     }, 720);
   };
 
-  const handleTagClick = (tagName: string, event: React.MouseEvent<HTMLButtonElement>) => {
-    if (!isDesignerInteractive) return;
+  const handleTagClick = async (tagName: string, event: React.MouseEvent<HTMLButtonElement>) => {
+    if (!isDesignerInteractive || persistBusy) return;
     spawnBubble(tagName, event);
     const target = tags.find((t) => t.tag === tagName);
-    commitTags(tags.map((t) => (t.tag === tagName ? { ...t, count: t.count + 1 } : t)));
+    const optimistic = tags.map((t) => (t.tag === tagName ? { ...t, count: t.count + 1 } : t));
+    commitTags(optimistic);
     if (target) onMoodTagInteract?.(tagName, target);
+
+    setPersistBusy(true);
+    const result = await voteMaterialMoodTag({ materialId, tagWord: tagName, portal: 'designer' });
+    setPersistBusy(false);
+    if (!result.ok) {
+      console.warn('[MaterialMoodTags] vote persist failed, keeping optimistic UI:', result.error);
+      setAddError(result.error);
+      return;
+    }
+    commitTags(result.mood_tags);
   };
 
-  const handleAddTag = () => {
-    if (!user || !addMode) return;
+  const handleAddTag = async () => {
+    if (!user || !addMode || persistBusy) return;
     setAddError(null);
     const trimmed = newTagText.trim();
     if (!trimmed) {
@@ -149,9 +162,38 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
             author_id: user.id,
           };
 
+    console.info('[MaterialMoodTags] ADD_TAG local payload (before API)', {
+      materialId,
+      addMode,
+      userId: user.id,
+      role: user.role,
+      dbRole: user.dbRole,
+      newTag,
+      existingTags: tags,
+    });
+
+    // Optimistic UI
     commitTags([...tags, newTag]);
     setNewTagText('');
     setShowAddInput(false);
+
+    setPersistBusy(true);
+    const result = await persistMaterialMoodTag({
+      materialId,
+      tagWord: trimmed,
+      mode: addMode,
+      portal: addMode === 'brand' ? 'supplier' : 'designer',
+    });
+    setPersistBusy(false);
+
+    if (!result.ok) {
+      console.error('[MaterialMoodTags] ADD_TAG cloud persist failed:', result.error);
+      setAddError(`保存失败：${result.error}`);
+      // rollback optimistic tag
+      commitTags(tags);
+      return;
+    }
+    commitTags(result.mood_tags);
   };
 
   const handleDeleteTag = (tagName: string, isBrand: boolean) => {

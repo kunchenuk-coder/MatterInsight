@@ -7,6 +7,23 @@ import {
   fetchDesignersForAdmin,
   type AdminDesignerRow,
 } from '../services/profileService';
+import {
+  approveInspirationStory,
+  deleteAdminMaterialMoodTag,
+  deleteInspirationStory,
+  fetchAdminMoodTags,
+  fetchInspirationStoryHistory,
+  fetchPendingInspirationStories,
+  rejectInspirationStory,
+  type AdminMaterialMoodGroup,
+  type AdminMoodTagChip,
+  type AdminStoryRow,
+} from '../services/adminModerationService';
+import {
+  fetchSupplierEvaluations,
+  type AdminSupplierEvaluation,
+} from '../services/adminAnalyticsService';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 
 interface AdminDashboardProps {
   user: User;
@@ -16,16 +33,26 @@ interface AdminDashboardProps {
   onApprove: (id: string, comment?: string) => void;
   onReject: (id: string, comment?: string) => void;
   sampleRequests: SampleRequest[];
-  onShipSample: (id: string) => void;
+  onShipSample: (id: string) => void | Promise<void>;
   verificationRequests: User[];
   onVerifySupplier: (userId: string) => void;
 }
+
+type AdminSubTab =
+  | 'DESIGNERS'
+  | 'MATERIALS'
+  | 'SUPPLIERS'
+  | 'PENDING'
+  | 'SAMPLES'
+  | 'VERIFICATIONS'
+  | 'STORIES'
+  | 'MOOD_TAGS';
 
 const AdminDashboard: React.FC<AdminDashboardProps> = ({ 
   user, library, setLibrary, pendingList, onApprove, onReject, sampleRequests, onShipSample,
   verificationRequests, onVerifySupplier
 }) => {
-  const [subTab, setSubTab] = useState<'DESIGNERS' | 'MATERIALS' | 'SUPPLIERS' | 'PENDING' | 'SAMPLES' | 'VERIFICATIONS'>('DESIGNERS');
+  const [subTab, setSubTab] = useState<AdminSubTab>('DESIGNERS');
   const [selectedCategory, setSelectedCategory] = useState<Category | 'ALL'>('ALL');
   const [editingMaterial, setEditingMaterial] = useState<Material | null>(null);
   const [viewingSupplierProducts, setViewingSupplierProducts] = useState<string | null>(null);
@@ -37,6 +64,18 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [auditComment, setAuditComment] = useState('');
   const [designers, setDesigners] = useState<AdminDesignerRow[]>([]);
   const [designersLoading, setDesignersLoading] = useState(false);
+  const [pendingStories, setPendingStories] = useState<AdminStoryRow[]>([]);
+  const [storyHistory, setStoryHistory] = useState<AdminStoryRow[]>([]);
+  const [storiesLoading, setStoriesLoading] = useState(false);
+  const [storyReviewTab, setStoryReviewTab] = useState<'pending' | 'history'>('pending');
+  const [storyRejectId, setStoryRejectId] = useState<string | null>(null);
+  const [storyRejectReason, setStoryRejectReason] = useState('');
+  const [storyActionBusy, setStoryActionBusy] = useState<string | null>(null);
+  const [moodGroups, setMoodGroups] = useState<AdminMaterialMoodGroup[]>([]);
+  const [moodTagsLoading, setMoodTagsLoading] = useState(false);
+  const [moodTagBusy, setMoodTagBusy] = useState<string | null>(null);
+  const [supplierEvals, setSupplierEvals] = useState<AdminSupplierEvaluation[]>([]);
+  const [suppliersLoading, setSuppliersLoading] = useState(false);
 
   const loadDesigners = useCallback(async () => {
     setDesignersLoading(true);
@@ -48,12 +87,144 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   }, []);
 
-  useEffect(() => {
-    if (subTab === 'DESIGNERS') {
-      void loadDesigners();
+  const loadSupplierEvals = useCallback(async () => {
+    setSuppliersLoading(true);
+    try {
+      if (!isSupabaseConfigured()) {
+        setSupplierEvals([]);
+        return;
+      }
+      setSupplierEvals(await fetchSupplierEvaluations());
+    } finally {
+      setSuppliersLoading(false);
     }
-  }, [subTab, loadDesigners]);
+  }, []);
 
+  const loadPendingStories = useCallback(async () => {
+    setStoriesLoading(true);
+    try {
+      const [pending, history] = await Promise.all([
+        fetchPendingInspirationStories(),
+        fetchInspirationStoryHistory(),
+      ]);
+      setPendingStories(pending);
+      setStoryHistory(history);
+    } finally {
+      setStoriesLoading(false);
+    }
+  }, []);
+
+  const loadMoodTags = useCallback(async () => {
+    setMoodTagsLoading(true);
+    try {
+      setMoodGroups(await fetchAdminMoodTags());
+    } finally {
+      setMoodTagsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (subTab === 'DESIGNERS') void loadDesigners();
+    if (subTab === 'SUPPLIERS') void loadSupplierEvals();
+    if (subTab === 'STORIES') void loadPendingStories();
+    if (subTab === 'MOOD_TAGS') void loadMoodTags();
+  }, [subTab, loadDesigners, loadSupplierEvals, loadPendingStories, loadMoodTags]);
+
+  useEffect(() => {
+    if (subTab === 'SAMPLES') {
+      console.info('[AdminDashboard] sampleRequests from props:', sampleRequests.length, sampleRequests);
+    }
+  }, [subTab, sampleRequests]);
+
+  // Badge count for story review tab
+  useEffect(() => {
+    void loadPendingStories();
+  }, [loadPendingStories]);
+
+  const handleApproveStory = async (id: string) => {
+    setStoryActionBusy(id);
+    const result = await approveInspirationStory(id);
+    setStoryActionBusy(null);
+    if (!result.ok) {
+      alert(result.error || '通过失败');
+      return;
+    }
+    await loadPendingStories();
+  };
+
+  const handleRejectStoryConfirm = async () => {
+    if (!storyRejectId) return;
+    setStoryActionBusy(storyRejectId);
+    const result = await rejectInspirationStory(storyRejectId, storyRejectReason);
+    setStoryActionBusy(null);
+    if (!result.ok) {
+      alert(result.error || '拒绝失败');
+      return;
+    }
+    setStoryRejectId(null);
+    setStoryRejectReason('');
+    await loadPendingStories();
+  };
+
+  const handleDeleteStory = async (id: string) => {
+    if (!window.confirm('确认物理删除该灵感故事？此操作不可恢复。')) return;
+    setStoryActionBusy(id);
+    const result = await deleteInspirationStory(id);
+    setStoryActionBusy(null);
+    if (!result.ok) {
+      alert(result.error || '删除失败');
+      return;
+    }
+    await loadPendingStories();
+  };
+  const handleDeleteMoodTag = async (
+    group: AdminMaterialMoodGroup,
+    chip: AdminMoodTagChip
+  ) => {
+    if (!window.confirm(`确认从「${group.material_name}」删除标签「${chip.tag_name}」？`)) return;
+    const busyKey = `${group.material_id}:${chip.tag_name}`;
+    setMoodTagBusy(busyKey);
+    const result = await deleteAdminMaterialMoodTag({
+      material_id: group.material_id,
+      tag_name: chip.tag_name,
+      relation_ids: chip.relation_ids,
+    });
+    setMoodTagBusy(null);
+    if (!result.ok) {
+      alert(result.error || '删除失败');
+      return;
+    }
+    setMoodGroups((prev) =>
+      prev
+        .map((g) =>
+          g.material_id !== group.material_id
+            ? g
+            : {
+                ...g,
+                tags: g.tags.filter(
+                  (t) => t.tag_name.toLowerCase() !== chip.tag_name.toLowerCase()
+                ),
+              }
+        )
+        .filter((g) => g.tags.length > 0)
+    );
+  };
+
+  const formatStoryTime = (iso: string) => {
+    try {
+      return new Date(iso).toLocaleString('zh-CN');
+    } catch {
+      return iso || '—';
+    }
+  };
+
+  const authorRoleLabel = (role: string | null, isBrand: boolean) => {
+    const r = (role ?? '').toLowerCase();
+    if (r === 'supplier' || isBrand) return '材料商（品牌故事）';
+    if (r === 'designer') return '设计师';
+    if (r === 'admin') return '管理员';
+    return role || '未知';
+  };
   const openVerificationDoc = async (req: User) => {
     setViewingVerificationDoc(req);
     setVerificationDocDisplayUrl('');
@@ -97,26 +268,45 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  // Derive total income from library points needed or simulate based on actual interactions
+  // 收入预估：优先用 commerce_orders GMV 合计，否则回退浏览/收藏启发式
   const totalClicks = library.reduce((acc, m) => acc + (m.clicks || 0), 0);
   const totalSaves = library.reduce((acc, m) => acc + (m.saves || 0), 0);
-  const estimatedIncome = (totalClicks * 0.5 + totalSaves * 2).toFixed(2);
+  const gmvTotal = supplierEvals.reduce((acc, s) => acc + (s.gmvCny || 0), 0);
+  const estimatedIncome =
+    gmvTotal > 0
+      ? gmvTotal.toFixed(2)
+      : (totalClicks * 0.5 + totalSaves * 2).toFixed(2);
 
-  const suppliers = Array.from(new Set(library.map(m => m.brand))).map((brand, idx) => {
-    const products = library.filter(m => m.brand === brand);
-    const clicks = products.reduce((acc, m) => acc + (m.clicks || 0), 0);
-    const saves = products.reduce((acc, m) => acc + (m.saves || 0), 0);
+  /** 本地无云端时的品牌聚合回退（避免空白） */
+  const fallbackSuppliers: AdminSupplierEvaluation[] = Array.from(
+    new Set(library.map((m) => m.supplierId || m.brand))
+  ).map((key, idx) => {
+    const products = library.filter((m) => (m.supplierId || m.brand) === key);
+    const brand = products[0]?.brand || key;
     return {
-      id: `s${idx + 1}`,
+      id: products[0]?.supplierId || `local_${idx}`,
       name: brand,
-      company: brand,
-      points: clicks * 10,
-      income: (clicks * 5 + saves * 20),
-      risk: clicks > 100 && saves < 2 ? 'Suspicious' : 'Low'
+      email: '',
+      publishedCount: products.length,
+      pointsConsumed: 0,
+      gmvCny: 0,
+      risk: 'Low' as const,
     };
   });
 
+  const suppliers =
+    isSupabaseConfigured() && supplierEvals.length > 0
+      ? supplierEvals
+      : isSupabaseConfigured()
+        ? supplierEvals
+        : fallbackSuppliers;
+
   const filteredLibrary = library.filter(m => selectedCategory === 'ALL' || m.category === selectedCategory);
+
+  const materialQuoteCount = (m: Material) =>
+    typeof m.quoteCount === 'number'
+      ? m.quoteCount
+      : 0;
 
   const handleUpdateMaterial = (e: React.FormEvent) => {
     e.preventDefault();
@@ -187,6 +377,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </button>
         <button onClick={() => setSubTab('VERIFICATIONS')} className={`px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'VERIFICATIONS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
           供应商认证 {verificationRequests.length > 0 && <span className="ml-1 bg-blue-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{verificationRequests.length}</span>}
+        </button>
+        <button onClick={() => setSubTab('STORIES')} className={`px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'STORIES' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
+          灵感故事审核 {pendingStories.length > 0 && <span className="ml-1 bg-amber-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{pendingStories.length}</span>}
+        </button>
+        <button onClick={() => setSubTab('MOOD_TAGS')} className={`px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'MOOD_TAGS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
+          情绪标签管理
         </button>
       </div>
 
@@ -303,8 +499,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                      </td>
                      <td className="p-6 text-xs font-bold">{m.category}</td>
                      <td className="p-6 font-black text-blue-500">{m.clicks || 0}</td>
-                     <td className="p-6 font-black text-green-500">{m.saves}</td>
-                     <td className="p-6 font-black text-purple-500">{Math.floor((m.clicks || 0) * 0.15)}</td>
+                     <td className="p-6 font-black text-green-500">{m.saves || 0}</td>
+                     <td className="p-6 font-black text-purple-500">{materialQuoteCount(m)}</td>
                      <td className="p-6 text-right space-x-4">
                        <button 
                          onClick={() => setEditingMaterial(m)}
@@ -335,7 +531,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                      '防火等级': m.fireRating,
                      '浏览次数': m.clicks || 0,
                      '收藏次数': m.saves || 0,
-                     '报价估算': Math.floor((m.clicks || 0) * 0.15)
+                     '报价次数': materialQuoteCount(m),
                    }));
                    exportCSV(exportData, `materials_report_${selectedCategory}.csv`);
                  }} 
@@ -349,6 +545,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
         {subTab === 'SUPPLIERS' && (
           <div>
+             {suppliersLoading ? (
+               <div className="p-16 text-center text-sm font-bold text-gray-400">正在加载供应商评估数据…</div>
+             ) : (
              <table className="w-full text-left border-collapse">
                <thead>
                  <tr className="bg-gray-50 border-b text-[10px] font-black uppercase text-gray-400 tracking-widest">
@@ -361,21 +560,24 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                  </tr>
                </thead>
                <tbody>
-                 {suppliers.map(s => {
-                   const productCount = library.filter(m => m.brand === s.company).length;
-                   return (
+                 {suppliers.map(s => (
                     <tr key={s.id} className="border-b hover:bg-gray-50 transition-colors">
-                      <td className="p-6 font-bold">{s.name}</td>
+                      <td className="p-6">
+                        <p className="font-bold">{s.name || '（未命名）'}</p>
+                        {s.email ? (
+                          <p className="text-[10px] text-gray-400 font-bold mt-0.5">{s.email}</p>
+                        ) : null}
+                      </td>
                       <td className="p-6">
                         <button 
-                          onClick={() => setViewingSupplierProducts(s.company)}
+                          onClick={() => setViewingSupplierProducts(s.id)}
                           className="font-black text-blue-600 hover:underline"
                         >
-                          {productCount}
+                          {s.publishedCount}
                         </button>
                       </td>
-                      <td className="p-6 font-black">{s.points}</td>
-                      <td className="p-6 font-black">¥ {s.income}</td>
+                      <td className="p-6 font-black">{s.pointsConsumed}</td>
+                      <td className="p-6 font-black">¥ {Number(s.gmvCny || 0).toFixed(2)}</td>
                       <td className="p-6">
                         <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest ${s.risk === 'Suspicious' ? 'bg-red-100 text-red-600 animate-pulse' : 'bg-green-100 text-green-600'}`}>
                           {s.risk === 'Suspicious' ? '⚠️ AI检测异常: 引导线下私单' : '状态良好'}
@@ -386,13 +588,38 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         <button className="text-xs font-bold text-red-500 hover:underline">警告处分</button>
                       </td>
                     </tr>
-                   );
-                 })}
+                 ))}
+                 {suppliers.length === 0 && (
+                   <tr>
+                     <td colSpan={6} className="p-16 text-center text-sm font-bold text-gray-400">
+                       暂无材料商数据
+                     </td>
+                   </tr>
+                 )}
                </tbody>
              </table>
+             )}
              <div className="p-8 bg-gray-50 border-t flex justify-between items-center">
                <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">入驻材料商: {suppliers.length} 家</p>
-               <button onClick={() => exportCSV(suppliers, 'suppliers_report.csv')} className="bg-white border px-6 py-2 rounded-xl text-xs font-bold shadow-sm">导出 Excel 数据表</button>
+               <button
+                 onClick={() =>
+                   exportCSV(
+                     suppliers.map((s) => ({
+                       材料商ID: s.id,
+                       名称: s.name,
+                       邮箱: s.email,
+                       上架单品: s.publishedCount,
+                       积分消费: s.pointsConsumed,
+                       交易流水: s.gmvCny,
+                       风险: s.risk,
+                     })),
+                     'suppliers_report.csv'
+                   )
+                 }
+                 className="bg-white border px-6 py-2 rounded-xl text-xs font-bold shadow-sm"
+               >
+                 导出 Excel 数据表
+               </button>
              </div>
           </div>
         )}
@@ -428,13 +655,22 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <td className="p-6 text-xs text-gray-400">{new Date(req.submitDate).toLocaleDateString()}</td>
                       <td className="p-6">
                         <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest ${req.status === 'PENDING' ? 'bg-yellow-100 text-yellow-600' : 'bg-green-100 text-green-600'}`}>
-                          {req.status === 'PENDING' ? '待处理' : req.status === 'SHIPPED_BY_SUPPLIER' ? '材料商已寄' : '平台已寄'}
+                          {req.status === 'PENDING'
+                            ? '待处理'
+                            : req.status === 'SHIPPED_BY_ADMIN'
+                              ? '平台已寄'
+                              : req.status === 'SHIPPED_BY_SUPPLIER'
+                                ? '材料商已寄'
+                                : '已完成'}
                         </span>
                       </td>
                       <td className="p-6 text-right space-x-4">
                         {req.status === 'PENDING' && (
                           <button 
-                            onClick={() => onShipSample(req.id)}
+                            type="button"
+                            onClick={() => {
+                              void Promise.resolve(onShipSample(req.id));
+                            }}
                             className="text-xs font-bold bg-black text-white px-4 py-2 rounded-xl hover:scale-105 transition-transform"
                           >
                             代寄并标记已寄出
@@ -606,7 +842,369 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
              </table>
           </div>
         )}
+
+        {subTab === 'STORIES' && (
+          <div>
+            <div className="px-8 pt-8 pb-2 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
+              <div>
+                <h2 className="text-lg font-black">灵感故事审核</h2>
+                <p className="text-xs text-gray-400 mt-1">数据源：inspiration_stories</p>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="flex bg-gray-100 p-1 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setStoryReviewTab('pending')}
+                    className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${
+                      storyReviewTab === 'pending' ? 'bg-white shadow-sm' : 'text-gray-400'
+                    }`}
+                  >
+                    待审核 {pendingStories.length > 0 && `(${pendingStories.length})`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setStoryReviewTab('history')}
+                    className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${
+                      storyReviewTab === 'history' ? 'bg-white shadow-sm' : 'text-gray-400'
+                    }`}
+                  >
+                    审核历史 {storyHistory.length > 0 && `(${storyHistory.length})`}
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void loadPendingStories()}
+                  className="text-xs font-bold border px-4 py-2 rounded-xl hover:bg-gray-50"
+                >
+                  刷新
+                </button>
+              </div>
+            </div>
+
+            {storyReviewTab === 'pending' ? (
+              <>
+                <table className="w-full text-left border-collapse table-fixed">
+                  <thead>
+                    <tr className="bg-gray-50 border-b text-[10px] font-black uppercase text-gray-400 tracking-widest">
+                      <th className="p-6 w-[36%]">标题 / 正文摘要</th>
+                      <th className="p-6 w-[18%]">作者角色</th>
+                      <th className="p-6 w-[16%]">关联材料</th>
+                      <th className="p-6 w-[14%]">提交时间</th>
+                      <th className="p-6 w-[16%] text-right">审核操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {storiesLoading ? (
+                      <tr>
+                        <td colSpan={5} className="p-16 text-center text-gray-400 text-sm">正在加载待审故事…</td>
+                      </tr>
+                    ) : pendingStories.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="p-16 text-center text-gray-300 italic">暂无待审核灵感故事</td>
+                      </tr>
+                    ) : (
+                      pendingStories.map((story) => (
+                        <tr key={story.id} className="border-b hover:bg-gray-50 transition-colors align-top">
+                          <td className="p-6 w-[36%] max-w-0">
+                            <p
+                              className="font-bold text-sm text-gray-900 whitespace-normal break-all line-clamp-2"
+                              title={story.title || undefined}
+                            >
+                              {story.title || '（无标题）'}
+                            </p>
+                            <p
+                              className="text-xs text-gray-500 mt-2 leading-relaxed whitespace-normal break-all line-clamp-3"
+                              title={story.content}
+                            >
+                              {story.content}
+                            </p>
+                          </td>
+                          <td className="p-6 w-[18%]">
+                            <p className="text-xs font-bold">{authorRoleLabel(story.author_role, story.is_brand_hint)}</p>
+                            <p className="text-[10px] text-gray-400 mt-1 break-all">{story.author_email || story.designer_id}</p>
+                          </td>
+                          <td className="p-6 w-[16%]">
+                            <p className="text-xs font-bold break-words">{story.material_name || '—'}</p>
+                            <p className="text-[10px] text-gray-400 break-all mt-1">{story.material_id || ''}</p>
+                          </td>
+                          <td className="p-6 text-xs text-gray-400 whitespace-nowrap">{formatStoryTime(story.created_at)}</td>
+                          <td className="p-6 text-right space-x-3 whitespace-nowrap">
+                            <button
+                              type="button"
+                              disabled={storyActionBusy === story.id}
+                              onClick={() => void handleApproveStory(story.id)}
+                              className="text-xs font-bold bg-black text-white px-3 py-1.5 rounded-lg disabled:opacity-50"
+                            >
+                              通过
+                            </button>
+                            <button
+                              type="button"
+                              disabled={storyActionBusy === story.id}
+                              onClick={() => {
+                                setStoryRejectId(story.id);
+                                setStoryRejectReason('');
+                              }}
+                              className="text-xs font-bold text-amber-700 hover:underline disabled:opacity-50"
+                            >
+                              拒绝
+                            </button>
+                            <button
+                              type="button"
+                              disabled={storyActionBusy === story.id}
+                              onClick={() => void handleDeleteStory(story.id)}
+                              className="text-xs font-bold text-red-500 hover:underline disabled:opacity-50"
+                            >
+                              删除
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+                <div className="p-8 bg-gray-50 border-t">
+                  <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">
+                    待审故事: {pendingStories.length} 条
+                  </p>
+                </div>
+              </>
+            ) : (
+              <>
+                <table className="w-full text-left border-collapse table-fixed">
+                  <thead>
+                    <tr className="bg-gray-50 border-b text-[10px] font-black uppercase text-gray-400 tracking-widest">
+                      <th className="p-6 w-[34%]">标题 / 正文摘要</th>
+                      <th className="p-6 w-[18%]">作者</th>
+                      <th className="p-6 w-[14%]">关联材料</th>
+                      <th className="p-6 w-[12%]">状态</th>
+                      <th className="p-6 w-[14%]">提交时间</th>
+                      <th className="p-6 w-[8%] text-right">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {storiesLoading ? (
+                      <tr>
+                        <td colSpan={6} className="p-16 text-center text-gray-400 text-sm">正在加载审核历史…</td>
+                      </tr>
+                    ) : storyHistory.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="p-16 text-center text-gray-300 italic">
+                          暂无审核历史（已物理删除的记录不会出现在此）
+                        </td>
+                      </tr>
+                    ) : (
+                      storyHistory.map((story) => (
+                        <tr key={story.id} className="border-b hover:bg-gray-50 transition-colors align-top">
+                          <td className="p-6 max-w-0">
+                            <p
+                              className="font-bold text-sm text-gray-900 whitespace-normal break-all line-clamp-2"
+                              title={story.title || undefined}
+                            >
+                              {story.title || '（无标题）'}
+                            </p>
+                            <p
+                              className="text-xs text-gray-500 mt-2 leading-relaxed whitespace-normal break-all line-clamp-3"
+                              title={story.content}
+                            >
+                              {story.content}
+                            </p>
+                            {story.status === 'rejected' && story.review_notes && (
+                              <p className="text-[10px] text-gray-400 mt-2 line-clamp-2" title={story.review_notes}>
+                                拒绝理由：{story.review_notes}
+                              </p>
+                            )}
+                          </td>
+                          <td className="p-6">
+                            <p className="text-xs font-bold">{authorRoleLabel(story.author_role, story.is_brand_hint)}</p>
+                            <p className="text-[10px] text-gray-400 mt-1 break-all">{story.author_email || story.designer_id}</p>
+                          </td>
+                          <td className="p-6 text-xs font-bold break-words">{story.material_name || '—'}</td>
+                          <td className="p-6">
+                            <span
+                              className={`inline-flex items-center whitespace-nowrap px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wide ${
+                                story.status === 'published'
+                                  ? 'bg-emerald-50 text-emerald-700'
+                                  : story.status === 'rejected'
+                                    ? 'bg-gray-100 text-gray-500'
+                                    : 'bg-gray-100 text-gray-500'
+                              }`}
+                            >
+                              {story.status === 'published'
+                                ? '已通过'
+                                : story.status === 'rejected'
+                                  ? '已拒绝'
+                                  : story.status}
+                            </span>
+                          </td>
+                          <td className="p-6 text-xs text-gray-400 whitespace-nowrap">{formatStoryTime(story.created_at)}</td>
+                          <td className="p-6 text-right">
+                            <button
+                              type="button"
+                              disabled={storyActionBusy === story.id}
+                              onClick={() => void handleDeleteStory(story.id)}
+                              className="text-xs font-bold text-red-500 hover:underline disabled:opacity-50"
+                            >
+                              删除
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+                <div className="p-8 bg-gray-50 border-t">
+                  <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">
+                    历史记录: {storyHistory.length} 条
+                  </p>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {subTab === 'MOOD_TAGS' && (
+          <div>
+            <div className="px-8 pt-8 pb-2 flex justify-between items-center gap-4">
+              <div>
+                <h2 className="text-lg font-black">情绪标签管理</h2>
+                <p className="text-xs text-gray-400 mt-1">
+                  按材料聚合展示 · 同名官方/设计师标签已合并 · 琥珀色=官方，紫色=社区
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void loadMoodTags()}
+                className="text-xs font-bold border px-4 py-2 rounded-xl hover:bg-gray-50 shrink-0"
+              >
+                刷新
+              </button>
+            </div>
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="bg-gray-50 border-b text-[10px] font-black uppercase text-gray-400 tracking-widest">
+                  <th className="p-6 w-[28%]">材料</th>
+                  <th className="p-6">情绪标签组</th>
+                </tr>
+              </thead>
+              <tbody>
+                {moodTagsLoading ? (
+                  <tr>
+                    <td colSpan={2} className="p-16 text-center text-gray-400 text-sm">正在加载情绪标签…</td>
+                  </tr>
+                ) : moodGroups.length === 0 ? (
+                  <tr>
+                    <td colSpan={2} className="p-16 text-center text-gray-300 italic">暂无情绪标签记录</td>
+                  </tr>
+                ) : (
+                  moodGroups.map((group) => (
+                    <tr key={group.material_id} className="border-b hover:bg-gray-50/80 transition-colors align-top">
+                      <td className="p-6">
+                        <p className="font-bold text-sm text-gray-900">{group.material_name}</p>
+                        <p className="text-[10px] text-gray-400 mt-1">
+                          {group.tags.length} 个标签
+                        </p>
+                      </td>
+                      <td className="p-6">
+                        <div className="flex flex-wrap gap-2">
+                          {group.tags.map((chip) => {
+                            const busyKey = `${group.material_id}:${chip.tag_name}`;
+                            const chipClass = chip.is_brand
+                              ? 'bg-amber-50 border-amber-200 text-amber-900'
+                              : chip.is_custom
+                                ? 'bg-violet-50 border-violet-200 text-violet-800'
+                                : 'bg-gray-50 border-gray-200 text-gray-700';
+                            return (
+                              <span
+                                key={`${group.material_id}:${chip.tag_name}`}
+                                className={`inline-flex items-center gap-1.5 max-w-full pl-3 pr-1.5 py-1 rounded-full border text-xs font-bold ${chipClass}`}
+                                title={
+                                  chip.is_brand && chip.is_custom
+                                    ? '官方 + 设计师共识'
+                                    : chip.is_brand
+                                      ? '官方品牌标签'
+                                      : chip.is_custom
+                                        ? '设计师自定义'
+                                        : '社区标签'
+                                }
+                              >
+                                <span className="truncate">{chip.tag_name}</span>
+                                {chip.count > 0 && (
+                                  <span className="tabular-nums opacity-70 font-black">
+                                    {chip.count}
+                                  </span>
+                                )}
+                                {chip.is_brand && (
+                                  <span className="text-[9px] font-black uppercase tracking-wider opacity-60">
+                                    官方
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  disabled={moodTagBusy === busyKey}
+                                  onClick={() => void handleDeleteMoodTag(group, chip)}
+                                  className="ml-0.5 w-5 h-5 rounded-full text-[11px] leading-none font-black text-current/50 hover:bg-black/10 hover:text-red-600 disabled:opacity-40"
+                                  aria-label={`删除 ${chip.tag_name}`}
+                                >
+                                  ×
+                                </button>
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+            <div className="p-8 bg-gray-50 border-t flex flex-wrap gap-6 items-center">
+              <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">
+                材料数: {moodGroups.length}
+              </p>
+              <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">
+                标签总数:{' '}
+                {moodGroups.reduce((acc, g) => acc + g.tags.length, 0)}
+              </p>
+            </div>
+          </div>
+        )}
       </div>
+
+      {storyRejectId && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[200] flex items-center justify-center p-6">
+          <div className="bg-white rounded-[32px] max-w-md w-full p-8 shadow-2xl">
+            <h3 className="text-xl font-black mb-2">拒绝灵感故事</h3>
+            <p className="text-xs text-gray-400 mb-4">可选填拒绝理由，将写入 review_notes</p>
+            <textarea
+              value={storyRejectReason}
+              onChange={(e) => setStoryRejectReason(e.target.value)}
+              rows={4}
+              placeholder="例如：内容与材料不符 / 疑似广告…"
+              className="w-full border border-gray-200 rounded-2xl p-4 text-sm outline-none focus:border-black resize-none"
+            />
+            <div className="flex gap-3 mt-6">
+              <button
+                type="button"
+                onClick={() => {
+                  setStoryRejectId(null);
+                  setStoryRejectReason('');
+                }}
+                className="flex-1 py-3 rounded-2xl text-sm font-bold text-gray-500 hover:bg-gray-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={!!storyActionBusy}
+                onClick={() => void handleRejectStoryConfirm()}
+                className="flex-1 py-3 rounded-2xl text-sm font-bold bg-black text-white disabled:opacity-50"
+              >
+                确认拒绝
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Verification Doc Modal */}
       {viewingVerificationDoc && (
@@ -732,11 +1330,22 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
         <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-[150] flex items-center justify-center p-6">
           <div className="bg-white w-full max-w-4xl p-10 rounded-[40px] shadow-2xl overflow-y-auto max-h-[90vh]">
             <div className="flex justify-between items-center mb-8">
-              <h3 className="text-2xl font-black">{viewingSupplierProducts} - 上架单品</h3>
+              <h3 className="text-2xl font-black">
+                {(suppliers.find((s) => s.id === viewingSupplierProducts)?.name ||
+                  library.find((m) => m.supplierId === viewingSupplierProducts)?.brand ||
+                  '材料商')}{' '}
+                - 上架单品
+              </h3>
               <button onClick={() => setViewingSupplierProducts(null)} className="text-gray-400 hover:text-black text-xl">✕</button>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {library.filter(m => m.brand === viewingSupplierProducts).map(m => (
+              {library
+                .filter(
+                  (m) =>
+                    m.supplierId === viewingSupplierProducts ||
+                    m.brand === viewingSupplierProducts
+                )
+                .map((m) => (
                 <div key={m.id} className="bg-gray-50 rounded-3xl p-4 border border-gray-100">
                   <img src={m.image} className="w-full aspect-video object-cover rounded-2xl mb-4" />
                   <h4 className="font-bold mb-1">{m.name}</h4>
@@ -745,6 +1354,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <div className="flex items-center gap-3">
                       <span className={`text-[10px] font-bold ${m.clicks > 0 ? 'text-gray-900' : 'text-gray-400'}`}>👀 {m.clicks || 0}</span>
                       <span className="text-[10px] font-bold text-gray-400">🤍 {m.saves || 0}</span>
+                      <span className="text-[10px] font-bold text-purple-500">报价 {m.quoteCount || 0}</span>
                     </div>
                   </div>
                 </div>

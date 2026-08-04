@@ -4,17 +4,20 @@ import {
   readHumanDnaFromMaterial,
   republishMaterial,
 } from './materialService';
-import { getSupabase, isSupabaseConfigured } from './supabaseClient';
+import { getSupabaseForPortal, isSupabaseConfigured } from './supabaseClient';
 import { logMaterialEvent } from './eventLogService';
 import { toMaterialDetail } from '../data/materialDetailMock';
+import type { AppPortal } from '../utils/appPortal';
 
 export interface SubmitInspirationStoryPayload {
   material_id: string;
   story_text: string;
   status: 'pending' | 'approved';
   author_id: string;
-  /** Brand/supplier official stories are public immediately after publish. */
+  /** Brand/supplier official stories — backend also checks profiles.role. */
   is_brand_story?: boolean;
+  /** Prefer explicit portal so /material edit pages do not use designer JWT by default. */
+  auth_portal?: AppPortal;
 }
 
 export interface PersistInspirationStoryOptions {
@@ -50,36 +53,140 @@ export async function persistInspirationStories(
   return true;
 }
 
+function mapStoryStatus(
+  remote: string | undefined,
+  fallback: InspirationStory['status']
+): InspirationStory['status'] {
+  if (remote === 'published' || remote === 'approved') return 'approved';
+  if (remote === 'rejected') return 'rejected';
+  if (remote === 'pending_review' || remote === 'pending' || remote === 'reported') return 'pending';
+  return fallback;
+}
+
+function rowToInspirationStory(row: {
+  id: string;
+  designer_id: string;
+  content: string;
+  status: string;
+  title?: string | null;
+  review_notes?: string | null;
+  created_at?: string | null;
+}): InspirationStory {
+  return {
+    id: String(row.id),
+    author_id: String(row.designer_id),
+    text: String(row.content ?? ''),
+    status: mapStoryStatus(row.status, 'pending'),
+    review_notes: row.review_notes ?? null,
+    title: row.title ?? null,
+    created_at: row.created_at ?? null,
+  };
+}
+
 /**
- * Insert inspiration story. Brand stories from material owner are auto-approved.
+ * Load stories for a material from V5 inspiration_stories.
+ * RLS: published for all authenticated; authors also see own pending_review / rejected.
+ */
+export async function fetchMaterialInspirationStories(
+  materialId: string,
+  portal?: AppPortal
+): Promise<InspirationStory[]> {
+  if (!isSupabaseConfigured() || !materialId) return [];
+
+  const client = getSupabaseForPortal(portal ?? 'designer');
+  const { data, error } = await client
+    .from('inspiration_stories')
+    .select('id, designer_id, content, status, title, review_notes, created_at')
+    .eq('material_id', materialId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('[inspirationStoryService] fetchMaterialInspirationStories:', error.message);
+    return [];
+  }
+
+  return (data ?? []).map((row) =>
+    rowToInspirationStory(
+      row as {
+        id: string;
+        designer_id: string;
+        content: string;
+        status: string;
+        title?: string | null;
+        review_notes?: string | null;
+        created_at?: string | null;
+      }
+    )
+  );
+}
+
+/**
+ * Insert inspiration story into V5 inspiration_stories (always pending_review on server).
  */
 export async function submitInspirationStory(
   payload: SubmitInspirationStoryPayload
 ): Promise<InspirationStory> {
-  const status: InspirationStory['status'] = payload.is_brand_story
-    ? 'approved'
-    : payload.status === 'approved'
-      ? 'approved'
-      : 'pending';
+  const isBrand = payload.is_brand_story ?? false;
+  const status: InspirationStory['status'] = 'pending';
+  const portal: AppPortal =
+    payload.auth_portal ?? (isBrand ? 'supplier' : 'designer');
 
   if (isSupabaseConfigured()) {
-    const { data, error } = await getSupabase().rpc('submit_inspiration_story', {
+    const client = getSupabaseForPortal(portal);
+    const {
+      data: { user: authUser },
+    } = await client.auth.getUser();
+
+    let profileRole: string | null = null;
+    if (authUser?.id) {
+      const { data: profile } = await client
+        .from('profiles')
+        .select('id, role, email, username, registered_phone')
+        .eq('id', authUser.id)
+        .maybeSingle();
+      profileRole = profile?.role ?? null;
+      console.info('[inspirationStoryService] submit context', {
+        portal,
+        authUserId: authUser.id,
+        payloadAuthorId: payload.author_id,
+        idsMatch: authUser.id === payload.author_id,
+        profileRole,
+        uiHint_is_brand_story: isBrand,
+        p_material_id: payload.material_id,
+        story_text_len: payload.story_text.trim().length,
+        profile,
+      });
+    } else {
+      console.warn('[inspirationStoryService] no auth user on portal', { portal });
+    }
+
+    const { data, error } = await client.rpc('submit_inspiration_story', {
       p_material_id: payload.material_id,
       p_story_text: payload.story_text,
-      p_is_brand_story: payload.is_brand_story ?? false,
+      p_is_brand_story: isBrand,
     });
 
     if (error) {
-      console.error('[inspirationStoryService] submit_inspiration_story:', error.message);
+      console.error('[inspirationStoryService] submit_inspiration_story:', error.message, {
+        portal,
+        profileRole,
+        p_is_brand_story: isBrand,
+      });
       throw new Error(error.message);
     }
 
-    const row = data as { id: string; author_id: string; text: string; status: InspirationStory['status'] };
+    const row = data as {
+      id: string;
+      author_id: string;
+      text: string;
+      status?: string;
+    };
     return {
       id: row.id,
       author_id: row.author_id,
       text: row.text,
-      status: row.status ?? status,
+      status: mapStoryStatus(row.status, status),
+      review_notes: null,
     };
   }
 

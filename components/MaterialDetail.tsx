@@ -1,6 +1,6 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Material, User, Inquiry, SampleRequest, MaterialStatus } from '../types';
+import { Material, User, Inquiry, SampleRequest, MaterialStatus, InquiryFormPayload } from '../types';
 import { toMaterialDetail, buildHumanDnaSnapshot } from '../data/materialDetailMock';
 import {
   buildMaterialDataPayload,
@@ -14,12 +14,17 @@ import MaterialMoodTagsSection from './MaterialMoodTagsSection';
 import MaterialInspirationStoriesSection from './MaterialInspirationStoriesSection';
 import MaterialEvaluationsSection from './MaterialEvaluationsSection';
 import MaterialManageActionBar from './MaterialManageActionBar';
-import type { MaterialHumanDna, MaterialEvaluations } from '../types/materialDetail';
+import type { MaterialHumanDna, MaterialEvaluations, InspirationStory } from '../types/materialDetail';
 import {
   hasUserRatedMaterial,
   submitMaterialEvaluation,
 } from '../services/materialEvaluationService';
+import { fetchMaterialInspirationStories } from '../services/inspirationStoryService';
 import useMaterialEventLog from '../hooks/useMaterialEventLog';
+import useMaterialViewCount from '../hooks/useMaterialViewCount';
+import useMarkNotificationsRead from '../hooks/useMarkNotificationsRead';
+import { portalFromUserRole } from '../utils/appPortal';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 
 interface MaterialDetailProps {
   material: Material;
@@ -30,8 +35,17 @@ interface MaterialDetailProps {
   fromSupplierDashboard?: boolean;
   onBack: () => void;
   onDeductPoints: (amt: number) => void;
-  onSampleRequest: (materialId: string, address: string, contactName: string, phone: string) => void;
-  onInquiry: (materialId: string, moodBoardId: string, notes?: string) => void;
+  onSampleRequest: (
+    materialId: string,
+    address: string,
+    contactName: string,
+    phone: string
+  ) => void | Promise<boolean | void>;
+  onInquiry: (
+    materialId: string,
+    payload: string | InquiryFormPayload,
+    notes?: string
+  ) => void | Promise<boolean | void>;
   inquiries: Inquiry[];
   sampleRequests: SampleRequest[];
   onMaterialUpdated?: (material: Material) => void;
@@ -55,7 +69,10 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
   const materialDetail = useMemo(() => toMaterialDetail(material), [material]);
   const [applicationCases, setApplicationCases] = useState(materialDetail.application_cases);
   const [moodTags, setMoodTags] = useState(materialDetail.mood_tags);
-  const [inspirationStories, setInspirationStories] = useState(materialDetail.inspiration_stories);
+  const [inspirationStories, setInspirationStories] = useState<InspirationStory[]>(
+    materialDetail.inspiration_stories
+  );
+  const [inspirationStoriesLoading, setInspirationStoriesLoading] = useState(false);
   const [evaluations, setEvaluations] = useState<MaterialEvaluations>(materialDetail.evaluations);
   const [evaluationVoteCount, setEvaluationVoteCount] = useState(
     materialDetail.evaluation_vote_count ?? 0
@@ -75,6 +92,31 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
     [user, material, isPublicView, editMode, fromSupplierDashboard]
   );
   const isManageMode = permissions.canManageApplicationCases;
+
+  /** 真实浏览计数：进入详情页 +1（sessionStorage 防 F5）；材料商编辑模式不刷量 */
+  const { viewCount } = useMaterialViewCount({
+    materialId: material.id,
+    initialCount: material.clicks || 0,
+    enabled: !isManageMode && isSupabaseConfigured(),
+  });
+
+  useEffect(() => {
+    if (viewCount === (material.clicks || 0)) return;
+    onMaterialUpdated?.({ ...material, clicks: viewCount });
+  }, [viewCount]); // eslint-disable-line react-hooks/exhaustive-deps -- sync library once per count change
+
+  /** 材料商进入详情 → 将该材料的 tag_added 未读清零 */
+  useMarkNotificationsRead({
+    enabled:
+      Boolean(user) &&
+      supplierViewer &&
+      !isPublicView &&
+      isSupabaseConfigured() &&
+      Boolean(material.id),
+    types: ['tag_added'],
+    targetId: material.id,
+    portal: 'supplier',
+  });
 
   const humanDnaSnapshot = useCallback((): MaterialHumanDna => {
     return buildHumanDnaSnapshot({
@@ -152,17 +194,43 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
   useEffect(() => {
     setApplicationCases(materialDetail.application_cases);
     setMoodTags(materialDetail.mood_tags);
-    setInspirationStories(materialDetail.inspiration_stories);
     setEvaluations(materialDetail.evaluations);
     setEvaluationVoteCount(materialDetail.evaluation_vote_count ?? 0);
   }, [
     material.id,
     materialDetail.application_cases,
     materialDetail.mood_tags,
-    materialDetail.inspiration_stories,
     materialDetail.evaluations,
     materialDetail.evaluation_vote_count,
   ]);
+
+  /** Source of truth: inspiration_stories table (not only embedded humanDna JSON). */
+  useEffect(() => {
+    let cancelled = false;
+    const loadStories = async () => {
+      setInspirationStoriesLoading(true);
+      try {
+        const portal =
+          user?.role === 'SUPPLIER' || user?.role === 'DESIGNER' || user?.role === 'ADMIN'
+            ? portalFromUserRole(user.role)
+            : 'designer';
+        const rows = await fetchMaterialInspirationStories(material.id, portal);
+        if (cancelled) return;
+        if (rows.length > 0) {
+          setInspirationStories(rows);
+        } else {
+          // Fallback to embedded mock/legacy JSON when table has no rows yet
+          setInspirationStories(materialDetail.inspiration_stories ?? []);
+        }
+      } finally {
+        if (!cancelled) setInspirationStoriesLoading(false);
+      }
+    };
+    void loadStories();
+    return () => {
+      cancelled = true;
+    };
+  }, [material.id, user?.id, user?.role, materialDetail.inspiration_stories]);
 
   useEffect(() => {
     if (user?.role === 'DESIGNER') {
@@ -241,27 +309,67 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
     });
   };
 
-  const handleSampleOrder = (e: React.FormEvent) => {
+  const handleSampleOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return alert('请先登录');
     if (supplierViewer) return;
+    if (!sampleForm.address.trim() || !sampleForm.contactName.trim() || !sampleForm.phone.trim()) {
+      showToast('请完整填写收件人、电话与地址', 'error');
+      return;
+    }
     if (user.points < material.pointsNeeded.sample) {
       alert('积分不足，请先充值');
       return;
     }
+    const ok = await Promise.resolve(
+      onSampleRequest(
+        material.id,
+        sampleForm.address.trim(),
+        sampleForm.contactName.trim(),
+        sampleForm.phone.trim()
+      )
+    );
+    if (ok === false) {
+      showToast('小样申请提交失败，请重试', 'error');
+      return;
+    }
     onDeductPoints(material.pointsNeeded.sample);
-    onSampleRequest(material.id, sampleForm.address, sampleForm.contactName, sampleForm.phone);
     setIsRequestingSample(false);
-    onBack(); // Return to material list as requested
+    showToast('小样申请已提交', 'success');
+    window.setTimeout(() => onBack(), 600);
   };
 
-  const handleQuoteSubmit = (e: React.FormEvent) => {
+  const handleQuoteSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (supplierViewer) return;
-    // For standalone material detail, we use a dummy moodboard ID or handle it specially
-    onInquiry(material.id, 'STANDALONE', `项目: ${quoteForm.project} | 地址: ${quoteForm.address} | 面积: ${quoteForm.area} | 时间: ${quoteForm.date} | 备注: ${quoteForm.notes}`);
+    if (!quoteForm.project.trim()) {
+      showToast('请填写项目名称', 'error');
+      return;
+    }
+    const areaRaw = quoteForm.area.trim();
+    const estimatedArea = areaRaw ? Number(areaRaw) : null;
+    if (areaRaw && Number.isNaN(estimatedArea as number)) {
+      showToast('面积请填写数字', 'error');
+      return;
+    }
+
+    const ok = await Promise.resolve(
+      onInquiry(material.id, {
+        moodBoardId: 'STANDALONE',
+        projectName: quoteForm.project.trim(),
+        projectLocation: quoteForm.address.trim() || undefined,
+        estimatedArea,
+        deliveryDate: quoteForm.date || null,
+        remarks: quoteForm.notes.trim() || undefined,
+      })
+    );
+    if (ok === false) {
+      showToast('询价提交失败，请重试', 'error');
+      return;
+    }
     setIsQuoting(false);
-    onBack();
+    showToast('询价申请已发送', 'success');
+    window.setTimeout(() => onBack(), 600);
   };
 
   return (
@@ -353,7 +461,12 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
         <div className="lg:col-span-5 order-1 lg:row-start-1">
           <div className="space-y-4 sm:space-y-5">
             <div>
-              <h1 className="text-2xl sm:text-3xl font-bold mb-1">{material.name}</h1>
+              <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+                <h1 className="text-2xl sm:text-3xl font-bold">{material.name}</h1>
+                <span className="text-xs font-bold text-gray-400 tabular-nums">
+                  👀 浏览 {viewCount}
+                </span>
+              </div>
               <p className="text-gray-500 font-medium">
                 <span className={!isPublicView && !hasRequestedSample && !hasInquired && (!user || (user.role !== 'ADMIN' && user.company !== material.brand)) ? 'blur-[4px] select-none' : ''}>
                   {displayBrand}
@@ -447,6 +560,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
             canSubmitBrandStory={permissions.canSubmitBrandStory}
             materialSupplierId={material.supplierId}
             persistBrandStories={permissions.canSubmitBrandStory && isManageMode}
+            isLoading={inspirationStoriesLoading}
           />
         </div>
 
@@ -456,7 +570,23 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
             moodTags={moodTags}
             onMoodTagsChange={
               permissions.canAddBrandMoodTags || permissions.canInteractMoodTags
-                ? setMoodTags
+                ? (next) => {
+                    setMoodTags(next);
+                    onMaterialUpdated?.(
+                      buildMaterialDataPayload(
+                        material,
+                        buildHumanDnaSnapshot({
+                          ...material,
+                          ...materialDetail,
+                          application_cases: applicationCases,
+                          mood_tags: next,
+                          inspiration_stories: inspirationStories,
+                          evaluations,
+                          evaluation_vote_count: evaluationVoteCount,
+                        })
+                      )
+                    );
+                  }
                 : undefined
             }
             user={user}

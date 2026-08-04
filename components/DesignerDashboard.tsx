@@ -1,6 +1,6 @@
 
-import React, { useState } from 'react';
-import { User, Material, Category, MoodBoard, Inquiry, SampleRequest } from '../types';
+import React, { useEffect, useRef, useState } from 'react';
+import { User, Material, Category, MoodBoard, Inquiry, SampleRequest, InquiryFormPayload } from '../types';
 import jsPDF from 'jspdf';
 import 'jspdf-autotable';
 import { UserOptions } from 'jspdf-autotable';
@@ -8,6 +8,9 @@ import {
   findDesignerMoodboardInquiry,
   formatSupplierQuotePrice,
 } from '../services/inquiryService';
+import useMarkNotificationsRead from '../hooks/useMarkNotificationsRead';
+import { markDesignerRequestsRead } from '../services/commerceRequestService';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 
 // Add type declaration for jspdf-autotable
 interface jsPDFWithPlugin extends jsPDF {
@@ -25,14 +28,26 @@ interface DashboardProps {
   onOpenMoodboard: (id: string) => void;
   onViewMaterialDetail: (m: Material) => void;
   inquiries: Inquiry[];
-  onInquiry: (matId: string, mbId: string, notes?: string) => void;
-  onSampleRequest: (matId: string, address: string, contact: string, phone: string) => void;
+  onInquiry: (
+    matId: string,
+    payload: string | InquiryFormPayload,
+    notes?: string
+  ) => void | Promise<boolean | void>;
+  onSampleRequest: (
+    matId: string,
+    address: string,
+    contact: string,
+    phone: string
+  ) => void | Promise<boolean | void>;
   sampleRequests: SampleRequest[];
+  /** 申请记录已读后刷新 Navbar 角标 */
+  onRequestsMarkedRead?: () => void;
 }
 
 const DesignerDashboard: React.FC<DashboardProps> = ({ 
   user, savedIds, setSavedIds, moodboards, setMoodboards, library, 
-  onRechargeClick, onOpenMoodboard, onViewMaterialDetail, inquiries, onInquiry, sampleRequests
+  onRechargeClick, onOpenMoodboard, onViewMaterialDetail, inquiries, onInquiry, sampleRequests,
+  onRequestsMarkedRead,
 }) => {
   const [activeTab, setActiveTab] = useState<'TABLES' | 'ASSETS' | 'RECORDS'>('TABLES');
   const [expandedCategory, setExpandedCategory] = useState<Category | null>(null);
@@ -41,6 +56,33 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
   const [expandedMbs, setExpandedMbs] = useState<string[]>([]);
   const [showQuotation, setShowQuotation] = useState<MoodBoard | null>(null);
   const [viewingQuote, setViewingQuote] = useState<Inquiry | null>(null);
+  const markingReadRef = useRef(false);
+
+  /** 进入申请记录 / 查看报价 → 清除 quote_received 红点 */
+  useMarkNotificationsRead({
+    enabled:
+      isSupabaseConfigured() &&
+      (activeTab === 'RECORDS' || Boolean(viewingQuote)),
+    types: ['quote_received'],
+    portal: 'designer',
+  });
+
+  /** 进入申请记录 / 查看报价详情 → is_read_by_designer = true，角标清零 */
+  useEffect(() => {
+    const shouldMark = activeTab === 'RECORDS' || Boolean(viewingQuote);
+    if (!isSupabaseConfigured() || !shouldMark || markingReadRef.current) return;
+    markingReadRef.current = true;
+    void (async () => {
+      try {
+        await markDesignerRequestsRead('designer');
+        onRequestsMarkedRead?.();
+      } finally {
+        window.setTimeout(() => {
+          markingReadRef.current = false;
+        }, 800);
+      }
+    })();
+  }, [activeTab, viewingQuote, onRequestsMarkedRead]);
 
   const savedMaterials = library.filter(m => savedIds.includes(m.id));
   const groupedAssets = Object.values(Category).map(cat => ({
@@ -425,7 +467,11 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
                       <td className="p-6 text-xs text-gray-400">{new Date(req.submitDate).toLocaleDateString()}</td>
                       <td className="p-6">
                         <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest ${req.status === 'PENDING' ? 'bg-yellow-100 text-yellow-600' : 'bg-green-100 text-green-600'}`}>
-                          {req.status === 'PENDING' ? '待寄送' : '已寄送'}
+                          {req.status === 'PENDING'
+                            ? '待寄送'
+                            : req.status === 'COMPLETED'
+                              ? '已完成'
+                              : '已寄出'}
                         </span>
                       </td>
                     </tr>
@@ -445,14 +491,32 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
                         </div>
                       </td>
                       <td className="p-6">
-                        <p className="text-xs font-bold">关联情绪板</p>
-                        <p className="text-[10px] text-gray-400 truncate max-w-[200px]">{moodboards.find(b => b.id === inq.moodBoardId)?.name || '未知'}</p>
+                        <p className="text-xs font-bold">
+                          {inq.projectName ||
+                            moodboards.find((b) => b.id === inq.moodBoardId)?.name ||
+                            '独立询价'}
+                        </p>
+                        <p className="text-[10px] text-gray-400 truncate max-w-[200px]">
+                          {[inq.projectLocation, inq.estimatedArea != null ? `${inq.estimatedArea}㎡` : null]
+                            .filter(Boolean)
+                            .join(' · ') || inq.designerNotes || '—'}
+                        </p>
                       </td>
                       <td className="p-6 text-xs text-gray-400">{new Date(inq.submitDate).toLocaleDateString()}</td>
                       <td className="p-6">
-                        <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest ${inq.status === 'PENDING' ? 'bg-yellow-100 text-yellow-600' : 'bg-blue-100 text-blue-600'}`}>
-                          {inq.status === 'PENDING' ? '询价中' : '已报价'}
-                        </span>
+                        {inq.status === 'QUOTED' ? (
+                          <button
+                            type="button"
+                            onClick={() => setViewingQuote(inq)}
+                            className="px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest bg-blue-600 text-white hover:bg-blue-700"
+                          >
+                            已报价 · 查看
+                          </button>
+                        ) : (
+                          <span className="px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest bg-yellow-100 text-yellow-600">
+                            询价中
+                          </span>
+                        )}
                       </td>
                     </tr>
                   );

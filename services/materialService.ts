@@ -1,6 +1,6 @@
 import type { Material, PendingMaterial } from '../types';
 import type { MaterialHumanDna } from '../types/materialDetail';
-import { getSupabase, isSupabaseConfigured } from './supabaseClient';
+import { getSupabase, getSupabaseForPortal, isSupabaseConfigured } from './supabaseClient';
 import { parseOssObjectKey } from '../utils/parseOssObjectKey';
 import { enrichMaterialsWithFreshImages } from './materialImageService';
 
@@ -13,10 +13,13 @@ type MaterialRow = {
   is_pending: boolean;
   is_custom?: boolean | null;
   oss_object_key?: string | null;
+  view_count?: number | null;
+  favorite_count?: number | null;
+  quote_count?: number | null;
 };
 
 const MATERIAL_SELECT =
-  'id, user_id, supplier_id, data, status, is_pending, is_custom, oss_object_key';
+  'id, user_id, supplier_id, data, status, is_pending, is_custom, oss_object_key, view_count, favorite_count, quote_count';
 
 function mergeRowOssKey(
   data: Material | PendingMaterial,
@@ -33,15 +36,63 @@ function mergeRowOssKey(
   return { ...withOss, isCustom: isCustom };
 }
 
+function applyStatsColumns(
+  data: Material | PendingMaterial,
+  row: Pick<MaterialRow, 'view_count' | 'favorite_count' | 'quote_count'>
+): Material | PendingMaterial {
+  const next = { ...data } as Material;
+  if (typeof row.view_count === 'number') next.clicks = row.view_count;
+  if (typeof row.favorite_count === 'number') next.saves = row.favorite_count;
+  if (typeof row.quote_count === 'number') next.quoteCount = row.quote_count;
+  return next;
+}
+
 function rowToMaterial(row: MaterialRow): Material {
-  return mergeRowOssKey(row.data, row.oss_object_key, row.is_custom) as Material;
+  return applyStatsColumns(
+    mergeRowOssKey(row.data, row.oss_object_key, row.is_custom),
+    row
+  ) as Material;
 }
 
 function rowToPending(row: MaterialRow): PendingMaterial {
   return mergeRowOssKey(row.data, row.oss_object_key, row.is_custom) as PendingMaterial;
 }
 
-/** 获取已发布材料库（探索页） */
+/** 材料详情浏览 +1；返回最新 view_count（失败返回 null） */
+export async function incrementMaterialViewCount(
+  materialId: string
+): Promise<number | null> {
+  if (!isSupabaseConfigured() || !materialId) return null;
+
+  const { data, error } = await getSupabase().rpc('increment_material_view_count', {
+    p_material_id: materialId,
+  });
+
+  if (error) {
+    console.error('[materialService] incrementMaterialViewCount:', error.message);
+    return null;
+  }
+  return typeof data === 'number' ? data : Number(data) || null;
+}
+
+/** 询价次数 +1；返回最新 quote_count */
+export async function incrementMaterialQuoteCount(
+  materialId: string
+): Promise<number | null> {
+  if (!isSupabaseConfigured() || !materialId) return null;
+
+  const { data, error } = await getSupabase().rpc('increment_material_quote_count', {
+    p_material_id: materialId,
+  });
+
+  if (error) {
+    console.error('[materialService] incrementMaterialQuoteCount:', error.message);
+    return null;
+  }
+  return typeof data === 'number' ? data : Number(data) || null;
+}
+
+/** 获取已发布材料库（探索页 / 后台材料库监管） */
 export async function fetchPublishedMaterials(): Promise<Material[]> {
   if (!isSupabaseConfigured()) return [];
 
@@ -49,7 +100,7 @@ export async function fetchPublishedMaterials(): Promise<Material[]> {
     .from('materials')
     .select(MATERIAL_SELECT)
     .eq('is_pending', false)
-    .eq('status', '已发布');
+    .in('status', ['已发布', 'published']);
 
   if (error) {
     console.error('[materialService] fetchPublished:', error.message);
@@ -84,7 +135,7 @@ export async function fetchSupplierMaterials(
     return { published: [], pending: [] };
   }
 
-  const { data, error } = await getSupabase()
+  const { data, error } = await getSupabaseForPortal('supplier')
     .from('materials')
     .select(MATERIAL_SELECT)
     .eq('supplier_id', supplierId);
@@ -229,7 +280,8 @@ export async function saveMaterialDraft(
     return { ok: true };
   }
 
-  const { error } = await getSupabase()
+  // Supplier writes must use supplier Auth JWT (path /material/:id defaults to designer portal).
+  const { error } = await getSupabaseForPortal('supplier')
     .from('materials')
     .update({
       data: payload,
@@ -271,7 +323,7 @@ export async function republishMaterial(
     return { ok: true };
   }
 
-  const { error } = await getSupabase()
+  const { error } = await getSupabaseForPortal('supplier')
     .from('materials')
     .update({
       data: payload,

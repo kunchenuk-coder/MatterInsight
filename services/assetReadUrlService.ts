@@ -81,3 +81,17 @@ function isStableImageUrl(url: string): boolean {
   if (!isSignedOssUrl(url)) return true;
   return false;
 }
+
+/** 将 profiles.avatar（object key 或过期签名 URL）解析为当前可读地址 */
+export async function resolveProfileAvatarUrl(
+  stored: string | null | undefined
+): Promise<string | null> {
+  if (!stored?.trim()) return null;
+  const raw = stored.trim();
+  if (raw.startsWith('data:') || raw.startsWith('blob:')) return raw;
+  const key = parseOssObjectKey(raw);
+  if (!key) return raw;
+  const map = await fetchReadUrlsForObjectKeys([key]);
+  const resolved = resolveUrlFromMap(raw, key, map);
+  return resolved || null;
+}

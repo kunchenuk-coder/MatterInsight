@@ -30,12 +30,16 @@ export interface MaterialMoodTag {
 
 export type InspirationStoryStatus = 'pending' | 'approved' | 'rejected';
 
-/** Designer note submitted for the Human Aesthetic Chain. */
+/** Designer/supplier note submitted for the Human Aesthetic Chain. */
 export interface InspirationStory {
   id: string;
   author_id: string;
   text: string;
   status: InspirationStoryStatus;
+  /** Admin rejection note from inspiration_stories.review_notes */
+  review_notes?: string | null;
+  title?: string | null;
+  created_at?: string | null;
 }
 
 /**

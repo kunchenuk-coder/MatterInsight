@@ -1,6 +1,7 @@
 import type { DesignerMoodboardSummary, DesignerProfile, DesignerSocialStats, Material, MoodBoard } from '../types';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 import { rowToMoodBoard } from './moodboardService';
+import { resolveProfileAvatarUrl } from './assetReadUrlService';
 import {
   getMoodboardCoverImage,
   moodboardMaterialCount,
@@ -122,10 +123,11 @@ export async function getDesignerProfile(id: string): Promise<DesignerProfile | 
     .filter((url): url is string => Boolean(url));
 
   const stats = await fetchDesignerSocialStats(id);
+  const avatar = await resolveProfileAvatarUrl(row.avatar);
 
   return {
     id: row.id,
-    avatar: row.avatar ?? null,
+    avatar,
     username: row.username?.trim() || row.id.slice(0, 8),
     company: row.company ?? null,
     bio: row.bio ?? null,

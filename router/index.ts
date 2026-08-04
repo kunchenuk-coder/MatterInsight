@@ -115,17 +115,21 @@ export function redirectToRoleDashboard(
 
 /**
  * 管理员入口（/admin 或 admin 子域）：仅 admin 可进入后台；非 admin 返回 null（由调用方 signOut）。
- * 普通登录页仍走 redirectToRoleDashboard。
+ * 普通入口（Designer/Supplier）：禁止 admin 会话自动跳到 /admin-dashboard
+ * （同域 localStorage 共享 Supabase session，新开 localhost:3000/ 会误进后台）。
  */
 export function redirectAfterAuth(
   dbRole: string | null | undefined,
   replace = false
 ): DashboardPath | null {
+  const role = normalizeDbRole(dbRole);
   if (isAdminPortal()) {
-    if (normalizeDbRole(dbRole) !== 'admin') return null;
+    if (role !== 'admin') return null;
     return redirectToRoleDashboard('admin', replace);
   }
-  return redirectToRoleDashboard(dbRole, replace);
+  // Public portal: admin must re-auth via /admin; do not hijack Designer/Supplier entry
+  if (role === 'admin') return null;
+  return redirectToRoleDashboard(role, replace);
 }
 
 export function isDashboardPath(pathname = window.location.pathname): boolean {
@@ -147,14 +151,21 @@ export function getRoleFromDashboardPath(pathname = window.location.pathname): D
   return null;
 }
 
+export type GuardResult = 'ok' | 'redirected' | 'unauthorized';
+
 /**
- * 路由守卫：当前路径与登录用户 role 不一致 → 退回登录页。
- * @returns true 允许停留；false 已重定向到登录页
+ * 路由守卫：role / path 不匹配时只 redirect，禁止 signOut（保护三端隔离 session）。
+ * @returns true 允许停留；false 已 redirect（调用方勿再 signOut）
  */
 export function guardDashboardRoute(userDbRole: string | null | undefined): boolean {
   const role = normalizeDbRole(userDbRole);
   if (!role) {
-    window.location.href = LOGIN_PATH;
+    // 角色未就绪：不登出，回到当前入口登录 UI
+    const loginPath = isAdminPortal() ? '/admin' : LOGIN_PATH;
+    if (window.location.pathname !== loginPath) {
+      window.history.replaceState({}, '', loginPath);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }
     return false;
   }
 
@@ -169,7 +180,14 @@ export function guardDashboardRoute(userDbRole: string | null | undefined): bool
   }
 
   if (pathRole !== role) {
-    window.location.href = LOGIN_PATH;
+    const correct = getDashboardPathForRole(role);
+    if (correct) {
+      window.history.replaceState({}, '', correct);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    } else {
+      window.history.replaceState({}, '', isAdminPortal() ? '/admin' : LOGIN_PATH);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }
     return false;
   }
 

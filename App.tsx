@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, Component } from 'react';
-import { User, UserRole, Material, Category, MoodBoard, PointTransaction, PendingMaterial, Inquiry, SampleRequest, MaterialStatus, AuditLog, Notification } from './types';
+import { User, UserRole, Material, Category, MoodBoard, PointTransaction, PendingMaterial, Inquiry, SampleRequest, MaterialStatus, AuditLog, Notification, InquiryFormPayload } from './types';
 import { MOCK_MATERIALS } from './constants';
 import Navbar from './components/Navbar';
 import Auth from './components/Auth';
@@ -26,6 +26,8 @@ import {
 import { isSupabaseConfigured } from './services/supabaseClient';
 import { restoreSession, signOut, onAuthStateChange } from './services/authService';
 import { useDeviceSessionGuard } from './hooks/useDeviceSessionGuard';
+import useUnreadNotifications from './hooks/useUnreadNotifications';
+import { portalFromUserRole, setPortalOverride } from './utils/appPortal';
 import { syncMoodboards, subscribeMoodboardChanges, fetchPublicMoodboards, withDefaultVisibility } from './services/moodboardService';
 import { syncSavedMaterialIds } from './services/savedMaterialService';
 import {
@@ -33,6 +35,17 @@ import {
   approveMaterial as cloudApproveMaterial,
   rejectMaterial as cloudRejectMaterial,
 } from './services/materialService';
+import { recordPointsConsume } from './services/adminAnalyticsService';
+import {
+  createInquiry,
+  createSampleRequest,
+  countDesignerUnreadRequests,
+  fetchInquiriesForUser,
+  fetchSampleRequestsForUser,
+  shipSampleRequest,
+  submitInquiryQuote,
+} from './services/commerceRequestService';
+import { resolveProfileAvatarUrl } from './services/assetReadUrlService';
 import { loadDesignerCloudData, loadGlobalCloudData } from './services/dataSyncService';
 import {
   approveSupplier,
@@ -42,7 +55,6 @@ import {
 } from './services/profileService';
 import {
   assertDesignerCanRequestQuoteOrSample,
-  countUnreadDesignerQuotes,
   getDesignerRequestRejectionReason,
 } from './services/inquiryService';
 import {
@@ -114,12 +126,25 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
             </p>
             <button 
               onClick={() => {
-                localStorage.clear();
+                // 禁止 localStorage.clear()：会抹掉三端隔离的 auth session
+                try {
+                  const keys: string[] = [];
+                  for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i);
+                    if (!k) continue;
+                    if (k.startsWith('matter_insight_') && !k.includes('_device_session_') && !k.includes('_device_type_')) {
+                      keys.push(k);
+                    }
+                  }
+                  keys.forEach((k) => localStorage.removeItem(k));
+                } catch {
+                  /* ignore */
+                }
                 window.location.reload();
               }}
               className="w-full bg-black text-white py-4 rounded-2xl font-bold shadow-xl hover:scale-[1.02] transition-all"
             >
-              重置应用并刷新
+              清除业务缓存并刷新
             </button>
             <button 
               onClick={() => window.location.reload()}
@@ -163,6 +188,28 @@ const App: React.FC = () => {
   const [points, setPoints] = useState(1000); 
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [adminPass, setAdminPass] = useState('');
+
+  const {
+    total: dbUnreadTotal,
+    counts: dbUnreadCounts,
+    refresh: refreshUnreadNotifications,
+  } = useUnreadNotifications({
+    userId: user?.id,
+    portal: user ? portalFromUserRole(user.role) : undefined,
+    enabled: Boolean(user) && isSupabaseConfigured(),
+  });
+
+  /** 设计师：小样已寄出 / 询价已报价 的未读数（is_read_by_designer=false） */
+  const [designerUnreadRequests, setDesignerUnreadRequests] = useState(0);
+
+  const refreshDesignerUnreadRequests = async () => {
+    if (!isSupabaseConfigured() || !user || user.role !== 'DESIGNER') {
+      setDesignerUnreadRequests(0);
+      return;
+    }
+    const n = await countDesignerUnreadRequests('designer');
+    setDesignerUnreadRequests(n);
+  };
 
   // Persistence Helpers（配额告警全局仅一次，避免 useEffect 死循环弹窗）
   const quotaAlertShownRef = useRef(false);
@@ -266,8 +313,13 @@ const App: React.FC = () => {
       saves: m.saves || 0
     }));
   });
-  const [inquiries, setInquiries] = useState<Inquiry[]>(() => getFromLocal('inquiries') || []);
-  const [sampleRequests, setSampleRequests] = useState<SampleRequest[]>(() => getFromLocal('samples') || []);
+  // Supabase 模式下禁止用 LocalStorage 初始化业务单，避免空数组/脏数据盖住云端结果
+  const [inquiries, setInquiries] = useState<Inquiry[]>(() =>
+    isSupabaseConfigured() ? [] : getFromLocal('inquiries') || []
+  );
+  const [sampleRequests, setSampleRequests] = useState<SampleRequest[]>(() =>
+    isSupabaseConfigured() ? [] : getFromLocal('samples') || []
+  );
   const [moodboards, setMoodboards] = useState<MoodBoard[]>([]);
   const [publicMoodboards, setPublicMoodboards] = useState<MoodBoard[]>([]);
   const [collectedMoodboardIds, setCollectedMoodboardIds] = useState<string[]>([]);
@@ -325,11 +377,7 @@ const App: React.FC = () => {
     setSelectedMaterial(material);
     navigateTo(getMaterialPath(material.id, options));
     setCurrentView('DETAILS');
-    if (returnTo !== 'supplier') {
-      setLibrary((prev) =>
-        prev.map((mat) => (mat.id === material.id ? { ...mat, clicks: mat.clicks + 1 } : mat))
-      );
-    }
+    // 浏览次数由 MaterialDetail → increment_material_view_count RPC 真实写入
   };
 
   const closeMaterialDetail = () => {
@@ -390,6 +438,26 @@ const App: React.FC = () => {
     setActiveMoodboardId('');
   });
 
+  /**
+   * Keep Auth portal aligned with the logged-in role.
+   * Material edit URLs (`/material/:id?mode=edit`) are not supplier-dashboard paths;
+   * without this override getAppPortal() defaults to designer and RPCs use the wrong JWT.
+   */
+  useEffect(() => {
+    if (!user) {
+      setPortalOverride(null);
+      return;
+    }
+    const portal = portalFromUserRole(user.role);
+    setPortalOverride(portal === 'admin' ? null : portal);
+    console.info('[MatterInsight] portal bound to session', {
+      userId: user.id,
+      role: user.role,
+      dbRole: user.dbRole,
+      portal: portal === 'admin' ? 'admin(host/path)' : portal,
+    });
+  }, [user?.id, user?.role, user?.dbRole]);
+
   /** 运营后台：从 Supabase 拉取待认证供应商（跨设备同步，不依赖 localStorage） */
   const refreshVerificationRequestsFromCloud = async () => {
     if (!isSupabaseConfigured()) return;
@@ -403,8 +471,16 @@ const App: React.FC = () => {
 
   /** 先用本地缓存进入主页，不等待云端同步 */
   const enterAuthenticatedSession = (userData: User): boolean => {
+    // Admin 入口：非 admin → 只拒绝挂载，禁止 signOut（保护其他 portal session）
     if (isAdminPortal() && userData.dbRole !== 'admin') {
-      void signOut();
+      console.info('[MatterInsight] 非 admin 账号不能进入管理入口（未清除 session）');
+      return false;
+    }
+    // 普通入口：拒绝挂载 admin 身份 UI，不 signOut
+    if (!isAdminPortal() && userData.dbRole === 'admin') {
+      console.info(
+        '[MatterInsight] admin 会话请使用 /admin；当前为 Designer/Supplier 入口（未清除 session）'
+      );
       return false;
     }
 
@@ -430,10 +506,53 @@ const App: React.FC = () => {
     }
 
     if (!redirectAfterAuth(userData.dbRole, true)) {
-      void signOut().then(() => setUser(null));
+      // 权限/入口不符：卸下 UI，禁止 signOut
+      setUser(null);
       return false;
     }
     return true;
+  };
+
+  /** 从 Supabase 拉取询价/小样（设计师 / 材料商 / 管理员） */
+  const hydrateCommerceRequests = async (userData: User) => {
+    if (!isSupabaseConfigured()) return;
+    const role =
+      userData.dbRole === 'supplier'
+        ? 'supplier'
+        : userData.dbRole === 'admin'
+          ? 'admin'
+          : 'designer';
+    // 必须用角色对应 portal 的 JWT；勿用 getAppPortal()（刷新路径可能落到 designer）
+    const portal = portalFromUserRole(userData.role);
+    console.info('[MatterInsight] hydrateCommerceRequests start', {
+      userId: userData.id,
+      role,
+      portal,
+      uiRole: userData.role,
+      dbRole: userData.dbRole,
+    });
+
+    try {
+      localStorage.removeItem('matter_insight_samples');
+      localStorage.removeItem('matter_insight_inquiries');
+    } catch {
+      /* ignore */
+    }
+
+    const [cloudInquiries, cloudSamples] = await Promise.all([
+      fetchInquiriesForUser({ userId: userData.id, role, portal }),
+      fetchSampleRequestsForUser({ userId: userData.id, role, portal }),
+    ]);
+
+    console.info('[MatterInsight] hydrateCommerceRequests done', {
+      inquiries: cloudInquiries.length,
+      samples: cloudSamples.length,
+      sampleIds: cloudSamples.map((s) => s.id),
+      sampleSupplierIds: cloudSamples.map((s) => s.supplierId),
+    });
+
+    setInquiries(cloudInquiries);
+    setSampleRequests(cloudSamples);
   };
 
   /** 后台拉取云端数据并合并（登录 / 刷新恢复共用） */
@@ -464,6 +583,7 @@ const App: React.FC = () => {
         setSavedMaterialIds(collections);
         setMoodboards(boards);
         setActiveMoodboardId(boards[0]?.id ?? '');
+        await hydrateCommerceRequests(userData);
       } else if (userData.dbRole === 'admin') {
         const cloudGlobal = await loadGlobalCloudData();
         if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
@@ -471,12 +591,14 @@ const App: React.FC = () => {
           setPendingMaterials(cloudGlobal.pendingMaterials);
         }
         await refreshVerificationRequestsFromCloud();
+        await hydrateCommerceRequests(userData);
       } else {
         const cloudGlobal = await loadGlobalCloudData();
         if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
         if (cloudGlobal.pendingMaterials.length > 0) {
           setPendingMaterials(cloudGlobal.pendingMaterials);
         }
+        await hydrateCommerceRequests(userData);
       }
     } catch (err) {
       console.error('[MatterInsight] 云端数据同步失败:', err);
@@ -544,21 +666,19 @@ const App: React.FC = () => {
     prevPathnameRef.current = pathname;
   }, [pathname, library, user?.id]);
 
-  /** 已登录用户的路由守卫：role 与 URL 不匹配则退回登录页 */
+  /** 已登录用户的路由守卫：role/path 不匹配只 redirect，禁止 signOut */
   useEffect(() => {
     if (!user || recoveryMode || isPasswordRecoveryMode()) return;
-    if (!guardDashboardRoute(user.dbRole)) {
-      void signOut().then(() => setUser(null));
-    }
+    guardDashboardRoute(user.dbRole);
   }, [user, pathname, recoveryMode]);
 
-  /** 管理员入口：非 admin 会话一律清除；admin 登录后进入 /admin-dashboard */
+  /** 管理员入口：非 admin 只卸 UI；admin 登录后进入 /admin-dashboard */
   useEffect(() => {
     if (!user || recoveryMode || isPasswordRecoveryMode()) return;
     if (!isAdminPortal()) return;
 
     if (user.dbRole !== 'admin') {
-      void signOut().then(() => setUser(null));
+      setUser(null);
       return;
     }
 
@@ -768,9 +888,10 @@ const App: React.FC = () => {
     if (!isSupabaseConfigured() || !user || user.role !== 'DESIGNER') return;
 
     let cancelled = false;
-    void fetchProfile(user.id).then((profile) => {
+    void (async () => {
+      const profile = await fetchProfile(user.id);
       if (cancelled || !profile) return;
-      const avatar = profile.avatar ?? null;
+      const avatar = await resolveProfileAvatarUrl(profile.avatar);
       const company = profile.company?.trim() || undefined;
       const name = resolveUserDisplayName({ company: profile.company, email: profile.email });
       setUser((prev) => {
@@ -778,12 +899,20 @@ const App: React.FC = () => {
         if (prev.avatar === avatar && prev.company === company && prev.name === name) return prev;
         return { ...prev, avatar, company, name };
       });
-    });
+    })();
 
     return () => {
       cancelled = true;
     };
   }, [user?.id, user?.role]);
+
+  useEffect(() => {
+    if (!user || user.role !== 'DESIGNER' || !isSupabaseConfigured()) {
+      setDesignerUnreadRequests(0);
+      return;
+    }
+    void refreshDesignerUnreadRequests();
+  }, [user?.id, user?.role, sampleRequests, inquiries]);
 
   useEffect(() => {
     if (user && currentView === 'MOODBOARD' && user.role !== 'DESIGNER') {
@@ -800,12 +929,14 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Persistence Effect
+  // Persistence Effect（询价/小样在 Supabase 模式下不再回写 LocalStorage）
   useEffect(() => {
     saveToLocal('library', library);
     saveToLocal('pending', pendingMaterials);
-    saveToLocal('inquiries', inquiries);
-    saveToLocal('samples', sampleRequests);
+    if (!isSupabaseConfigured()) {
+      saveToLocal('inquiries', inquiries);
+      saveToLocal('samples', sampleRequests);
+    }
     saveToLocal('notifications', notifications);
     if (user?.role === 'DESIGNER') {
       saveToLocal('moodboards', pruneMoodboardsForQuota(moodboards), user.id);
@@ -814,6 +945,14 @@ const App: React.FC = () => {
     saveToLocal('verifications', verificationRequests);
     saveToLocal('verified_ids', verifiedUserIds);
   }, [library, pendingMaterials, inquiries, sampleRequests, moodboards, notifications, savedMaterialIds, verificationRequests, verifiedUserIds, user]);
+
+  /** 进入材料商/运营工作台时强制重拉云端小样与询价 */
+  useEffect(() => {
+    if (!user || !isSupabaseConfigured()) return;
+    if (currentView !== 'DASHBOARD') return;
+    if (user.dbRole !== 'supplier' && user.dbRole !== 'admin' && user.role !== 'DESIGNER') return;
+    void hydrateCommerceRequests(user);
+  }, [user?.id, user?.dbRole, currentView]);
 
   const addNotification = (userId: string, title: string, content: string, type: Notification['type'] = 'SYSTEM') => {
     const newNotif: Notification = {
@@ -1021,79 +1160,209 @@ const App: React.FC = () => {
     alert(`成功充值 ${amount} 积分！`);
   };
 
-  const handleInquiry = (materialId: string, moodBoardId: string, notes?: string) => {
-    const material = library.find(m => m.id === materialId);
-    if (!material || !user) return;
+  const handleInquiry = async (
+    materialId: string,
+    payloadOrMoodBoardId: string | InquiryFormPayload,
+    notes?: string
+  ): Promise<boolean> => {
+    const material = library.find((m) => m.id === materialId);
+    if (!material || !user) return false;
     if (!assertDesignerCanRequestQuoteOrSample(user)) {
       const reason = getDesignerRequestRejectionReason(user);
       if (reason === 'supplier') {
         console.warn('[MatterInsight] 材料商账户不可发起询价申请');
       }
+      return false;
+    }
+    if (!material.supplierId) {
+      alert('该材料缺少供应商信息，无法询价');
+      return false;
+    }
+
+    const structured: InquiryFormPayload =
+      typeof payloadOrMoodBoardId === 'string'
+        ? {
+            moodBoardId: payloadOrMoodBoardId,
+            remarks: notes,
+            projectName:
+              payloadOrMoodBoardId === 'STANDALONE' ? undefined : '情绪板询价',
+          }
+        : payloadOrMoodBoardId;
+
+    if (!isSupabaseConfigured()) {
+      const newInquiry: Inquiry = {
+        id: `inq_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+        materialId,
+        designerId: user.id,
+        supplierId: material.supplierId,
+        moodBoardId: structured.moodBoardId || 'STANDALONE',
+        status: 'PENDING',
+        submitDate: new Date().toISOString(),
+        designerNotes: structured.remarks || notes,
+        projectName: structured.projectName,
+        projectLocation: structured.projectLocation,
+        estimatedArea: structured.estimatedArea ?? undefined,
+        deliveryDate: structured.deliveryDate ?? undefined,
+      };
+      setInquiries((prev) => [newInquiry, ...prev]);
+      return true;
+    }
+
+    const result = await createInquiry({
+      materialId,
+      supplierId: material.supplierId,
+      designerId: user.id,
+      moodBoardId: structured.moodBoardId,
+      projectName: structured.projectName,
+      projectLocation: structured.projectLocation,
+      estimatedArea: structured.estimatedArea,
+      deliveryDate: structured.deliveryDate,
+      remarks: structured.remarks || notes,
+    });
+
+    if (!result.ok) {
+      console.error('[MatterInsight] createInquiry failed:', result.error);
+      return false;
+    }
+
+    setInquiries((prev) => [result.inquiry, ...prev.filter((i) => i.id !== result.inquiry.id)]);
+    void refreshUnreadNotifications();
+    return true;
+  };
+
+  const handleQuote = async (inquiryId: string, price: string, notes: string) => {
+    const existing = inquiries.find((i) => i.id === inquiryId);
+    if (!existing) return;
+
+    if (!isSupabaseConfigured()) {
+      setInquiries((prev) =>
+        prev.map((inq) => {
+          if (inq.id !== inquiryId) return inq;
+          const historyEntry = { price, date: new Date().toISOString(), notes };
+          return {
+            ...inq,
+            status: 'QUOTED' as const,
+            quotePrice: price,
+            notes,
+            totalPrice: (parseFloat(price) * (inq.estimatedArea || 150)).toString(),
+            history: [...(inq.history || []), historyEntry],
+          };
+        })
+      );
       return;
     }
 
-    const newInquiry: Inquiry = {
-      id: `inq_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-      materialId,
-      designerId: user.id,
-      supplierId: material.supplierId || 'supplier_1', 
-      moodBoardId,
-      status: 'PENDING',
-      submitDate: new Date().toISOString(),
-      designerNotes: notes
-    };
-    setInquiries(prev => [...prev, newInquiry]);
-    alert('询价申请已发送！材料商将尽快为您报价。');
+    const result = await submitInquiryQuote({
+      inquiryId,
+      price,
+      note: notes,
+      designerId: existing.designerId,
+      materialId: existing.materialId,
+      portal: 'supplier',
+    });
+
+    if (!result.ok) {
+      alert(`报价提交失败：${result.error}`);
+      return;
+    }
+
+    setInquiries((prev) =>
+      prev.map((inq) => (inq.id === inquiryId ? result.inquiry : inq))
+    );
+    void refreshUnreadNotifications();
   };
 
-  const handleQuote = (inquiryId: string, price: string, notes: string) => {
-    setInquiries(prev => prev.map(inq => {
-      if (inq.id === inquiryId) {
-        const historyEntry = { price, date: new Date().toISOString(), notes };
-        return { 
-          ...inq, 
-          status: 'QUOTED', 
-          quotePrice: price, 
-          notes, 
-          totalPrice: (parseFloat(price) * 150).toString(), // Mocking 150sqm
-          history: [...(inq.history || []), historyEntry]
-        };
-      }
-      return inq;
-    }));
-  };
-
-  const handleSampleRequest = (materialId: string, address: string, contactName: string, phone: string) => {
-    const material = library.find(m => m.id === materialId);
-    if (!user || !material) return;
+  const handleSampleRequest = async (
+    materialId: string,
+    address: string,
+    contactName: string,
+    phone: string
+  ): Promise<boolean> => {
+    const material = library.find((m) => m.id === materialId);
+    if (!user || !material) return false;
     if (!assertDesignerCanRequestQuoteOrSample(user)) {
       const reason = getDesignerRequestRejectionReason(user);
       if (reason === 'supplier') {
         console.warn('[MatterInsight] 材料商账户不可发起小样申请');
       }
-      return;
+      return false;
     }
-    const newRequest: SampleRequest = {
-      id: `samp_${Date.now()}`,
+    if (!material.supplierId) {
+      alert('该材料缺少供应商信息，无法申领小样');
+      return false;
+    }
+
+    if (!isSupabaseConfigured()) {
+      const newRequest: SampleRequest = {
+        id: `samp_${Date.now()}`,
+        materialId,
+        designerId: user.id,
+        supplierId: material.supplierId,
+        address,
+        contactName,
+        phone,
+        status: 'PENDING',
+        submitDate: new Date().toISOString(),
+      };
+      setSampleRequests((prev) => [newRequest, ...prev]);
+      return true;
+    }
+
+    const result = await createSampleRequest({
       materialId,
+      supplierId: material.supplierId,
       designerId: user.id,
-      supplierId: material.supplierId || 'supplier_1',
-      address,
-      contactName,
+      receiverName: contactName,
       phone,
-      status: 'PENDING',
-      submitDate: new Date().toISOString()
-    };
-    setSampleRequests(prev => [...prev, newRequest]);
-    alert('小样申请已提交！');
+      address,
+    });
+
+    if (!result.ok) {
+      console.error('[MatterInsight] createSampleRequest failed:', result.error);
+      return false;
+    }
+
+    setSampleRequests((prev) => [
+      result.request,
+      ...prev.filter((r) => r.id !== result.request.id),
+    ]);
+    void refreshUnreadNotifications();
+    return true;
   };
 
-  const handleShipSample = (requestId: string, role: 'SUPPLIER' | 'ADMIN') => {
-    setSampleRequests(prev => prev.map(req => 
-      req.id === requestId 
-        ? { ...req, status: role === 'SUPPLIER' ? 'SHIPPED_BY_SUPPLIER' : 'SHIPPED_BY_ADMIN', shipDate: new Date().toISOString() }
-        : req
-    ));
+  const handleShipSample = async (requestId: string, role: 'SUPPLIER' | 'ADMIN') => {
+    if (!isSupabaseConfigured()) {
+      setSampleRequests((prev) =>
+        prev.map((req) =>
+          req.id === requestId
+            ? {
+                ...req,
+                status: role === 'SUPPLIER' ? 'SHIPPED_BY_SUPPLIER' : 'SHIPPED_BY_ADMIN',
+                shipDate: new Date().toISOString(),
+              }
+            : req
+        )
+      );
+      alert('已标记为已寄出');
+      return;
+    }
+
+    const result = await shipSampleRequest({
+      requestId,
+      portal: role === 'ADMIN' ? 'admin' : 'supplier',
+    });
+    if (!result.ok) {
+      alert(`更新寄送状态失败：${result.error}`);
+      return;
+    }
+    setSampleRequests((prev) =>
+      prev.map((req) => (req.id === requestId ? result.request : req))
+    );
+    // 再拉一次云端，确保材料商/设计师刷新后一致
+    if (user) {
+      void hydrateCommerceRequests(user);
+    }
+    alert(role === 'ADMIN' ? '已代寄并标记为已寄出' : '已确认寄出');
   };
 
   const handleVerifySupplier = async (userId: string) => {
@@ -1195,15 +1464,22 @@ const App: React.FC = () => {
     return <Auth onAuthSuccess={handleAuthSuccess} adminPortal={isAdminPortal()} />;
   }
 
-  const unreadQuotes = countUnreadDesignerQuotes(user.id, inquiries);
-  const unreadInquiries = inquiries.filter(inq => inq.status === 'PENDING' && inq.supplierId === user.id).length;
-  const supplierNotifications = user.role === 'SUPPLIER' 
-    ? library.filter(m => m.supplierId === user.id && m.isAcknowledged === false).length +
-      pendingMaterials.filter(p => p.submitterId === user.id && p.status === MaterialStatus.REJECTED && p.isAcknowledged === false).length +
-      unreadInquiries
-    : 0;
-
-  const totalNotifications = user.role === 'SUPPLIER' ? supplierNotifications : unreadQuotes;
+  // Header 红点：材料商 = pending 小样 + pending 询价 + tag_added；设计师 = 未读小样/询价 + story_featured
+  const pendingSampleBadge = sampleRequests.filter(
+    (s) => s.supplierId === user.id && s.status === 'PENDING'
+  ).length;
+  const pendingInquiryBadge = inquiries.filter(
+    (inq) => inq.supplierId === user.id && inq.status === 'PENDING'
+  ).length;
+  const totalNotifications = isSupabaseConfigured()
+    ? user.role === 'SUPPLIER'
+      ? pendingSampleBadge + pendingInquiryBadge + dbUnreadCounts.tag_added
+      : user.role === 'DESIGNER'
+        ? designerUnreadRequests + dbUnreadCounts.story_featured
+        : dbUnreadTotal
+    : user.role === 'DESIGNER'
+      ? designerUnreadRequests
+      : pendingSampleBadge + pendingInquiryBadge;
 
   const handleAvatarClick = () => {
     if (user.role === 'DESIGNER') {
@@ -1259,13 +1535,17 @@ const App: React.FC = () => {
               ownedMoodboards={moodboards}
               onSelectMoodboard={openMoodboardFromFeed}
               onBack={leaveProfilePages}
-              onProfileUpdated={({ company }) => {
+              onProfileUpdated={({ company, avatar }) => {
                 setUser((prev) =>
                   prev
                     ? {
                         ...prev,
-                        company: company ?? undefined,
-                        name: resolveUserDisplayName({ company, email: prev.email }),
+                        company: company !== undefined ? company ?? undefined : prev.company,
+                        name:
+                          company !== undefined
+                            ? resolveUserDisplayName({ company, email: prev.email })
+                            : prev.name,
+                        avatar: avatar !== undefined ? avatar : prev.avatar,
                       }
                     : prev
                 );
@@ -1387,7 +1667,22 @@ const App: React.FC = () => {
                 );
                 setSelectedMaterial(updated);
               }}
-              onDeductPoints={(amt) => handlePointChange(-amt, '申领材料小样')}
+              onDeductPoints={(amt) => {
+                handlePointChange(-amt, '申领材料小样');
+                if (isSupabaseConfigured() && selectedMaterial?.supplierId) {
+                  void recordPointsConsume({
+                    amount: amt,
+                    description: '申领材料小样',
+                    supplierId: selectedMaterial.supplierId,
+                    materialId: selectedMaterial.id,
+                    orderType: 'sample',
+                    // 暂定：1 积分 ≈ ¥0.5 记入供应商 GMV（后续可改为真实计价）
+                    amountCny: amt * 0.5,
+                  }).then((r) => {
+                    if (r.ok) setPoints(r.balanceAfter);
+                  });
+                }
+              }}
               onSampleRequest={handleSampleRequest}
               onInquiry={handleInquiry}
               inquiries={inquiries}
@@ -1445,6 +1740,11 @@ const App: React.FC = () => {
                     onInquiry={handleInquiry}
                     onSampleRequest={handleSampleRequest}
                     sampleRequests={sampleRequests}
+                    onRequestsMarkedRead={() => {
+                      setDesignerUnreadRequests(0);
+                      void refreshUnreadNotifications();
+                      void refreshDesignerUnreadRequests();
+                    }}
                   />
                 );
               case 'supplier':
@@ -1463,11 +1763,29 @@ const App: React.FC = () => {
                     onShipSample={(id) => handleShipSample(id, 'SUPPLIER')}
                     onRequestVerification={handleRequestVerification}
                     onViewMaterialDetail={(m) => openMaterialDetail(m, 'supplier', { mode: 'edit' })}
+                    unreadCounts={dbUnreadCounts}
+                    onUnreadChanged={refreshUnreadNotifications}
                   />
                 );
               default:
-                void signOut().then(() => setUser(null));
-                return null;
+                // 未知角色：显示未授权，禁止 signOut
+                return (
+                  <div className="min-h-[50vh] flex flex-col items-center justify-center gap-4 p-8">
+                    <p className="text-lg font-black text-gray-800">无权访问此工作台</p>
+                    <p className="text-sm text-gray-500">请使用对应身份入口登录（未清除会话）</p>
+                    <button
+                      type="button"
+                      className="px-6 py-3 rounded-2xl bg-black text-white font-bold"
+                      onClick={() => {
+                        setUser(null);
+                        window.history.replaceState({}, '', isAdminPortal() ? '/admin' : '/');
+                        window.dispatchEvent(new PopStateEvent('popstate'));
+                      }}
+                    >
+                      返回登录
+                    </button>
+                  </div>
+                );
             }
           })()}
         </main>

@@ -51,8 +51,9 @@ const AvatarUpload: React.FC<AvatarUploadProps> = ({
       });
 
       const uploadFile = avatarBlobToFile(blob);
-      const { url } = await uploadImage(uploadFile, 'avatars');
-      onAvatarChange(url);
+      const { url, objectKey } = await uploadImage(uploadFile, 'avatars');
+      // 优先持久化 object key，避免签名 URL 过期后 Profile/Navbar 空白
+      onAvatarChange(objectKey || url);
       onToast('头像已更新');
     } catch (err) {
       console.error('[AvatarUpload]', err);

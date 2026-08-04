@@ -106,9 +106,11 @@ export interface Material {
     board: number;
     export: number;
   };
-  // Analytics
+  // Analytics（对应 materials.view_count / favorite_count / quote_count）
   clicks: number;
   saves: number;
+  /** 询价/报价次数（materials.quote_count） */
+  quoteCount?: number;
   savedBy: string[]; // List of user IDs
   isAcknowledged?: boolean; // For supplier notification badge
   /** OSS 对象键；展示时用于刷新过期预签名 URL */
@@ -255,9 +257,16 @@ export interface Inquiry {
   totalPrice?: string;
   notes?: string;
   designerNotes?: string;
+  /** 结构化询价字段（写入 inquiries 表） */
+  projectName?: string;
+  projectLocation?: string;
+  estimatedArea?: number;
+  deliveryDate?: string;
   history?: { price: string; date: string; notes: string }[]; // Added quote history
   /** 设计师已读报价时间；未设置且 status=QUOTED 时计入未读 */
   quoteReadAt?: string;
+  /** false = 设计师未读（供应商报价后） */
+  isReadByDesigner?: boolean;
 }
 
 export interface SampleRequest {
@@ -271,7 +280,20 @@ export interface SampleRequest {
   status: 'PENDING' | 'SHIPPED_BY_SUPPLIER' | 'SHIPPED_BY_ADMIN' | 'COMPLETED';
   submitDate: string;
   shipDate?: string;
+  trackingNumber?: string;
+  /** false = 设计师未读（供应商寄出后） */
+  isReadByDesigner?: boolean;
 }
+
+/** 详情页提交询价的结构化载荷 */
+export type InquiryFormPayload = {
+  moodBoardId?: string;
+  projectName?: string;
+  projectLocation?: string;
+  estimatedArea?: number | null;
+  deliveryDate?: string | null;
+  remarks?: string;
+};
 
 /** 上传目录分类（OSS 路径 users/{id}/assets/{category}/...） */
 export type UploadFolder =

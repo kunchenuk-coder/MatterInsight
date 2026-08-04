@@ -9,8 +9,25 @@ export type LogMaterialEventResult =
   | { ok: true; eventId: string }
   | { ok: false; error: string };
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function isValidActionType(value: string): value is MaterialEventActionType {
   return (MATERIAL_EVENT_ACTIONS as readonly string[]).includes(value);
+}
+
+/** Normalize material id to uuid string, or null when absent / invalid. */
+export function normalizeMaterialIdForEventLog(
+  materialId: string | null | undefined
+): string | null {
+  if (materialId == null) return null;
+  const trimmed = String(materialId).trim();
+  if (!trimmed) return null;
+  if (!UUID_RE.test(trimmed)) {
+    console.warn('[eventLogService] skip non-uuid material_id:', trimmed);
+    return null;
+  }
+  return trimmed.toLowerCase();
 }
 
 /**
@@ -18,7 +35,7 @@ function isValidActionType(value: string): value is MaterialEventActionType {
  * Uses the authenticated session user — do not pass a spoofable user id from the client.
  *
  * @param userId — Must match the signed-in user (guard against accidental mismatches).
- * @param materialId — Catalog material id (text); null for cross-material / moodboard-only events.
+ * @param materialId — materials.id as UUID string; null for cross-material events.
  */
 export async function logMaterialEvent(
   userId: string,
@@ -33,10 +50,12 @@ export async function logMaterialEvent(
     return { ok: false, error: `Invalid actionType: ${actionType}` };
   }
 
+  const normalizedMaterialId = normalizeMaterialIdForEventLog(materialId);
+
   if (!isSupabaseConfigured()) {
     console.info('[eventLogService] logMaterialEvent (local mock)', {
       userId,
-      materialId,
+      materialId: normalizedMaterialId,
       actionType,
       payload,
     });
@@ -55,7 +74,7 @@ export async function logMaterialEvent(
   }
 
   const { data, error } = await client.rpc('log_material_event', {
-    p_material_id: materialId,
+    p_material_id: normalizedMaterialId,
     p_action_type: actionType,
     p_payload: payload,
   });

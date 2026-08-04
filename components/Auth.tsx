@@ -1,8 +1,9 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { UserRole } from '../types';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 import { requestPasswordReset, signIn, signUp, isRegisteredRoleError } from '../services/authService';
+import { portalFromUserRole, setPortalOverride } from '../utils/appPortal';
 import AuthShell from './AuthShell';
 
 interface AuthProps {
@@ -48,6 +49,14 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
+
+  // 登录 Tab / Admin 入口 → 绑定对应 Auth storageKey（不改数据源）
+  // Do NOT clear override on unmount: leaving Auth after login would reset portal to
+  // path-default (designer) and break supplier RPCs on /material/:id?mode=edit.
+  useEffect(() => {
+    const portal = portalFromUserRole(adminPortal ? 'ADMIN' : role);
+    setPortalOverride(portal === 'admin' ? null : portal);
+  }, [role, adminPortal]);
 
   if (!isSupabaseConfigured()) {
     return (

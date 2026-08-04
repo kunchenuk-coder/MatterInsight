@@ -7,14 +7,16 @@ export const ADMIN_DASHBOARD_PATH = '/admin-dashboard';
 
 /**
  * 是否为「管理员入口」：
- *   1) 域名以 admin 开头或包含 admin（如 matterinsightadmin.vercel.app / admin.xxx.com）；
+ *   1) admin host（admin.localhost / *.admin* 等）；
  *   2) 或访问 /admin、/admin-dashboard。
- * 普通登录页（设计师 / 材料商）不会命中此判断，从而隐藏管理端入口。
+ * 与 utils/appPortal 判定一致，供路由 / Auth 使用。
  */
 export function isAdminPortal(pathname = getPathname()): boolean {
-  const host = window.location.hostname.toLowerCase();
+  // 延迟引用，避免与 appPortal 循环依赖在打包期出问题
   const path = pathname.toLowerCase().replace(/\/+$/, '') || '/';
-  const onAdminHost = host.startsWith('admin') || host.includes('admin');
+  const host = window.location.hostname.toLowerCase();
+  const onAdminHost =
+    host === 'admin.localhost' || host.startsWith('admin.') || host.includes('admin');
   const onAdminPath =
     path === ADMIN_PORTAL_PATH ||
     path === ADMIN_DASHBOARD_PATH ||

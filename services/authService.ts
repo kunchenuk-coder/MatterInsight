@@ -1,7 +1,14 @@
 import type { User, UserRole } from '../types';
 import type { User as SupabaseAuthUser } from '@supabase/supabase-js';
-import { getSupabase, supabase, isSupabaseConfigured } from './supabaseClient';
-import { getPasswordResetRedirectUrl, isPasswordRecoveryFromUrl, isPasswordRecoveryMode, isResetPasswordRoute, lockPasswordRecoveryMode } from '../utils/authRoutes';
+import { getSupabase, getSupabaseForPortal, isSupabaseConfigured } from './supabaseClient';
+import {
+  getPasswordResetRedirectUrl,
+  isPasswordRecoveryFromUrl,
+  isPasswordRecoveryMode,
+  isResetPasswordRoute,
+  lockPasswordRecoveryMode,
+} from '../utils/authRoutes';
+import { getAppPortal, portalFromUserRole, setPortalOverride, type AppPortal } from '../utils/appPortal';
 import {
   dbRoleToUserRole,
   fetchProfile,
@@ -58,12 +65,15 @@ export function isRoleMismatchError(message: string): boolean {
   return isRegisteredRoleError(message);
 }
 
-/** 邮箱已存在时，用同一密码登录一次以读取 profiles.role（随后立即 signOut） */
+/**
+ * 邮箱已存在时，用临时 designer portal 试登读取 profiles.role。
+ * 仅清除 designer portal 的试登 session，不影响 admin/supplier 隔离会话。
+ */
 async function lookupExistingRoleByCredentials(
   email: string,
   password: string
 ): Promise<UserRole | null> {
-  const client = getSupabase();
+  const client = getSupabaseForPortal('designer');
   const { data, error } = await client.auth.signInWithPassword({ email, password });
   if (error || !data.user) return null;
 
@@ -97,7 +107,6 @@ function mapProfileToUser(
     name: resolveUserDisplayName({ company: profile.company, email: profile.email }),
     company: profile.company?.trim() || undefined,
     points: role === 'DESIGNER' ? 1000 : role === 'ADMIN' ? 999999 : 0,
-    // 材料商以数据库 is_verified 为准（管理员审核通过后解锁）；其余角色默认已验证。
     isVerified: isSupplier ? profile.is_verified === true : true,
     accountStatus: isSupplier ? supplierStatus : undefined,
     registeredPhone: profile.registered_phone ?? undefined,
@@ -115,6 +124,15 @@ async function requireProfile(
   return fetchProfile(authUser.id);
 }
 
+/** 注册失败时仅清除当前 portal 刚写入的 session（不触碰其他端） */
+async function discardPortalSession(portal: AppPortal): Promise<void> {
+  try {
+    await getSupabaseForPortal(portal).auth.signOut();
+  } catch {
+    /* ignore */
+  }
+}
+
 /** 注册：一邮箱一身份，角色写入 profiles.role（小写） */
 export async function signUp(
   email: string,
@@ -125,10 +143,11 @@ export async function signUp(
     return { ok: false, error: '管理员账号请联系平台开通' };
   }
 
-  const client = getSupabase();
+  const portal = portalFromUserRole(role);
+  setPortalOverride(portal);
+  const client = getSupabaseForPortal(portal);
   const dbRole = userRoleToDbRole(role);
-  // 把所选身份写入 user_metadata，让数据库触发器 handle_new_user 直接写对 profiles.role，
-  // 而不是回退成默认的 designer。
+
   const { data, error } = await client.auth.signUp({
     email,
     password,
@@ -156,38 +175,46 @@ export async function signUp(
 
   const profileResult = await insertProfileOnSignup(data.user.id, email, role);
   if (profileResult.ok === false) {
-    await client.auth.signOut();
+    await discardPortalSession(portal);
     return { ok: false, error: profileResult.error };
   }
 
   const profile = await requireProfile(data.user);
   if (!profile) {
-    await client.auth.signOut();
-    return { ok: false, error: '注册失败，请稍后重试' };
+    // 资料暂不可读：保留 session，由 UI 提示，禁止误杀其他端
+    console.warn('[authService] signUp profile missing; keeping portal session');
+    return { ok: false, error: '注册成功但资料加载失败，请刷新后重试' };
   }
 
   const user = mapProfileToUser(profile, {
     showWelcomeBonus: role === 'DESIGNER',
   });
 
-  const sessionOk = await registerDeviceSession(data.user.id, data.session?.access_token);
+  const sessionOk = await registerDeviceSession(
+    data.user.id,
+    data.session?.access_token,
+    portal
+  );
   if (!sessionOk) {
-    await client.auth.signOut();
-    return { ok: false, error: '设备会话注册失败，请重试' };
+    // 设备指纹暂时失败：不清除 Auth session
+    console.warn('[authService] signUp device session register failed; keeping auth session');
   }
 
   return { ok: true, user };
 }
 
 /**
- * 登录：Auth 通过后必须校验 profiles.role 与当前选项卡一致。
+ * 登录：写入 expectedRole 对应 portal 的 storageKey（与其他端隔离）。
  */
 export async function signIn(
   email: string,
   password: string,
   expectedRole: UserRole
 ): Promise<AuthResult> {
-  const client = getSupabase();
+  const portal = portalFromUserRole(expectedRole);
+  setPortalOverride(portal === 'admin' ? null : portal);
+  const client = getSupabaseForPortal(portal);
+
   const { data, error } = await client.auth.signInWithPassword({ email, password });
 
   if (error || !data.session || !data.user) {
@@ -196,70 +223,99 @@ export async function signIn(
 
   const profile = await requireProfile(data.user);
   if (!profile) {
-    await client.auth.signOut();
-    return { ok: false, error: '账号资料异常，请联系客服' };
+    console.warn('[authService] signIn profile missing; keeping portal session');
+    return { ok: false, error: '账号资料加载失败，请稍后重试（未清除登录会话）' };
   }
 
   const role = normalizeDbRole(profile.role);
   if (!role) {
-    await client.auth.signOut();
+    await discardPortalSession(portal);
     return { ok: false, error: '账号角色数据异常，请联系客服' };
   }
 
   const actualRole = dbRoleToUserRole(role);
   if (role !== userRoleToDbRole(expectedRole)) {
-    await client.auth.signOut();
+    // 错入口：仅丢掉本 portal 刚写入的错误 session，不影响其他端已登录态
+    await discardPortalSession(portal);
     return { ok: false, error: registeredRoleMessage(actualRole) };
   }
 
-  const sessionOk = await registerDeviceSession(data.user.id, data.session.access_token);
+  const sessionOk = await registerDeviceSession(
+    data.user.id,
+    data.session.access_token,
+    portal
+  );
   if (!sessionOk) {
-    await client.auth.signOut();
-    return { ok: false, error: '设备会话注册失败，请重试' };
+    console.warn('[authService] signIn device session register failed; keeping auth session');
   }
 
   return { ok: true, user: mapProfileToUser(profile) };
 }
 
+/** 仅退出当前 portal 的 Auth session（主动退出） */
 export async function signOut(options?: { removeDeviceRecord?: boolean }): Promise<void> {
-  const client = getSupabase();
+  const portal = getAppPortal();
+  const client = getSupabaseForPortal(portal);
   const { data } = await client.auth.getSession();
   const userId = data.session?.user?.id;
   const removeDevice = options?.removeDeviceRecord !== false;
   if (userId && removeDevice) {
-    await removeDeviceSession(userId);
+    await removeDeviceSession(userId, portal);
   }
-  clearLocalDeviceSession();
+  clearLocalDeviceSession(userId ?? undefined, portal);
   await client.auth.signOut();
 }
 
-/** 刷新页面时按 profiles 真实角色恢复（recovery 模式下一律不恢复进主页） */
+/**
+ * 刷新恢复：只读当前入口 portal 的 session。
+ * profile / device 暂时失败时不 signOut。
+ */
 export async function restoreSession(): Promise<User | null> {
   if (!isSupabaseConfigured()) return null;
   if (isPasswordRecoveryMode()) return null;
 
-  const { data, error } = await supabase.auth.getSession();
+  const portal = getAppPortal();
+  const client = getSupabaseForPortal(portal);
+  const { data, error } = await client.auth.getSession();
+
+  // refresh token 明确失效 → 允许清除本 portal session
+  if (error && /refresh token|invalid.*token|session.*expired/i.test(error.message ?? '')) {
+    await discardPortalSession(portal);
+    return null;
+  }
   if (error || !data.session?.user) return null;
 
   const profile = await requireProfile(data.session.user);
   if (!profile) {
-    await signOut();
+    console.warn('[authService] restoreSession profile missing; keeping session');
     return null;
   }
 
   const sessionOk = await ensureDeviceSessionOnRestore(
     data.session.user.id,
-    data.session.access_token
+    data.session.access_token,
+    portal
   );
   if (!sessionOk) {
-    await signOut();
-    return null;
+    console.warn('[authService] restoreSession device mismatch (temporary); keeping auth session');
   }
 
   try {
-    return mapProfileToUser(profile);
-  } catch {
-    await signOut();
+    const user = mapProfileToUser(profile);
+    // 入口与角色不符：不清除 session，交给路由层 redirect / unauthorized
+    if (portalFromUserRole(user.role) !== portal && portal === 'admin') {
+      console.warn('[authService] non-admin session on admin portal; not signing out');
+      return null;
+    }
+    if (portal === 'admin' && user.dbRole !== 'admin') {
+      return null;
+    }
+    if (portal !== 'admin' && user.dbRole === 'admin') {
+      return null;
+    }
+    return user;
+  } catch (err) {
+    console.warn('[authService] restoreSession mapProfile failed:', err);
     return null;
   }
 }
@@ -269,12 +325,11 @@ export function onAuthStateChange(
 ): () => void {
   if (!isSupabaseConfigured()) return () => {};
 
-  // 注意：回调内严禁再 await 其它 supabase 调用（官方告警：易死锁）。
-  // App 端的监听只消费“用户变为 null（登出）”这一种情况，非空用户不会被使用，
-  // 因此这里只在「真正登出 / 密码恢复」时回调 null；其余事件（SIGNED_IN /
-  // INITIAL_SESSION / TOKEN_REFRESHED / USER_UPDATED 等）一律不打扰已登录态，
-  // 避免移动端切前后台、双指缩放等触发的瞬时会话重校验把用户错误踢回登录页。
-  const { data } = supabase.auth.onAuthStateChange((event, session) => {
+  const portal = getAppPortal();
+  const client = getSupabaseForPortal(portal);
+
+  // 只监听当前 portal；SIGNED_OUT 不波及其他 portal 的 storageKey
+  const { data } = client.auth.onAuthStateChange((event, session) => {
     if (event === 'PASSWORD_RECOVERY') {
       lockPasswordRecoveryMode(true);
       callback(null);
@@ -289,6 +344,11 @@ export function onAuthStateChange(
     if (event === 'SIGNED_OUT') {
       callback(null);
       return;
+    }
+
+    // TOKEN_REFRESHED 失败时 supabase-js 可能随后发 SIGNED_OUT；此处不主动清 session
+    if (event === 'TOKEN_REFRESHED' && !session) {
+      callback(null);
     }
   });
 

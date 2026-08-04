@@ -5,6 +5,12 @@ import { CATEGORIES } from '../constants';
 import MaterialVoiceFillButton from './MaterialVoiceFillButton';
 import PublishMaterialMobilePanel from './PublishMaterialMobilePanel';
 import { uploadImage } from '../services/uploadService';
+import {
+  EMPTY_UNREAD_COUNTS,
+  markNotificationsRead,
+  type UnreadNotificationCounts,
+} from '../services/notificationService';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 
 const COMMON_COLORS = [
   { name: '白色', code: '#FFFFFF' },
@@ -26,11 +32,14 @@ interface SupplierDashboardProps {
   onSubmitForReview: (material: PendingMaterial) => void;
   onRechargeClick: () => void;
   inquiries: Inquiry[];
-  onQuote: (inquiryId: string, price: string, notes: string) => void;
+  onQuote: (inquiryId: string, price: string, notes: string) => void | Promise<void>;
   sampleRequests: SampleRequest[];
-  onShipSample: (requestId: string) => void;
+  onShipSample: (requestId: string) => void | Promise<void>;
   onRequestVerification: (phone: string, doc: string) => void;
   onViewMaterialDetail: (material: Material) => void;
+  /** notifications 表未读分类（真实红点） */
+  unreadCounts?: UnreadNotificationCounts;
+  onUnreadChanged?: () => void;
 }
 
 const UPLOAD_FOLDER: Record<'image' | 'projectPhotos' | 'variants', 'materials' | 'project-photos' | 'variants'> = {
@@ -41,7 +50,8 @@ const UPLOAD_FOLDER: Record<'image' | 'projectPhotos' | 'variants', 'materials' 
 
 const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
   user, library, setLibrary, pendingList, setPendingMaterials, onSubmitForReview, onRechargeClick, inquiries, onQuote,
-  sampleRequests, onShipSample, onRequestVerification, onViewMaterialDetail
+  sampleRequests, onShipSample, onRequestVerification, onViewMaterialDetail,
+  unreadCounts = EMPTY_UNREAD_COUNTS, onUnreadChanged,
 }) => {
   const [isPublishing, setIsPublishing] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -49,13 +59,31 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
   const [activeTab, setActiveTab] = useState<'ORDERS' | 'PRODUCTS' | 'SAMPLES'>('ORDERS');
   const [showOrderDetails, setShowOrderDetails] = useState<Inquiry | null>(null);
 
-  // Clear notifications when viewing products
+  // 进入对应 Tab 时标记该类型通知已读（真实消消乐）
   React.useEffect(() => {
-    if (activeTab === 'PRODUCTS') {
-      setLibrary(prev => prev.map(m => m.supplierId === user.id ? { ...m, isAcknowledged: true } : m));
-      setPendingMaterials(prev => prev.map(p => p.submitterId === user.id ? { ...p, isAcknowledged: true } : p));
+    if (!isSupabaseConfigured()) {
+      if (activeTab === 'PRODUCTS') {
+        setLibrary((prev) =>
+          prev.map((m) => (m.supplierId === user.id ? { ...m, isAcknowledged: true } : m))
+        );
+        setPendingMaterials((prev) =>
+          prev.map((p) => (p.submitterId === user.id ? { ...p, isAcknowledged: true } : p))
+        );
+      }
+      return;
     }
-  }, [activeTab, user.id, setLibrary, setPendingMaterials]);
+    const types =
+      activeTab === 'ORDERS'
+        ? (['inquiry'] as const)
+        : activeTab === 'SAMPLES'
+          ? (['sample_request'] as const)
+          : null;
+    // PRODUCTS：tag_added 在进入材料详情时按 target 清除，这里不整表清零
+    if (!types) return;
+    void markNotificationsRead({ types: [...types], portal: 'supplier' }).then((r) => {
+      if (r.ok && r.count > 0) onUnreadChanged?.();
+    });
+  }, [activeTab, user.id, setLibrary, setPendingMaterials, onUnreadChanged]);
   const [showQuoteForm, setShowQuoteForm] = useState<Inquiry | null>(null);
   const [quotePrice, setQuotePrice] = useState('');
   const [quoteNotes, setQuoteNotes] = useState('');
@@ -189,8 +217,21 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
   };
   const supplierProducts = library.filter(m => m.supplierId === user.id);
   const myPendingProducts = pendingList.filter(p => p.submitterId === user.id);
-  const supplierInquiries = inquiries.filter(inq => inq.supplierId === 'supplier_1' || inq.supplierId === user.id); // Robust filtering
-  const supplierSamples = sampleRequests.filter(req => req.supplierId === 'supplier_1' || req.supplierId === user.id);
+  // 仅按真实 supplier_id 过滤（不再兼容假 ID supplier_1）
+  const supplierInquiries = inquiries.filter((inq) => inq.supplierId === user.id);
+  const supplierSamples = sampleRequests.filter((req) => req.supplierId === user.id);
+  const pendingSampleCount = supplierSamples.filter((s) => s.status === 'PENDING').length;
+
+  React.useEffect(() => {
+    console.info('[SupplierDashboard] sampleRequests snapshot', {
+      userId: user.id,
+      totalProps: sampleRequests.length,
+      matched: sampleRequests.filter((r) => r.supplierId === user.id).length,
+      pending: sampleRequests.filter(
+        (r) => r.supplierId === user.id && r.status === 'PENDING'
+      ).length,
+    });
+  }, [user.id, sampleRequests]);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>, field: 'image' | 'projectPhotos' | 'variants') => {
     const files = e.target.files;
@@ -304,9 +345,13 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
     }
   };
 
-  const handleSendQuote = () => {
+  const handleSendQuote = async () => {
     if (!showQuoteForm) return;
-    onQuote(showQuoteForm.id, quotePrice, quoteNotes);
+    if (!quotePrice.trim() || Number.isNaN(parseFloat(quotePrice))) {
+      alert('请填写有效的报价金额');
+      return;
+    }
+    await Promise.resolve(onQuote(showQuoteForm.id, quotePrice, quoteNotes));
     alert('报价已成功发送给设计师！');
     setShowQuoteForm(null);
     setQuotePrice('');
@@ -339,8 +384,13 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
       <div className="grid grid-cols-1 md:grid-cols-4 gap-8">
         <div 
           onClick={() => setActiveTab('PRODUCTS')}
-          className={`p-6 rounded-3xl border text-center shadow-sm cursor-pointer transition-all ${activeTab === 'PRODUCTS' ? 'bg-black text-white border-black scale-105' : 'bg-white hover:bg-gray-50'}`}
+          className={`relative p-6 rounded-3xl border text-center shadow-sm cursor-pointer transition-all ${activeTab === 'PRODUCTS' ? 'bg-black text-white border-black scale-105' : 'bg-white hover:bg-gray-50'}`}
         >
+          {unreadCounts.tag_added > 0 && (
+            <span className="absolute -top-2 -right-2 min-w-[22px] h-[22px] px-1.5 rounded-full bg-red-500 text-white text-[11px] font-black flex items-center justify-center border-2 border-white">
+              {unreadCounts.tag_added}
+            </span>
+          )}
           <p className={`${activeTab === 'PRODUCTS' ? 'text-gray-400' : 'text-gray-400'} text-[10px] font-bold uppercase mb-1`}>上架单品</p>
           <p className="text-3xl font-black">{supplierProducts.length + myPendingProducts.length} / 50</p>
           <div className={`w-full ${activeTab === 'PRODUCTS' ? 'bg-gray-800' : 'bg-gray-100'} h-1.5 mt-4 rounded-full overflow-hidden`}>
@@ -353,10 +403,15 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
         </div>
         <div 
           onClick={() => setActiveTab('SAMPLES')}
-          className={`p-6 rounded-3xl border text-center shadow-sm cursor-pointer transition-all ${activeTab === 'SAMPLES' ? 'bg-black text-white border-black scale-105' : 'bg-white hover:bg-gray-50'}`}
+          className={`relative p-6 rounded-3xl border text-center shadow-sm cursor-pointer transition-all ${activeTab === 'SAMPLES' ? 'bg-black text-white border-black scale-105' : 'bg-white hover:bg-gray-50'}`}
         >
+          {pendingSampleCount > 0 && (
+            <span className="absolute -top-2 -right-2 min-w-[22px] h-[22px] px-1.5 rounded-full bg-red-500 text-white text-[11px] font-black flex items-center justify-center border-2 border-white">
+              {pendingSampleCount}
+            </span>
+          )}
           <p className={`${activeTab === 'SAMPLES' ? 'text-gray-400' : 'text-gray-400'} text-[10px] font-bold uppercase mb-1`}>小样申请</p>
-          <p className={`text-3xl font-black ${activeTab === 'SAMPLES' ? 'text-white' : 'text-orange-500'}`}>{supplierSamples.filter(s => s.status === 'PENDING').length}</p>
+          <p className={`text-3xl font-black ${activeTab === 'SAMPLES' ? 'text-white' : 'text-orange-500'}`}>{pendingSampleCount}</p>
         </div>
         <div className="bg-white p-6 rounded-3xl border text-center shadow-sm">
           <p className="text-gray-400 text-[10px] font-bold uppercase mb-1">信誉分</p>
@@ -365,9 +420,23 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
       </div>
 
       <div className="flex gap-8 border-b">
-        <button onClick={() => setActiveTab('ORDERS')} className={`pb-4 text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'ORDERS' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>待处理询价单</button>
+        <button onClick={() => setActiveTab('ORDERS')} className={`relative pb-4 text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'ORDERS' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>
+          待处理询价单
+          {unreadCounts.inquiry > 0 && (
+            <span className="ml-2 inline-flex min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-black items-center justify-center align-middle">
+              {unreadCounts.inquiry}
+            </span>
+          )}
+        </button>
         <button onClick={() => setActiveTab('SAMPLES')} className={`pb-4 text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'SAMPLES' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>小样申请单</button>
-        <button onClick={() => setActiveTab('PRODUCTS')} className={`pb-4 text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'PRODUCTS' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>我的上架单品</button>
+        <button onClick={() => setActiveTab('PRODUCTS')} className={`relative pb-4 text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'PRODUCTS' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>
+          我的上架单品
+          {unreadCounts.tag_added > 0 && (
+            <span className="ml-2 inline-flex min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-black items-center justify-center align-middle">
+              {unreadCounts.tag_added}
+            </span>
+          )}
+        </button>
       </div>
 
       {activeTab === 'ORDERS' && (
@@ -386,7 +455,20 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                         <span className="text-sm font-bold">询价材料: {m?.name}</span>
                         {inq.status === 'PENDING' && <span className="text-[10px] bg-red-500 text-white px-2 py-0.5 rounded-full font-bold">NEW</span>}
                       </div>
-                      <p className="text-xs text-gray-400">项目ID: {inq.moodBoardId} · 申请日期: {new Date(inq.submitDate).toLocaleDateString()}</p>
+                      <p className="text-xs text-gray-400">
+                        {inq.projectName || `项目: ${inq.moodBoardId}`}
+                        {inq.projectLocation ? ` · ${inq.projectLocation}` : ''}
+                        {inq.estimatedArea != null ? ` · ${inq.estimatedArea}㎡` : ''}
+                        {' · '}
+                        {new Date(inq.submitDate).toLocaleDateString()}
+                      </p>
+                      {inq.designerNotes || inq.deliveryDate ? (
+                        <p className="text-[11px] text-gray-500 mt-1">
+                          {inq.deliveryDate ? `交付: ${inq.deliveryDate}` : ''}
+                          {inq.deliveryDate && inq.designerNotes ? ' · ' : ''}
+                          {inq.designerNotes || ''}
+                        </p>
+                      ) : null}
                       <p className="text-xs text-gray-400 mt-1 font-bold">
                         {inq.status === 'PENDING' ? (
                           <span className="text-orange-500">等待初次报价</span>
@@ -435,14 +517,17 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                   <div className="flex gap-3">
                     {req.status === 'PENDING' ? (
                       <button 
-                        onClick={() => onShipSample(req.id)}
+                        type="button"
+                        onClick={() => {
+                          void Promise.resolve(onShipSample(req.id));
+                        }}
                         className="px-6 py-2 bg-black text-white rounded-full text-xs font-bold shadow-lg shadow-black/10"
                       >
                         确认已寄出
                       </button>
                     ) : (
                       <span className="px-6 py-2 bg-green-50 text-green-600 rounded-full text-xs font-bold">
-                        {req.status === 'SHIPPED_BY_SUPPLIER' ? '已寄出' : '平台代寄'}
+                        {req.status === 'SHIPPED_BY_ADMIN' ? '平台代寄' : '已寄出'}
                       </span>
                     )}
                   </div>

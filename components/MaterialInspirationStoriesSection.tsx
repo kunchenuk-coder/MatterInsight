@@ -6,6 +6,8 @@ import {
   persistInspirationStories,
   submitInspirationStory,
 } from '../services/inspirationStoryService';
+import useMarkNotificationsRead from '../hooks/useMarkNotificationsRead';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 
 interface MaterialInspirationStoriesSectionProps {
   stories: InspirationStory[];
@@ -19,17 +21,49 @@ interface MaterialInspirationStoriesSectionProps {
   material?: Material;
   /** Sync brand stories to published material row for designer explore feed. */
   persistBrandStories?: boolean;
+  isLoading?: boolean;
+}
+
+/**
+ * Visibility:
+ * - published/approved → everyone
+ * - pending_review/pending + rejected → author only
+ */
+function visibleStoriesForUser(
+  stories: InspirationStory[],
+  userId: string | undefined,
+  isPublicView: boolean
+): InspirationStory[] {
+  return stories.filter((s) => {
+    if (s.status === 'approved') return true;
+    if (isPublicView || !userId) return false;
+    if (s.author_id !== userId) return false;
+    return s.status === 'pending' || s.status === 'rejected';
+  });
 }
 
 export const MaterialInspirationStoriesSection: React.FC<
   MaterialInspirationStoriesSectionProps
-> = ({ stories, onStoriesChange, user, isPublicView = false, materialId, canSubmitDesignerStory = false, canSubmitBrandStory = false, materialSupplierId, material, persistBrandStories = false }) => {
+> = ({
+  stories,
+  onStoriesChange,
+  user,
+  isPublicView = false,
+  materialId,
+  canSubmitDesignerStory = false,
+  canSubmitBrandStory = false,
+  materialSupplierId,
+  material,
+  persistBrandStories = false,
+  isLoading = false,
+}) => {
   const [localStories, setLocalStories] = useState(stories);
   const [showEditor, setShowEditor] = useState(false);
   const [draftText, setDraftText] = useState('');
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAddHint, setShowAddHint] = useState(false);
+  const [expandedStoryIds, setExpandedStoryIds] = useState<Record<string, boolean>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const isDesigner = !!user && user.role === 'DESIGNER' && !isPublicView && canSubmitDesignerStory;
@@ -37,20 +71,27 @@ export const MaterialInspirationStoriesSection: React.FC<
   const canWriteStory = isDesigner || isBrandEditor;
   const storyMode: 'designer' | 'brand' = isBrandEditor && !isDesigner ? 'brand' : 'designer';
 
+  /** 设计师进入灵感故事区 → story_featured 未读清零 */
+  useMarkNotificationsRead({
+    enabled:
+      Boolean(user) &&
+      user?.role === 'DESIGNER' &&
+      !isPublicView &&
+      isSupabaseConfigured(),
+    types: ['story_featured'],
+    portal: 'designer',
+  });
+
   useEffect(() => {
     setLocalStories(stories);
+    setExpandedStoryIds({});
   }, [stories, materialId]);
 
   useEffect(() => {
     if (showEditor) textareaRef.current?.focus();
   }, [showEditor]);
 
-  const approvedStories = localStories.filter((s) => s.status === 'approved');
-  const myPendingStories =
-    user && canWriteStory
-      ? localStories.filter((s) => s.status === 'pending' && s.author_id === user.id)
-      : [];
-  const visibleStories = [...approvedStories, ...myPendingStories];
+  const visibleStories = visibleStoriesForUser(localStories, user?.id, isPublicView);
 
   const commitStories = (next: InspirationStory[]) => {
     setLocalStories(next);
@@ -64,8 +105,8 @@ export const MaterialInspirationStoriesSection: React.FC<
       setSubmitError('请写下你的设计叙事或材料感悟');
       return;
     }
-    if (trimmed.length < 12) {
-      setSubmitError('故事至少需要 12 个字');
+    if (trimmed.length < 50) {
+      setSubmitError('故事至少需要 50 个字（后台审核要求）');
       return;
     }
     if (trimmed.length > 800) {
@@ -76,21 +117,31 @@ export const MaterialInspirationStoriesSection: React.FC<
     setSubmitError(null);
     setIsSubmitting(true);
     try {
+      console.info('[MaterialInspirationStories] submit click', {
+        userId: user.id,
+        role: user.role,
+        dbRole: user.dbRole,
+        storyMode,
+        is_brand_story: storyMode === 'brand',
+        materialId,
+        textLen: trimmed.length,
+      });
       const created = await submitInspirationStory({
         material_id: materialId,
         story_text: trimmed,
-        status: storyMode === 'brand' ? 'approved' : 'pending',
+        status: 'pending',
         author_id: user.id,
         is_brand_story: storyMode === 'brand',
+        auth_portal: storyMode === 'brand' ? 'supplier' : 'designer',
       });
-      const next = [created, ...localStories];
+      const next = [created, ...localStories.filter((s) => s.id !== created.id)];
       commitStories(next);
 
       if (storyMode === 'brand' && persistBrandStories && material && materialSupplierId) {
         const ok = await persistInspirationStories({
           material,
           supplierId: materialSupplierId,
-          stories: next,
+          stories: next.filter((s) => s.status === 'approved'),
         });
         if (!ok) {
           setSubmitError('故事已保存，但同步到探索页失败，请尝试「再次发布」');
@@ -98,8 +149,16 @@ export const MaterialInspirationStoriesSection: React.FC<
       }
       setDraftText('');
       setShowEditor(false);
-    } catch {
-      setSubmitError('提交失败，请稍后重试');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[MaterialInspirationStories] submit failed', msg);
+      if (/at least 50/i.test(msg)) {
+        setSubmitError('故事至少需要 50 个字');
+      } else if (/only suppliers/i.test(msg) || /only designers/i.test(msg) || /not authenticated/i.test(msg)) {
+        setSubmitError(`提交失败，权限错误：${msg}`);
+      } else {
+        setSubmitError(`提交失败：${msg}`);
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -113,11 +172,6 @@ export const MaterialInspirationStoriesSection: React.FC<
             Human DNA
           </p>
           <h2 className="text-lg sm:text-xl font-bold">灵感故事 Inspiration</h2>
-          <p className="text-xs text-gray-500 mt-1 max-w-xl">
-            {isBrandEditor && !isDesigner
-              ? '阅读设计师精选叙事，也可提交官方品牌故事（经审核后展示）。'
-              : '设计师的真实项目叙事与设计概念，经精选后将沉淀为材料的 Human Aesthetic Chain。'}
-          </p>
         </div>
 
         {canWriteStory && !showEditor && (
@@ -170,9 +224,12 @@ export const MaterialInspirationStoriesSection: React.FC<
             }
             className="w-full px-4 py-3 text-sm leading-relaxed rounded-xl border border-gray-200 bg-white outline-none focus:border-black transition-colors resize-y min-h-[120px]"
           />
+          <p className="mt-3 text-xs text-gray-500 leading-relaxed bg-gray-50 border border-gray-100 rounded-xl px-3 py-2.5">
+            精选叙事会公开展示；你自己的未精选故事仅自己可见。
+          </p>
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mt-3">
             <span className="text-[10px] text-gray-400 font-medium tabular-nums">
-              {draftText.length}/800 · 提交后进入精选队列
+              {draftText.length}/800 · 至少 50 字 · 提交后进入审核
             </span>
             <div className="flex gap-2">
               <button
@@ -202,7 +259,11 @@ export const MaterialInspirationStoriesSection: React.FC<
         </div>
       )}
 
-      {visibleStories.length === 0 ? (
+      {isLoading ? (
+        <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50/60 px-6 py-10 text-center">
+          <p className="text-sm font-semibold text-gray-400">正在加载灵感故事…</p>
+        </div>
+      ) : visibleStories.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50/60 px-6 py-10 text-center">
           <p className="text-sm font-semibold text-gray-500">暂无精选灵感故事</p>
           <p className="text-xs text-gray-400 mt-2">
@@ -216,13 +277,16 @@ export const MaterialInspirationStoriesSection: React.FC<
       ) : (
         <ul className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-5">
           {visibleStories.map((story) => {
-            const isPending = story.status === 'pending';
+            const isUnselected = story.status === 'pending' || story.status === 'rejected';
+            const isApproved = story.status === 'approved';
+            const expanded = !!expandedStoryIds[story.id];
+
             return (
               <li
                 key={story.id}
-                className={`relative rounded-2xl border p-5 sm:p-6 transition-shadow hover:shadow-md ${
-                  isPending
-                    ? 'bg-amber-50/40 border-amber-100'
+                className={`relative min-w-0 overflow-hidden rounded-2xl border p-5 sm:p-6 transition-shadow hover:shadow-md ${
+                  isUnselected
+                    ? 'bg-gray-50 border-gray-200/80'
                     : 'bg-white border-gray-100'
                 }`}
               >
@@ -230,21 +294,69 @@ export const MaterialInspirationStoriesSection: React.FC<
                   <span className="text-[10px] font-black uppercase tracking-wider text-gray-400">
                     {getStoryAuthorLabel(story.author_id, user?.id, materialSupplierId)}
                   </span>
-                  {isPending && (
-                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-black border border-amber-200/80">
-                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-                      待精选
+                  {isUnselected && (
+                    <span className="px-2.5 py-0.5 rounded-full bg-gray-200/70 text-gray-500 text-[10px] font-bold tracking-wide">
+                      未精选
                     </span>
                   )}
-                  {!isPending && (
+                  {isApproved && (
                     <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-100">
                       已精选
                     </span>
                   )}
                 </div>
-                <p className="text-sm sm:text-[15px] text-gray-700 leading-relaxed whitespace-pre-wrap">
+                {story.title && (
+                  <p
+                    className={`text-sm font-bold mb-2 break-all ${
+                      isUnselected ? 'text-gray-500' : 'text-gray-800'
+                    }`}
+                  >
+                    {story.title}
+                  </p>
+                )}
+                <p
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => {
+                    setExpandedStoryIds((prev) => ({ ...prev, [story.id]: !prev[story.id] }));
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setExpandedStoryIds((prev) => ({ ...prev, [story.id]: !prev[story.id] }));
+                    }
+                  }}
+                  title={expanded ? '点击收起' : '点击展开全文'}
+                  className={`text-sm sm:text-[15px] leading-relaxed cursor-pointer select-text max-w-full ${
+                    isUnselected ? 'text-gray-500' : 'text-gray-700'
+                  }`}
+                  style={
+                    expanded
+                      ? {
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-all',
+                          overflowWrap: 'break-word',
+                        }
+                      : {
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-all',
+                          overflowWrap: 'break-word',
+                          display: '-webkit-box',
+                          WebkitLineClamp: 3,
+                          WebkitBoxOrient: 'vertical',
+                          overflow: 'hidden',
+                        }
+                  }
+                >
                   {story.text}
                 </p>
+                {isUnselected && story.status === 'rejected' && (
+                  <p className="mt-3 text-[10px] text-gray-400 leading-relaxed break-all">
+                    {story.review_notes?.trim()
+                      ? `未通过说明：${story.review_notes.trim()}`
+                      : '未通过审核（未填写具体说明）'}
+                  </p>
+                )}
               </li>
             );
           })}
