@@ -20,6 +20,7 @@ import {
   submitMaterialEvaluation,
 } from '../services/materialEvaluationService';
 import { fetchMaterialInspirationStories } from '../services/inspirationStoryService';
+import { fetchMaterialMoodTags } from '../services/moodTagService';
 import useMaterialEventLog from '../hooks/useMaterialEventLog';
 import useMaterialViewCount from '../hooks/useMaterialViewCount';
 import useMarkNotificationsRead from '../hooks/useMarkNotificationsRead';
@@ -193,16 +194,36 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
 
   useEffect(() => {
     setApplicationCases(materialDetail.application_cases);
-    setMoodTags(materialDetail.mood_tags);
     setEvaluations(materialDetail.evaluations);
     setEvaluationVoteCount(materialDetail.evaluation_vote_count ?? 0);
   }, [
     material.id,
     materialDetail.application_cases,
-    materialDetail.mood_tags,
     materialDetail.evaluations,
     materialDetail.evaluation_vote_count,
   ]);
+
+  /** Source of truth: cloud mood tags (humanDna + material_tag_relation heal). */
+  useEffect(() => {
+    let cancelled = false;
+    setMoodTags(materialDetail.mood_tags ?? []);
+
+    if (!isSupabaseConfigured() || !material.id) return undefined;
+
+    void (async () => {
+      const portal =
+        user?.role === 'SUPPLIER' || user?.role === 'DESIGNER' || user?.role === 'ADMIN'
+          ? portalFromUserRole(user.role)
+          : 'designer';
+      const rows = await fetchMaterialMoodTags(material.id, portal);
+      if (cancelled || rows.length === 0) return;
+      setMoodTags(rows);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [material.id, user?.id, user?.role, materialDetail.mood_tags]);
 
   /** Source of truth: inspiration_stories table (not only embedded humanDna JSON). */
   useEffect(() => {

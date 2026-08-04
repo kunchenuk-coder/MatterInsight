@@ -1,5 +1,5 @@
 import type { MaterialMoodTag } from '../types/materialDetail';
-import { getSupabaseForPortal, isSupabaseConfigured } from './supabaseClient';
+import { getSupabase, getSupabaseForPortal, isSupabaseConfigured } from './supabaseClient';
 import type { AppPortal } from '../utils/appPortal';
 
 export type MoodTagWriteMode = 'brand' | 'custom';
@@ -19,6 +19,41 @@ function mapMoodTags(raw: unknown): MaterialMoodTag[] {
       } as MaterialMoodTag;
     })
     .filter(Boolean) as MaterialMoodTag[];
+}
+
+/**
+ * 详情页情绪标签权威来源：RPC 优先读 humanDna，空则从 material_tag_relation 重建。
+ */
+export async function fetchMaterialMoodTags(
+  materialId: string,
+  portal?: AppPortal
+): Promise<MaterialMoodTag[]> {
+  if (!isSupabaseConfigured() || !materialId) return [];
+
+  const sb = portal ? getSupabaseForPortal(portal) : getSupabase();
+  const { data, error } = await sb.rpc('list_material_mood_tags', {
+    p_material_id: materialId,
+  });
+
+  if (error) {
+    console.warn('[moodTagService] list_material_mood_tags failed, fallback select:', error.message);
+    const { data: row, error: selErr } = await sb
+      .from('materials')
+      .select('data')
+      .eq('id', materialId)
+      .maybeSingle();
+    if (selErr) {
+      console.error('[moodTagService] fetchMaterialMoodTags select:', selErr.message);
+      return [];
+    }
+    const embedded = (row?.data as { humanDna?: { mood_tags?: unknown } } | null)?.humanDna
+      ?.mood_tags;
+    return mapMoodTags(embedded);
+  }
+
+  // RPC may return array directly or { mood_tags: [...] }
+  if (Array.isArray(data)) return mapMoodTags(data);
+  return mapMoodTags((data as { mood_tags?: unknown } | null)?.mood_tags);
 }
 
 /**

@@ -50,11 +50,15 @@ export function resolveUrlFromMap(
 ): string {
   const key = objectKey ? parseOssObjectKey(objectKey) : parseOssObjectKey(currentUrl);
   if (key && urlMap.has(key)) return urlMap.get(key)!;
-  // 刷新失败时，禁止回退到过期的 OSS 签名 URL 或 http 混合内容地址
-  if (currentUrl && (isSignedOssUrl(currentUrl) || isOssUrl(currentUrl))) {
-    return '';
+  if (!currentUrl) return '';
+  // 签名 URL 过期且刷新失败：不可用
+  if (isSignedOssUrl(currentUrl)) return '';
+  // 公网 OSS http → https，避免 Vercel HTTPS 页混合内容空白
+  if (isOssUrl(currentUrl) && /^http:\/\//i.test(currentUrl)) {
+    return currentUrl.replace(/^http:\/\//i, 'https://');
   }
-  return currentUrl ?? '';
+  // 未签名的 https OSS / 稳定外链：保留，避免刷新失败把主图清空
+  return currentUrl;
 }
 
 /** 收集需要从 OSS 刷新的 object key */

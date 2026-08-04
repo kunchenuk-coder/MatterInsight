@@ -365,23 +365,23 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       </header>
 
-      <div className="flex bg-gray-100 p-1.5 rounded-[24px] w-fit">
-        <button onClick={() => setSubTab('DESIGNERS')} className={`px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'DESIGNERS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>设计师管理</button>
-        <button onClick={() => setSubTab('MATERIALS')} className={`px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'MATERIALS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>材料库监管</button>
-        <button onClick={() => setSubTab('SUPPLIERS')} className={`px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'SUPPLIERS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>供应商评估</button>
-        <button onClick={() => setSubTab('SAMPLES')} className={`px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'SAMPLES' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
+      <div className="flex flex-wrap gap-1 bg-gray-100 p-1.5 rounded-[24px] max-w-full">
+        <button type="button" onClick={() => setSubTab('DESIGNERS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'DESIGNERS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>设计师管理</button>
+        <button type="button" onClick={() => setSubTab('MATERIALS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'MATERIALS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>材料库监管</button>
+        <button type="button" onClick={() => setSubTab('SUPPLIERS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'SUPPLIERS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>供应商评估</button>
+        <button type="button" onClick={() => setSubTab('SAMPLES')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'SAMPLES' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
           小样申请 {sampleRequests.filter(s => s.status === 'PENDING').length > 0 && <span className="ml-1 bg-orange-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{sampleRequests.filter(s => s.status === 'PENDING').length}</span>}
         </button>
-        <button onClick={() => setSubTab('PENDING')} className={`px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'PENDING' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
+        <button type="button" onClick={() => setSubTab('PENDING')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'PENDING' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
           上架审核 {pendingList.filter(p => p.status === MaterialStatus.PENDING).length > 0 && <span className="ml-1 bg-red-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{pendingList.filter(p => p.status === MaterialStatus.PENDING).length}</span>}
         </button>
-        <button onClick={() => setSubTab('VERIFICATIONS')} className={`px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'VERIFICATIONS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
+        <button type="button" onClick={() => setSubTab('VERIFICATIONS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'VERIFICATIONS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
           供应商认证 {verificationRequests.length > 0 && <span className="ml-1 bg-blue-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{verificationRequests.length}</span>}
         </button>
-        <button onClick={() => setSubTab('STORIES')} className={`px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'STORIES' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
-          灵感故事审核 {pendingStories.length > 0 && <span className="ml-1 bg-amber-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{pendingStories.length}</span>}
+        <button type="button" onClick={() => setSubTab('STORIES')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'STORIES' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}>
+          灵感故事管理 {pendingStories.length > 0 && <span className="ml-1 bg-amber-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{pendingStories.length}</span>}
         </button>
-        <button onClick={() => setSubTab('MOOD_TAGS')} className={`px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'MOOD_TAGS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
+        <button type="button" onClick={() => setSubTab('MOOD_TAGS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'MOOD_TAGS' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}>
           情绪标签管理
         </button>
       </div>
