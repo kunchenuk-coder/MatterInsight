@@ -1,0 +1,19 @@
+---
+description: 用户提到推送 GitHub / git push 时，必须先读 PROJECT_MEMORY.md
+alwaysApply: true
+---
+
+# GitHub 推送前必读
+
+当用户提到以下任一意图时，**在执行任何 git commit / git push 之前**，先用 Read 工具读取仓库根目录的 `PROJECT_MEMORY.md`（尤其是「Git / GitHub 推送规范」章节）：
+
+- 推送、push、GitHub、提交到远端、发版上线相关 git 操作
+
+## 硬规则（Windows PowerShell）
+
+1. **禁止** bash HEREDOC：`git commit -m "$(cat <<'EOF' ...)"` —— PowerShell 会失败或造成「以为没推上去」的误判。
+2. 使用：`git commit -m "简明中文说明"`，再 `git push -u origin HEAD`（或 `git push origin main`）。
+3. 推送后必须用 `git status` / `git log -1` 确认 `main` 与 `origin/main` 一致。
+4. **Git 推送成功 ≠ Admin 线上已更新**：`matterinsightadmin.vercel.app` 是手动 alias，需额外执行  
+   `vercel alias set matterinsight.vercel.app matterinsightadmin.vercel.app`
+5. 细节与历史踩坑见 `BUG_SUMMARY.md` →「Git / GitHub 推送」与 `PROJECT_MEMORY.md`。

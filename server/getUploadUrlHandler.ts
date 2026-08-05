@@ -2,8 +2,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   createPresignedUploadUrls,
   type AssetType,
-} from './ossPresign';
-import { verifySupabaseToken } from './verifySupabaseToken';
+} from './ossPresign.js';
+import { verifySupabaseToken } from './verifySupabaseToken.js';
 
 const ALLOWED_CATEGORIES = new Set([
   'materials',

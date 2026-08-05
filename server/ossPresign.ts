@@ -95,10 +95,12 @@ export function createPresignedUploadUrls(
     'Content-Type': mime,
   });
 
-  const readUrl = client.signatureUrl(objectKey, {
-    method: 'GET',
-    expires: PRESIGN_GET_EXPIRES_SEC,
-  });
+  const readUrl = forceHttpsUrl(
+    client.signatureUrl(objectKey, {
+      method: 'GET',
+      expires: PRESIGN_GET_EXPIRES_SEC,
+    })
+  );
 
   const expiresAt = new Date(Date.now() + PRESIGN_PUT_EXPIRES_SEC * 1000).toISOString();
 
@@ -137,27 +139,36 @@ export async function putUserAssetToOss(
 
   await client.put(objectKey, buffer, { headers: { 'Content-Type': mime } });
 
-  const readUrl = client.signatureUrl(objectKey, {
-    method: 'GET',
-    expires: PRESIGN_GET_EXPIRES_SEC,
-  });
+  const readUrl = forceHttpsUrl(
+    client.signatureUrl(objectKey, {
+      method: 'GET',
+      expires: PRESIGN_GET_EXPIRES_SEC,
+    })
+  );
 
   return { objectKey, readUrl, contentType: mime };
+}
+
+/** 阿里云 SDK 默认签出 http；Vercel HTTPS 页必须用 https，否则混合内容裂图 */
+function forceHttpsUrl(url: string): string {
+  return url.replace(/^http:\/\//i, 'https://');
 }
 
 /** 为已存在的 objectKey 生成短期可读 URL（私有桶展示用） */
 export function createPresignedReadUrl(objectKey: string, expiresSec = 3600): string {
   const client = getOssClient();
-  return client.signatureUrl(objectKey, {
-    method: 'GET',
-    expires: expiresSec,
-  });
+  return forceHttpsUrl(
+    client.signatureUrl(objectKey, {
+      method: 'GET',
+      expires: expiresSec,
+    })
+  );
 }
 
 export function resolvePublicOrSignedUrl(objectKey: string): string {
   const publicBase = process.env.ALIYUN_OSS_PUBLIC_BASE_URL;
   if (publicBase) {
-    return `${publicBase.replace(/\/$/, '')}/${objectKey}`;
+    return forceHttpsUrl(`${publicBase.replace(/\/$/, '')}/${objectKey}`);
   }
   return createPresignedReadUrl(objectKey, PRESIGN_GET_EXPIRES_SEC);
 }

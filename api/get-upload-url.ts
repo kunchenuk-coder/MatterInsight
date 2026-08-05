@@ -4,7 +4,7 @@ export const config = {
   },
 };
 
-import { handleGetUploadUrlRequest } from '../server/getUploadUrlHandler';
+import { handleGetUploadUrlRequest } from '../server/getUploadUrlHandler.js';
 
 export default async function handler(
   req: import('node:http').IncomingMessage,

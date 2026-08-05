@@ -196,10 +196,36 @@ export const MOCK_MATERIAL_HUMAN_DNA: Record<string, MaterialHumanDna> = {
   },
 };
 
+/** Merge partial/missing humanDna with defaults so detail UI never sees undefined arrays. */
+function mergeHumanDna(partial?: Partial<MaterialHumanDna> | null): MaterialHumanDna {
+  const base = DEFAULT_HUMAN_DNA;
+  const src = partial ?? {};
+  return {
+    ai_trained_status: Boolean(src.ai_trained_status ?? base.ai_trained_status),
+    application_cases: Array.isArray(src.application_cases)
+      ? src.application_cases
+      : base.application_cases,
+    evaluations: {
+      ...base.evaluations,
+      ...(src.evaluations && typeof src.evaluations === 'object' ? src.evaluations : {}),
+    },
+    mood_tags: Array.isArray(src.mood_tags) ? src.mood_tags : base.mood_tags,
+    inspiration_stories: Array.isArray(src.inspiration_stories)
+      ? src.inspiration_stories
+      : base.inspiration_stories,
+    evaluation_vote_count:
+      typeof src.evaluation_vote_count === 'number'
+        ? src.evaluation_vote_count
+        : base.evaluation_vote_count ?? 0,
+  };
+}
+
 /** Merge base material with Human DNA (embedded data or mock fallback). */
 export function toMaterialDetail(material: Material): MaterialDetail {
   const embedded = readHumanDnaFromMaterial(material);
-  const humanDna = embedded ?? MOCK_MATERIAL_HUMAN_DNA[material.id] ?? DEFAULT_HUMAN_DNA;
+  const humanDna = mergeHumanDna(
+    embedded ?? MOCK_MATERIAL_HUMAN_DNA[material.id] ?? DEFAULT_HUMAN_DNA
+  );
   return { ...material, ...humanDna };
 }
 

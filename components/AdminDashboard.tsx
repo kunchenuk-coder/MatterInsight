@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { User, Material, Category, PendingMaterial, SampleRequest, MaterialStatus } from '../types';
 import { fetchReadUrlsForObjectKeys, resolveUrlFromMap } from '../services/assetReadUrlService';
+import { enrichMaterialsWithFreshImages } from '../services/materialImageService';
 import { parseOssObjectKey } from '../utils/parseOssObjectKey';
 import {
   fetchDesignersForAdmin,
@@ -76,6 +77,34 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [moodTagBusy, setMoodTagBusy] = useState<string | null>(null);
   const [supplierEvals, setSupplierEvals] = useState<AdminSupplierEvaluation[]>([]);
   const [suppliersLoading, setSuppliersLoading] = useState(false);
+  const materialImageRefreshKeyRef = React.useRef('');
+
+  /** 后台材料缩略图：localStorage 可能残留空 image（刷新失败曾被清空），进监管页时强制重签 OSS */
+  useEffect(() => {
+    if (library.length === 0) return;
+    const blankOrHttp = library.filter(
+      (m) => !m.image?.trim() || /^http:\/\//i.test(m.image)
+    );
+    if (blankOrHttp.length === 0) return;
+
+    const key = blankOrHttp.map((m) => m.id).sort().join(',');
+    if (materialImageRefreshKeyRef.current === key) return;
+    materialImageRefreshKeyRef.current = key;
+
+    let cancelled = false;
+    void enrichMaterialsWithFreshImages(library)
+      .then((enriched) => {
+        if (!cancelled) setLibrary(enriched);
+      })
+      .catch((err) => {
+        console.warn('[AdminDashboard] material image refresh failed:', err);
+        materialImageRefreshKeyRef.current = '';
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [library, setLibrary]);
 
   const loadDesigners = useCallback(async () => {
     setDesignersLoading(true);

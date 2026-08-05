@@ -66,6 +66,7 @@ export async function enrichMaterialsWithFreshImages<T extends Material | Pendin
     console.warn(
       '[materialImageService] OSS read URL refresh returned empty; check /api/get-read-url and ALIYUN_OSS_* env on server'
     );
+    // 刷新全失败时不要走「清空签名 URL」路径，仅做 http→https
     return materials.map((m) => applyUrlMapToMaterial(m, urlMap));
   }
 

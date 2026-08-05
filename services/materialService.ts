@@ -251,7 +251,7 @@ export function readHumanDnaFromMaterial(material: Material): MaterialHumanDna |
 }
 
 function extractOfficialMoodTags(humanDna: MaterialHumanDna): string[] {
-  return humanDna.mood_tags
+  return (humanDna.mood_tags ?? [])
     .filter((t) => t.is_brand_official)
     .map((t) => t.tag)
     .slice(0, 3);

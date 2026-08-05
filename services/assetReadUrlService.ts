@@ -2,6 +2,19 @@ import { parseOssObjectKey, isSignedOssUrl, isOssUrl } from '../utils/parseOssOb
 
 const MAX_BATCH = 50;
 
+/**
+ * Admin 域名受 Vercel SSO 保护时，同域 /api/* 会 401，导致缩略图被清空成白块。
+ * 改走未保护的主站域名签 URL。
+ */
+function getReadUrlEndpoint(): string {
+  if (typeof window === 'undefined') return '/api/get-read-url';
+  const host = window.location.hostname.toLowerCase();
+  if (host === 'matterinsightadmin.vercel.app') {
+    return 'https://matterinsight.vercel.app/api/get-read-url';
+  }
+  return '/api/get-read-url';
+}
+
 /** 批量向服务端请求 OSS 对象的最新可读 URL */
 export async function fetchReadUrlsForObjectKeys(
   objectKeys: string[]
@@ -15,11 +28,12 @@ export async function fetchReadUrlsForObjectKeys(
   ];
   if (unique.length === 0) return new Map();
 
+  const endpoint = getReadUrlEndpoint();
   const out = new Map<string, string>();
   for (let i = 0; i < unique.length; i += MAX_BATCH) {
     const chunk = unique.slice(i, i + MAX_BATCH);
     try {
-      const res = await fetch('/api/get-read-url', {
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ objectKeys: chunk }),
@@ -43,21 +57,26 @@ export async function fetchReadUrlsForObjectKeys(
   return out;
 }
 
+function upgradeOssHttpToHttps(url: string): string {
+  if (isOssUrl(url) && /^http:\/\//i.test(url)) {
+    return url.replace(/^http:\/\//i, 'https://');
+  }
+  return url;
+}
+
 export function resolveUrlFromMap(
   currentUrl: string | null | undefined,
   objectKey: string | null | undefined,
   urlMap: Map<string, string>
 ): string {
   const key = objectKey ? parseOssObjectKey(objectKey) : parseOssObjectKey(currentUrl);
-  if (key && urlMap.has(key)) return urlMap.get(key)!;
-  if (!currentUrl) return '';
-  // 签名 URL 过期且刷新失败：不可用
-  if (isSignedOssUrl(currentUrl)) return '';
-  // 公网 OSS http → https，避免 Vercel HTTPS 页混合内容空白
-  if (isOssUrl(currentUrl) && /^http:\/\//i.test(currentUrl)) {
-    return currentUrl.replace(/^http:\/\//i, 'https://');
+  if (key && urlMap.has(key)) {
+    // 刷新成功也要升 https：ali-oss 默认签出 http，线上会混合内容裂图
+    return upgradeOssHttpToHttps(urlMap.get(key)!);
   }
-  // 未签名的 https OSS / 稳定外链：保留，避免刷新失败把主图清空
+  if (!currentUrl) return '';
+  // 刷新失败时：不要清空成 ''（后台会变「消失的白块」）；至少升 https 保留原地址
+  if (isOssUrl(currentUrl)) return upgradeOssHttpToHttps(currentUrl);
   return currentUrl;
 }
 

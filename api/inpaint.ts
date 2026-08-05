@@ -4,7 +4,7 @@ export const config = {
   },
 };
 
-import { handleInpaintRequest } from "../server/inpaintHandler";
+import { handleInpaintRequest } from "../server/inpaintHandler.js";
 
 export default async function handler(
   req: import("node:http").IncomingMessage,

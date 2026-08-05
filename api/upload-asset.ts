@@ -4,7 +4,7 @@ export const config = {
   },
 };
 
-import { handleUploadAssetRequest } from '../server/uploadAssetHandler';
+import { handleUploadAssetRequest } from '../server/uploadAssetHandler.js';
 
 export default async function handler(
   req: import('node:http').IncomingMessage,

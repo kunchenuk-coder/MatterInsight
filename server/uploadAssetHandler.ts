@@ -1,7 +1,7 @@
 import multer from 'multer';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { putUserAssetToOss, type AssetType } from './ossPresign';
-import { verifySupabaseToken } from './verifySupabaseToken';
+import { putUserAssetToOss, type AssetType } from './ossPresign.js';
+import { verifySupabaseToken } from './verifySupabaseToken.js';
 
 /**
  * 服务端代理上传：浏览器把（已压缩的）文件 POST 到这里，后端用 OSS SDK 直传私有桶。

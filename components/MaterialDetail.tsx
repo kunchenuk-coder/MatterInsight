@@ -273,9 +273,10 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
   // Check if brand should be obfuscated
   const hasRequestedSample = user ? sampleRequests.some(req => req.materialId === material.id && req.designerId === user.id) : false;
   const hasInquired = user ? inquiries.some(inq => inq.materialId === material.id && inq.designerId === user.id) : false;
-  const displayBrand = (isPublicView || hasRequestedSample || hasInquired || (user && (user.role === 'ADMIN' || user.company === material.brand))) 
-    ? material.brand 
-    : material.brand.split('').map((c, i) => i === 0 || i === material.brand.length - 1 ? c : '*').join('');
+  const brandText = material.brand ?? '';
+  const displayBrand = (isPublicView || hasRequestedSample || hasInquired || (user && (user.role === 'ADMIN' || user.company === brandText)))
+    ? brandText
+    : brandText.split('').map((c, i) => (i === 0 || i === brandText.length - 1 ? c : '*')).join('');
 
   // Check if rating is allowed — designers may rate directly from detail page (one-time submit).
   const handleSubmitEvaluation = async (submission: MaterialEvaluations) => {

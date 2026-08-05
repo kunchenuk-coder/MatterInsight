@@ -4,7 +4,7 @@ export const config = {
   },
 };
 
-import { handleUploadRequest } from '../server/uploadHandler';
+import { handleUploadRequest } from '../server/uploadHandler.js';
 
 export default async function handler(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) {
   await handleUploadRequest(req, res);

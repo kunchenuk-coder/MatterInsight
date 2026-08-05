@@ -1,7 +1,7 @@
 import multer from 'multer';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { uploadToObjectStorage } from './objectStorage';
-import { verifySupabaseToken } from './verifySupabaseToken';
+import { uploadToObjectStorage } from './objectStorage.js';
+import { verifySupabaseToken } from './verifySupabaseToken.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),

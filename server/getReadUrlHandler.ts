@@ -1,5 +1,22 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { resolvePublicOrSignedUrl } from './ossPresign';
+import { resolvePublicOrSignedUrl } from './ossPresign.js';
+
+const CORS_ALLOWED_ORIGINS = new Set([
+  'https://matterinsight.vercel.app',
+  'https://matterinsightadmin.vercel.app',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+]);
+
+function applyCors(req: IncomingMessage, res: ServerResponse) {
+  const origin = req.headers.origin;
+  if (origin && CORS_ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Vary', 'Origin');
+  }
+}
 
 function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status;
@@ -45,6 +62,14 @@ export async function handleGetReadUrlRequest(
   req: IncomingMessage & { method?: string },
   res: ServerResponse
 ): Promise<void> {
+  applyCors(req, res);
+
+  if (req.method === 'OPTIONS') {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+
   if (req.method !== 'POST' && req.method !== 'GET') {
     sendJson(res, 405, { error: 'Method not allowed' });
     return;

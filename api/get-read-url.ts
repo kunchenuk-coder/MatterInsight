@@ -4,7 +4,7 @@ export const config = {
   },
 };
 
-import { handleGetReadUrlRequest } from '../server/getReadUrlHandler';
+import { handleGetReadUrlRequest } from '../server/getReadUrlHandler.js';
 
 export default async function handler(
   req: import('node:http').IncomingMessage,

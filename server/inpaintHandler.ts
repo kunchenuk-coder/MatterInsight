@@ -2,11 +2,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEnv } from "vite";
-import { InpaintProviderError, runInpaint } from "./aiInpaintProvider";
+import { InpaintProviderError, runInpaint } from "./aiInpaintProvider.js";
 import {
   AI_MATERIAL_REPLACEMENT_DISABLED_MESSAGE,
   isAiMaterialReplacementEnabled,
-} from "../utils/featureFlags";
+} from "../utils/featureFlags.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
