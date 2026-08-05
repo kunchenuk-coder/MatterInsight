@@ -4,7 +4,7 @@
 > **硬规则：** 用户只要提到 **推送 GitHub / git push / 发到远端**，Agent **必须先读本文**（尤其 §9），再执行 commit/push。详见 `.cursor/rules/github-push-memory.mdc`。  
 > **更新日期：** 2026-08-05  
 > **仓库：** https://github.com/kunchenuk-coder/MatterInsight.git  
-> **当前 HEAD（参考）：** `aabd06e` — Fix: 修复后台菜单缺失及设计师端情绪标签不显示问题  
+> **当前 HEAD（参考）：** `73ccf16` — Fix: 修复线上OSS图片裂图与Admin白块，并固化防复发规范  
 > **Supabase 项目：** `matterinsight` / `wwtfjxrfnkoixgptuemw`（ap-southeast-1）  
 > **Vercel 主站项目：** `matterinsight`（`prj_PN5lW6r3wwhLBdV4YkwoBOFOuRhK`）— Admin 域名是同项目 alias，**不是**独立项目  
 
