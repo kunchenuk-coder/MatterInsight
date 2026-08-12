@@ -1,20 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Category, MaterialVariant } from "../types";
-
-type PublishFormState = {
-  name: string;
-  category: Category;
-  brand: string;
-  specifications: string;
-  priceRange: string;
-  stock: boolean;
-  leadTime: string;
-  fireRating: string;
-  supplierNotes: string;
-  image: string;
-  variants: MaterialVariant[];
-  projectPhotos: string[];
-};
+import { Category } from "../types";
+import type { PublishFormState } from "./AiBilingualFillButton";
 
 interface MaterialVoiceFillButtonProps {
   setFormData: React.Dispatch<React.SetStateAction<PublishFormState>>;

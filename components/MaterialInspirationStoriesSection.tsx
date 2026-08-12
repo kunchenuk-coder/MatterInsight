@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { User, Material } from '../types';
 import type { InspirationStory } from '../types/materialDetail';
 import {
@@ -57,6 +58,7 @@ export const MaterialInspirationStoriesSection: React.FC<
   persistBrandStories = false,
   isLoading = false,
 }) => {
+  const { t } = useTranslation();
   const [localStories, setLocalStories] = useState(stories);
   const [showEditor, setShowEditor] = useState(false);
   const [draftText, setDraftText] = useState('');
@@ -171,7 +173,7 @@ export const MaterialInspirationStoriesSection: React.FC<
           <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-1">
             Human DNA
           </p>
-          <h2 className="text-lg sm:text-xl font-bold">灵感故事 Inspiration</h2>
+          <h2 className="text-lg sm:text-xl font-bold">{t('story.title')}</h2>
         </div>
 
         {canWriteStory && !showEditor && (
@@ -187,16 +189,16 @@ export const MaterialInspirationStoriesSection: React.FC<
                 setSubmitError(null);
               }}
               className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full border-2 border-dashed border-gray-300 text-sm font-bold text-gray-600 hover:border-black hover:text-black hover:bg-white transition-all cursor-pointer"
-              aria-label={storyMode === 'brand' ? '撰写品牌故事' : '撰写灵感故事'}
+              aria-label={storyMode === 'brand' ? t('story.brandAria') : t('story.writeAria')}
             >
               <span className="w-6 h-6 rounded-full bg-black text-white inline-flex items-center justify-center text-base leading-none">
                 +
               </span>
-              {storyMode === 'brand' ? '品牌故事' : '撰写故事'}
+              {storyMode === 'brand' ? t('story.brandBtn') : t('story.writeBtn')}
             </button>
             {showAddHint && (
               <span className="hidden sm:block absolute left-0 top-full mt-2 whitespace-nowrap px-3 py-1.5 rounded-lg bg-black text-white text-[10px] font-bold shadow-lg z-10">
-                {storyMode === 'brand' ? '提交官方品牌叙事' : '分享你对这件材料的设计叙事'}
+                {storyMode === 'brand' ? t('story.brandHint') : t('story.writeHint')}
               </span>
             )}
           </div>
@@ -206,7 +208,7 @@ export const MaterialInspirationStoriesSection: React.FC<
       {showEditor && canWriteStory && (
         <div className="mb-8 rounded-2xl border border-gray-200 bg-gradient-to-br from-gray-50 to-white p-4 sm:p-6 shadow-sm">
           <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">
-            {storyMode === 'brand' ? '官方品牌故事' : '你的灵感故事'}
+            {storyMode === 'brand' ? t('story.brandLabel') : t('story.writeLabel')}
           </label>
           <textarea
             ref={textareaRef}
@@ -218,18 +220,16 @@ export const MaterialInspirationStoriesSection: React.FC<
             rows={5}
             maxLength={800}
             placeholder={
-              storyMode === 'brand'
-                ? '介绍品牌理念、工艺标准或官方推荐的应用场景…'
-                : '描述你在项目中如何使用这件材料、它带来的空间气质，或你的设计概念…'
+              storyMode === 'brand' ? t('story.brandPlaceholder') : t('story.writePlaceholder')
             }
             className="w-full px-4 py-3 text-sm leading-relaxed rounded-xl border border-gray-200 bg-white outline-none focus:border-black transition-colors resize-y min-h-[120px]"
           />
           <p className="mt-3 text-xs text-gray-500 leading-relaxed bg-gray-50 border border-gray-100 rounded-xl px-3 py-2.5">
-            精选叙事会公开展示；你自己的未精选故事仅自己可见。
+            {t('story.reviewNote')}
           </p>
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mt-3">
             <span className="text-[10px] text-gray-400 font-medium tabular-nums">
-              {draftText.length}/800 · 至少 50 字 · 提交后进入审核
+              {t('story.charHint', { count: draftText.length })}
             </span>
             <div className="flex gap-2">
               <button
@@ -241,7 +241,7 @@ export const MaterialInspirationStoriesSection: React.FC<
                 }}
                 className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-sm font-bold text-gray-500 hover:text-black transition-colors"
               >
-                取消
+                {t('common.cancel')}
               </button>
               <button
                 type="button"
@@ -249,7 +249,7 @@ export const MaterialInspirationStoriesSection: React.FC<
                 disabled={isSubmitting}
                 className="flex-1 sm:flex-none px-6 py-2.5 rounded-xl bg-black text-white text-sm font-bold hover:bg-gray-800 disabled:opacity-50 transition-colors shadow-lg shadow-black/10"
               >
-                {isSubmitting ? '提交中…' : '提交'}
+                {isSubmitting ? t('story.submitting') : t('story.submit')}
               </button>
             </div>
           </div>
@@ -261,17 +261,17 @@ export const MaterialInspirationStoriesSection: React.FC<
 
       {isLoading ? (
         <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50/60 px-6 py-10 text-center">
-          <p className="text-sm font-semibold text-gray-400">正在加载灵感故事…</p>
+          <p className="text-sm font-semibold text-gray-400">{t('story.loading')}</p>
         </div>
       ) : visibleStories.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50/60 px-6 py-10 text-center">
-          <p className="text-sm font-semibold text-gray-500">暂无精选灵感故事</p>
+          <p className="text-sm font-semibold text-gray-500">{t('story.empty')}</p>
           <p className="text-xs text-gray-400 mt-2">
             {canWriteStory
               ? storyMode === 'brand'
-                ? '点击「品牌故事」提交官方叙事，通过审核后将公开展示。'
-                : '点击「撰写故事」分享你的设计叙事，通过审核后将公开展示。'
-              : '设计师与材料商提交并精选后的故事将出现在这里。'}
+                ? t('story.emptyBrandHint')
+                : t('story.emptyWriteHint')
+              : t('story.emptyViewHint')}
           </p>
         </div>
       ) : (
@@ -280,6 +280,8 @@ export const MaterialInspirationStoriesSection: React.FC<
             const isUnselected = story.status === 'pending' || story.status === 'rejected';
             const isApproved = story.status === 'approved';
             const expanded = !!expandedStoryIds[story.id];
+            const isBrandOfficial =
+              !!materialSupplierId && story.author_id === materialSupplierId;
 
             return (
               <li
@@ -292,16 +294,23 @@ export const MaterialInspirationStoriesSection: React.FC<
               >
                 <div className="flex flex-wrap items-center gap-2 mb-3">
                   <span className="text-[10px] font-black uppercase tracking-wider text-gray-400">
-                    {getStoryAuthorLabel(story.author_id, user?.id, materialSupplierId)}
+                    {isBrandOfficial
+                      ? t('story.brandOfficial')
+                      : getStoryAuthorLabel(story.author_id, user?.id, materialSupplierId)}
                   </span>
-                  {isUnselected && (
+                  {story.status === 'pending' && (
                     <span className="px-2.5 py-0.5 rounded-full bg-gray-200/70 text-gray-500 text-[10px] font-bold tracking-wide">
-                      未精选
+                      {t('story.pending')}
+                    </span>
+                  )}
+                  {story.status === 'rejected' && (
+                    <span className="px-2.5 py-0.5 rounded-full bg-gray-200/70 text-gray-500 text-[10px] font-bold tracking-wide">
+                      {t('story.rejected')}
                     </span>
                   )}
                   {isApproved && (
                     <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-100">
-                      已精选
+                      {t('story.featured')}
                     </span>
                   )}
                 </div>
@@ -326,7 +335,7 @@ export const MaterialInspirationStoriesSection: React.FC<
                       setExpandedStoryIds((prev) => ({ ...prev, [story.id]: !prev[story.id] }));
                     }
                   }}
-                  title={expanded ? '点击收起' : '点击展开全文'}
+                  title={expanded ? t('story.collapse') : t('story.expand')}
                   className={`text-sm sm:text-[15px] leading-relaxed cursor-pointer select-text max-w-full ${
                     isUnselected ? 'text-gray-500' : 'text-gray-700'
                   }`}

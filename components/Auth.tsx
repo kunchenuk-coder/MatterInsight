@@ -1,5 +1,5 @@
-
 import React, { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { UserRole } from '../types';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 import { requestPasswordReset, signIn, signUp, isRegisteredRoleError } from '../services/authService';
@@ -10,11 +10,13 @@ interface AuthProps {
   onAuthSuccess: (user: import('../types').User) => void;
   /** 管理员入口：隐藏角色选项卡，强制 ADMIN 身份，且不可自助注册 */
   adminPortal?: boolean;
+  /** 首屏模式：访客点材料默认 register，顶栏入口默认 login */
+  initialMode?: 'login' | 'register';
+  /** 返回探索库（访客 Auth gate） */
+  onBack?: () => void;
 }
 
 type AuthMode = 'login' | 'register' | 'forgot';
-
-const LOGIN_FAILED_MSG = '邮箱或密码错误';
 
 const AuthSpinner: React.FC<{ label: string }> = ({ label }) => (
   <div className="absolute inset-0 z-20 bg-black/45 backdrop-blur-[2px] flex flex-col items-center justify-center gap-3 rounded-[40px]">
@@ -41,14 +43,25 @@ const AuthSubmitButton: React.FC<{
   </button>
 );
 
-const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
-  const [mode, setMode] = useState<AuthMode>('login');
+const Auth: React.FC<AuthProps> = ({
+  onAuthSuccess,
+  adminPortal = false,
+  initialMode = 'login',
+  onBack,
+}) => {
+  const { t } = useTranslation();
+  const [mode, setMode] = useState<AuthMode>(adminPortal ? 'login' : initialMode);
   const [role, setRole] = useState<UserRole>(adminPortal ? 'ADMIN' : 'DESIGNER');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
+
+  useEffect(() => {
+    if (adminPortal) return;
+    setMode(initialMode);
+  }, [initialMode, adminPortal]);
 
   // 登录 Tab / Admin 入口 → 绑定对应 Auth storageKey（不改数据源）
   // Do NOT clear override on unmount: leaving Auth after login would reset portal to
@@ -62,7 +75,7 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
     return (
       <div className="min-h-screen bg-black flex items-center justify-center p-6">
         <p className="text-red-500 text-center text-2xl sm:text-4xl font-black leading-tight tracking-tight select-none">
-          生产环境配置缺失，禁止访问
+          {t('auth.configMissing')}
         </p>
       </div>
     );
@@ -76,6 +89,13 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
 
   const showForgotLink = mode === 'login';
 
+  const roleLabel =
+    role === 'DESIGNER'
+      ? t('common.designer')
+      : role === 'SUPPLIER'
+        ? t('common.supplier')
+        : t('common.admin');
+
   const handleForgotSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -85,7 +105,7 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
     try {
       const trimmedEmail = email.trim();
       if (!trimmedEmail) {
-        setError('请输入邮箱地址');
+        setError(t('auth.emailRequired'));
         return;
       }
 
@@ -95,9 +115,9 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
         return;
       }
 
-      setInfo('重置邮件已发送，请查收邮箱（含垃圾箱），点击链接完成密码修改。');
+      setInfo(t('auth.resetSent'));
     } catch {
-      setError('发送失败，请稍后重试');
+      setError(t('auth.sendFailed'));
     } finally {
       setLoading(false);
     }
@@ -114,7 +134,7 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
       const trimmedPassword = password;
 
       if (!trimmedEmail || !trimmedPassword) {
-        setError(LOGIN_FAILED_MSG);
+        setError(t('auth.loginFailed'));
         return;
       }
 
@@ -129,7 +149,7 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
       }
 
       if (role === 'ADMIN') {
-        setError('管理员账号请联系平台开通，无法自助注册');
+        setError(t('auth.adminNoSelfRegister'));
         return;
       }
 
@@ -140,7 +160,7 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
       }
       onAuthSuccess(result.user);
     } catch {
-      setError(mode === 'login' ? LOGIN_FAILED_MSG : '注册失败，请稍后重试');
+      setError(mode === 'login' ? t('auth.loginFailed') : t('auth.registerFailed'));
     } finally {
       setLoading(false);
     }
@@ -149,19 +169,23 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
   const isRegisteredRole = isRegisteredRoleError(error);
 
   const loadingLabel =
-    mode === 'forgot' ? '正在发送…' : mode === 'login' ? '正在验证身份…' : '正在创建账号…';
+    mode === 'forgot'
+      ? t('auth.sending')
+      : mode === 'login'
+        ? t('auth.verifying')
+        : t('auth.creating');
 
   if (mode === 'forgot') {
     return (
-      <AuthShell subtitle="找回密码">
+      <AuthShell subtitle={t('auth.forgotSubtitle')}>
         {loading && <AuthSpinner label={loadingLabel} />}
         <form onSubmit={handleForgotSubmit} className="space-y-4">
           <p className="text-gray-300 text-sm text-center leading-relaxed mb-2">
-            输入注册邮箱，我们将发送官方重置密码链接至您的邮箱。
+            {t('auth.forgotHint')}
           </p>
           <div>
             <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">
-              邮箱地址
+              {t('auth.email')}
             </label>
             <input
               required
@@ -188,18 +212,29 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
 
           <AuthSubmitButton
             loading={loading}
-            loadingLabel="发送中…"
-            idleLabel="发送重置邮件"
+            loadingLabel={t('auth.sending')}
+            idleLabel={t('auth.sendReset')}
           />
 
-          <div className="text-center pt-2">
+          <div className="text-center pt-2 space-y-3">
             <button
               type="button"
               onClick={() => switchMode('login')}
               className="text-xs font-bold text-gray-400 hover:text-white transition-colors"
             >
-              返回登录
+              {t('auth.backToLogin')}
             </button>
+            {onBack && (
+              <div>
+                <button
+                  type="button"
+                  onClick={onBack}
+                  className="text-xs font-bold text-gray-500 hover:text-white transition-colors"
+                >
+                  {t('common.backToExplore')}
+                </button>
+              </div>
+            )}
           </div>
         </form>
       </AuthShell>
@@ -207,13 +242,13 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
   }
 
   return (
-    <AuthShell subtitle={adminPortal ? '管理控制台 · 仅限平台管理员' : undefined}>
+    <AuthShell subtitle={adminPortal ? t('auth.adminSubtitle') : undefined}>
       {loading && <AuthSpinner label={loadingLabel} />}
       {adminPortal ? (
         <div className="mb-8 text-center">
           <div className="inline-flex items-center gap-2 bg-gray-100 px-6 py-3 rounded-2xl">
             <span className="text-lg">🛡️</span>
-            <span className="text-sm font-black text-black tracking-wide">管理控制台登录</span>
+            <span className="text-sm font-black text-black tracking-wide">{t('auth.adminLoginBadge')}</span>
           </div>
         </div>
       ) : (
@@ -226,7 +261,7 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
             }}
             className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all ${role === 'DESIGNER' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}
           >
-            设计师
+            {t('common.designer')}
           </button>
           <button
             type="button"
@@ -236,7 +271,7 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
             }}
             className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all ${role === 'SUPPLIER' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}
           >
-            材料商
+            {t('common.supplier')}
           </button>
         </div>
       )}
@@ -244,7 +279,7 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
       <form onSubmit={handleSubmit} className="space-y-4">
         <div>
           <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">
-            邮箱地址
+            {t('auth.email')}
           </label>
           <input
             required
@@ -259,7 +294,7 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
         <div>
           <div className="flex items-center justify-between mb-2">
             <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest">
-              访问密码
+              {t('auth.password')}
             </label>
             {showForgotLink && (
               <button
@@ -267,7 +302,7 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
                 onClick={() => switchMode('forgot')}
                 className="text-[10px] font-bold text-blue-400 hover:text-blue-300 transition-colors"
               >
-                忘记密码？
+                {t('auth.forgotPassword')}
               </button>
             )}
           </div>
@@ -294,17 +329,17 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
             <p className="text-red-400 text-sm font-bold text-center leading-snug">{error}</p>
             {isRegisteredRole && mode === 'login' && (
               <p className="text-red-300/90 text-xs text-center mt-2 leading-relaxed">
-                同一邮箱只能拥有一个身份；如需使用{role === 'DESIGNER' ? '设计师' : role === 'SUPPLIER' ? '材料商' : '管理端'}身份，请更换邮箱重新注册。
+                {t('auth.roleHintLogin', { role: roleLabel })}
               </p>
             )}
             {isRegisteredRole && mode === 'register' && (
               <p className="text-red-300/90 text-xs text-center mt-2 leading-relaxed">
-                请更换其他邮箱后再创建{role === 'DESIGNER' ? '设计师' : role === 'SUPPLIER' ? '材料商' : '管理端'}账号。
+                {t('auth.roleHintRegister', { role: roleLabel })}
               </p>
             )}
             {!isRegisteredRole && mode === 'register' && error.includes('该邮箱已被注册') && (
               <p className="text-red-300/90 text-xs text-center mt-2 leading-relaxed">
-                请更换其他邮箱后再试。
+                {t('auth.emailTaken')}
               </p>
             )}
           </div>
@@ -318,21 +353,32 @@ const Auth: React.FC<AuthProps> = ({ onAuthSuccess, adminPortal = false }) => {
 
         <AuthSubmitButton
           loading={loading}
-          loadingLabel="验证中…"
-          idleLabel={mode === 'login' ? '立即进入' : '创建账号'}
+          loadingLabel={mode === 'login' ? t('auth.verifying') : t('auth.creating')}
+          idleLabel={mode === 'login' ? t('auth.enterNow') : t('auth.createAccount')}
           className="mt-4"
         />
       </form>
 
       {!adminPortal && (
-        <div className="mt-8 text-center">
+        <div className="mt-8 text-center space-y-3">
           <button
             type="button"
             onClick={() => switchMode(mode === 'login' ? 'register' : 'login')}
             className="text-xs font-bold text-gray-400 hover:text-black transition-colors"
           >
-            {mode === 'login' ? '还没有账号? 立即注册' : '已有账号? 返回登录'}
+            {mode === 'login' ? t('auth.noAccount') : t('auth.hasAccount')}
           </button>
+          {onBack && (
+            <div>
+              <button
+                type="button"
+                onClick={onBack}
+                className="text-xs font-bold text-gray-500 hover:text-black transition-colors"
+              >
+                {t('common.backToExplore')}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </AuthShell>

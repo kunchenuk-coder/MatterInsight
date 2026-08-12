@@ -8,6 +8,7 @@ import { getSupabaseForPortal, isSupabaseConfigured } from './supabaseClient';
 import { logMaterialEvent } from './eventLogService';
 import { toMaterialDetail } from '../data/materialDetailMock';
 import type { AppPortal } from '../utils/appPortal';
+import i18n from '../i18n';
 
 export interface SubmitInspirationStoryPayload {
   material_id: string;
@@ -217,10 +218,10 @@ export function getStoryAuthorLabel(
   currentUserId?: string | null,
   materialSupplierId?: string
 ): string {
-  if (currentUserId && authorId === currentUserId) return '我';
-  if (materialSupplierId && authorId === materialSupplierId) return '品牌官方';
+  if (currentUserId && authorId === currentUserId) return i18n.t('story.me');
+  if (materialSupplierId && authorId === materialSupplierId) return i18n.t('story.brandOfficial');
   if (authorId.startsWith('designer_')) {
-    return `设计师 #${authorId.replace('designer_', '')}`;
+    return i18n.t('story.designerHash', { id: authorId.replace('designer_', '') });
   }
-  return '设计师';
+  return i18n.t('story.designer');
 }

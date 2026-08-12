@@ -1,4 +1,5 @@
 import type { Material, MoodBoard, MoodBoardItem } from '../types';
+import { pickLocale } from './localizedText';
 
 function spaceDrawingItem(board: MoodBoard): MoodBoardItem | undefined {
   if (board.spaceImage) return undefined;
@@ -111,7 +112,7 @@ export function getMoodboardFeedMaterials(
       itemId: item.id,
       materialId: item.materialId,
       localMaterialId: item.localMaterialId,
-      name: item.displayName ?? mat?.name ?? '材料',
+      name: item.displayName ?? (mat ? pickLocale(mat.name) : '材料'),
       code: isCustom ? '' : (item.displaySpec ?? mat?.specifications ?? mat?.id?.slice(0, 8) ?? '—'),
       imageUrl: item.snapshotImageUrl ?? item.imageUrl ?? mat?.image ?? null,
       isCustom,

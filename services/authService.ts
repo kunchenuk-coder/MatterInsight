@@ -99,6 +99,10 @@ function mapProfileToUser(
   const supplierStatus =
     (profile.status as User['accountStatus']) ?? 'approved';
 
+  const dbPoints = Number(profile.current_points ?? profile.points);
+  const fallbackPoints =
+    role === 'ADMIN' ? 999999 : role === 'DESIGNER' ? 1000 : 0;
+
   return {
     id: profile.id,
     email: profile.email,
@@ -106,7 +110,7 @@ function mapProfileToUser(
     dbRole,
     name: resolveUserDisplayName({ company: profile.company, email: profile.email }),
     company: profile.company?.trim() || undefined,
-    points: role === 'DESIGNER' ? 1000 : role === 'ADMIN' ? 999999 : 0,
+    points: Number.isFinite(dbPoints) ? dbPoints : fallbackPoints,
     isVerified: isSupplier ? profile.is_verified === true : true,
     accountStatus: isSupplier ? supplierStatus : undefined,
     registeredPhone: profile.registered_phone ?? undefined,

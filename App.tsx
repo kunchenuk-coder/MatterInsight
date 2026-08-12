@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef, Component } from 'react';
+import { useTranslation } from 'react-i18next';
+import i18n from './i18n';
 import { User, UserRole, Material, Category, MoodBoard, PointTransaction, PendingMaterial, Inquiry, SampleRequest, MaterialStatus, AuditLog, Notification, InquiryFormPayload } from './types';
 import { MOCK_MATERIALS } from './constants';
 import Navbar from './components/Navbar';
@@ -36,6 +38,8 @@ import {
   rejectMaterial as cloudRejectMaterial,
 } from './services/materialService';
 import { recordPointsConsume } from './services/adminAnalyticsService';
+import { pickLocale } from './utils/localizedText';
+import { materialMatchesSearchQuery } from './utils/materialSearch';
 import {
   createInquiry,
   createSampleRequest,
@@ -119,10 +123,9 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
         <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
           <div className="max-w-md w-full bg-white p-10 rounded-[40px] shadow-2xl text-center">
             <div className="text-4xl mb-6">⚠️</div>
-            <h2 className="text-2xl font-black mb-4">抱歉，程序出现了错误</h2>
+            <h2 className="text-2xl font-black mb-4">{i18n.t('error.title')}</h2>
             <p className="text-gray-500 mb-8 text-sm leading-relaxed">
-              可能是由于上传的图片过大导致本地存储空间溢出，或者是数据格式不兼容。
-              您可以尝试刷新页面，或者清除浏览器缓存后重试。
+              {i18n.t('error.body')}
             </p>
             <button 
               onClick={() => {
@@ -144,13 +147,13 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
               }}
               className="w-full bg-black text-white py-4 rounded-2xl font-bold shadow-xl hover:scale-[1.02] transition-all"
             >
-              清除业务缓存并刷新
+              {i18n.t('error.clearCache')}
             </button>
             <button 
               onClick={() => window.location.reload()}
               className="w-full mt-4 py-4 text-gray-400 font-bold hover:text-black transition-colors"
             >
-              仅刷新页面
+              {i18n.t('error.reload')}
             </button>
             {this.state.error && (
               <details className="mt-8 text-left">
@@ -170,6 +173,7 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 }
 
 const App: React.FC = () => {
+  const { t } = useTranslation();
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [recoveryMode, setRecoveryMode] = useState(() => isPasswordRecoveryMode());
@@ -188,6 +192,12 @@ const App: React.FC = () => {
   const [points, setPoints] = useState(1000); 
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [adminPass, setAdminPass] = useState('');
+  /** 访客 Auth gate：点材料 / 顶栏登录时展示 */
+  const [showAuthGate, setShowAuthGate] = useState(false);
+  const [authInitialMode, setAuthInitialMode] = useState<'login' | 'register'>('login');
+  const pendingMaterialIdRef = useRef<string | null>(null);
+  /** 登录后库尚未就绪时，等 hydrate 再打开材料 */
+  const [postAuthMaterialId, setPostAuthMaterialId] = useState<string | null>(null);
 
   const {
     total: dbUnreadTotal,
@@ -351,6 +361,17 @@ const App: React.FC = () => {
     goToExploreLibrary();
   };
 
+  const openAuthGate = (mode: 'login' | 'register', materialId: string | null = null) => {
+    pendingMaterialIdRef.current = materialId;
+    setAuthInitialMode(mode);
+    setShowAuthGate(true);
+  };
+
+  const closeAuthGate = () => {
+    pendingMaterialIdRef.current = null;
+    setShowAuthGate(false);
+  };
+
   const openMoodboardFromFeed = (board: MoodBoard) => {
     if (pageRoute.type !== 'designer' && pageRoute.type !== 'my-page') {
       navigateTo(DESIGNER_DASHBOARD_PATH, true);
@@ -430,6 +451,21 @@ const App: React.FC = () => {
   moodboardsRef.current = moodboards;
   libraryRef.current = library;
 
+  const resumeMaterialAfterAuth = (materialId: string) => {
+    materialReturnToRef.current = 'home';
+    setMaterialDetailReturnTo('home');
+    setMaterialDetailReturnPath(null);
+    navigateTo(getMaterialPath(materialId), true);
+    setCurrentView('DETAILS');
+    const mat = libraryRef.current.find((m) => m.id === materialId);
+    if (mat) {
+      setSelectedMaterial(mat);
+      setPostAuthMaterialId(null);
+    } else {
+      setPostAuthMaterialId(materialId);
+    }
+  };
+
   /** 单设备顶号守卫：手机/PC 各允许一台，同类新登录踢掉旧会话 */
   useDeviceSessionGuard(user?.id, () => {
     setUser(null);
@@ -466,7 +502,7 @@ const App: React.FC = () => {
   };
 
   const defaultMoodboardsFor = (userId: string): MoodBoard[] => [
-    { id: `mb_${userId}_default`, name: '默认情绪板', items: [], isPaid: false, maxMaterials: 10, visibility: 'private' },
+    { id: `mb_${userId}_default`, name: t('moodboard.defaultName'), items: [], isPaid: false, maxMaterials: 10, visibility: 'private' },
   ];
 
   /** 先用本地缓存进入主页，不等待云端同步 */
@@ -484,9 +520,13 @@ const App: React.FC = () => {
       return false;
     }
 
+    const resumeMaterialId = pendingMaterialIdRef.current;
+    pendingMaterialIdRef.current = null;
+    setShowAuthGate(false);
+
     skipCloudSyncRef.current = true;
     setPoints(userData.points);
-    setCurrentView('DASHBOARD');
+    setCurrentView(resumeMaterialId ? 'DETAILS' : 'DASHBOARD');
 
     if (userData.dbRole === 'designer') {
       const boards =
@@ -503,6 +543,11 @@ const App: React.FC = () => {
       setSavedMaterialIds([]);
       setMoodboards([]);
       setActiveMoodboardId('');
+    }
+
+    if (resumeMaterialId) {
+      resumeMaterialAfterAuth(resumeMaterialId);
+      return true;
     }
 
     if (!redirectAfterAuth(userData.dbRole, true)) {
@@ -874,6 +919,49 @@ const App: React.FC = () => {
     };
   }, [currentView, user?.id]);
 
+  /** 访客：拉取已发布材料库（anon RLS） */
+  useEffect(() => {
+    if (!authReady || user || isAdminPortal() || !isSupabaseConfigured()) return;
+
+    let cancelled = false;
+    void loadGlobalCloudData().then((cloudGlobal) => {
+      if (cancelled) return;
+      if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, user]);
+
+  /** 访客：工作台 / 主页 / 材料详情 URL 一律回到探索库 */
+  useEffect(() => {
+    if (!authReady || user || isAdminPortal() || showAuthGate) return;
+    const route = parseAppPageRoute(pathname);
+    if (
+      route.type === 'dashboard' ||
+      route.type === 'my-page' ||
+      route.type === 'designer' ||
+      route.type === 'material'
+    ) {
+      navigateTo(LOGIN_PATH, true);
+      setCurrentView('HOME');
+      setSelectedMaterial(null);
+      setSelectedMoodboard(null);
+    }
+  }, [authReady, user, pathname, showAuthGate]);
+
+  /** 登录后来自材料点击：库 hydrate 后打开详情 */
+  useEffect(() => {
+    if (!user || !postAuthMaterialId) return;
+    const mat = library.find((m) => m.id === postAuthMaterialId);
+    if (!mat) return;
+    setSelectedMaterial(mat);
+    setCurrentView('DETAILS');
+    navigateTo(getMaterialPath(mat.id), true);
+    setPostAuthMaterialId(null);
+  }, [user, postAuthMaterialId, library]);
+
   useEffect(() => {
     if (!isSupabaseConfigured() || !user || user.role !== 'DESIGNER') {
       setCollectedMoodboardIds([]);
@@ -990,7 +1078,7 @@ const App: React.FC = () => {
       };
       setLibrary(prev => [...prev, newMat]);
       setPendingMaterials(prev => prev.filter(p => p.id !== id));
-      addNotification(pending.submitterId, '材料审核通过', `您的材料 "${pending.name}" 已审核通过并发布。`, 'AUDIT');
+      addNotification(pending.submitterId, '材料审核通过', `您的材料 "${pickLocale(pending.name, 'zh')}" 已审核通过并发布。`, 'AUDIT');
       if (isSupabaseConfigured()) {
         await cloudApproveMaterial(id, newMat);
       }
@@ -1016,7 +1104,7 @@ const App: React.FC = () => {
       setPendingMaterials(prev => prev.map(p => 
         p.id === id ? rejected : p
       ));
-      addNotification(pending.submitterId, '材料审核驳回', `您的材料 "${pending.name}" 审核未通过。原因：${comment}`, 'AUDIT');
+      addNotification(pending.submitterId, '材料审核驳回', `您的材料 "${pickLocale(pending.name, 'zh')}" 审核未通过。原因：${comment}`, 'AUDIT');
       if (isSupabaseConfigured()) {
         await cloudRejectMaterial(id, rejected);
       }
@@ -1116,7 +1204,7 @@ const App: React.FC = () => {
         width: 200,
         height: 200,
         zIndex: mb.items.length + 1,
-        remark: mat?.name || '',
+        remark: mat ? pickLocale(mat.name) : '',
       };
       return { ...mb, items: [...mb.items, newItem] };
     });
@@ -1157,7 +1245,7 @@ const App: React.FC = () => {
   const handleRecharge = (amount: number) => {
     handlePointChange(amount, '积分充值');
     setIsRechargeModalOpen(false);
-    alert(`成功充值 ${amount} 积分！`);
+    alert(t('recharge.success', { amount }));
   };
 
   const handleInquiry = async (
@@ -1416,8 +1504,8 @@ const App: React.FC = () => {
       return (
         <div className="min-h-screen bg-white">
           <div className="p-6 border-b flex justify-between items-center bg-black text-white">
-            <h1 className="text-xl font-black uppercase tracking-tighter">物见 | MATTER INSIGHT <span className="text-gray-400 font-light ml-2 text-sm italic">Sharing</span></h1>
-            <button onClick={() => setSharedMaterialId(null)} className="text-sm font-bold opacity-70 hover:opacity-100">返回登录/注册</button>
+            <h1 className="text-xl font-black uppercase tracking-tighter">{t('common.brand')} | MATTER INSIGHT <span className="text-gray-400 font-light ml-2 text-sm italic">{t('materialDetail.sharing')}</span></h1>
+            <button onClick={() => setSharedMaterialId(null)} className="text-sm font-bold opacity-70 hover:opacity-100">{t('materialDetail.backLoginRegister')}</button>
           </div>
           <div className="p-4 md:p-10">
              <MaterialDetail 
@@ -1425,20 +1513,20 @@ const App: React.FC = () => {
               user={user} // This might be null, MaterialDetail should handle it
               isPublicView={true}
               onBack={() => setSharedMaterialId(null)}
-              onDeductPoints={() => alert('请先登录以使用积分')}
-              onSampleRequest={() => alert('请先登录/注册以申请小样')}
-              onInquiry={() => alert('请先登录/注册以申请报价')}
+              onDeductPoints={() => alert(t('materialDetail.loginForPoints'))}
+              onSampleRequest={() => alert(t('materialDetail.loginForSample'))}
+              onInquiry={() => alert(t('materialDetail.loginForQuote'))}
               inquiries={[]}
               sampleRequests={[]}
             />
           </div>
           <div className="p-10 bg-gray-50 text-center">
-            <p className="text-gray-400 text-xs mb-4 uppercase tracking-widest font-black">发现更多顶级设计材料</p>
+            <p className="text-gray-400 text-xs mb-4 uppercase tracking-widest font-black">{t('materialDetail.discoverMore')}</p>
             <button 
               onClick={() => { setSharedMaterialId(null); setUser(null); }}
               className="bg-black text-white px-8 py-3 rounded-2xl font-bold uppercase tracking-widest text-xs hover:scale-105 transition-transform shadow-xl"
             >
-              注册获取完整权限
+              {t('materialDetail.registerFull')}
             </button>
           </div>
         </div>
@@ -1450,7 +1538,7 @@ const App: React.FC = () => {
     return (
       <div className="min-h-screen bg-[#111] flex flex-col items-center justify-center gap-4 p-6">
         <div className="w-10 h-10 border-2 border-white/20 border-t-white rounded-full animate-spin" />
-        <p className="text-white/70 text-sm font-bold tracking-wide">正在加载…</p>
+        <p className="text-white/70 text-sm font-bold tracking-wide">{t('common.loading')}</p>
       </div>
     );
   }
@@ -1460,28 +1548,47 @@ const App: React.FC = () => {
     return <ResetPassword />;
   }
 
-  if (!user) {
-    return <Auth onAuthSuccess={handleAuthSuccess} adminPortal={isAdminPortal()} />;
+  // Admin 入口：未登录仍强制 Auth
+  if (isAdminPortal() && !user) {
+    return <Auth onAuthSuccess={handleAuthSuccess} adminPortal />;
+  }
+
+  // 访客 Auth gate（点材料 / 顶栏登录）
+  if (!user && showAuthGate) {
+    return (
+      <Auth
+        key={`auth-gate-${authInitialMode}`}
+        onAuthSuccess={handleAuthSuccess}
+        initialMode={authInitialMode}
+        onBack={closeAuthGate}
+      />
+    );
   }
 
   // Header 红点：材料商 = pending 小样 + pending 询价 + tag_added；设计师 = 未读小样/询价 + story_featured
-  const pendingSampleBadge = sampleRequests.filter(
-    (s) => s.supplierId === user.id && s.status === 'PENDING'
-  ).length;
-  const pendingInquiryBadge = inquiries.filter(
-    (inq) => inq.supplierId === user.id && inq.status === 'PENDING'
-  ).length;
-  const totalNotifications = isSupabaseConfigured()
-    ? user.role === 'SUPPLIER'
-      ? pendingSampleBadge + pendingInquiryBadge + dbUnreadCounts.tag_added
+  const pendingSampleBadge = user
+    ? sampleRequests.filter((s) => s.supplierId === user.id && s.status === 'PENDING').length
+    : 0;
+  const pendingInquiryBadge = user
+    ? inquiries.filter((inq) => inq.supplierId === user.id && inq.status === 'PENDING').length
+    : 0;
+  const totalNotifications = !user
+    ? 0
+    : isSupabaseConfigured()
+      ? user.role === 'SUPPLIER'
+        ? pendingSampleBadge + pendingInquiryBadge + dbUnreadCounts.tag_added
+        : user.role === 'DESIGNER'
+          ? designerUnreadRequests + dbUnreadCounts.story_featured
+          : dbUnreadTotal
       : user.role === 'DESIGNER'
-        ? designerUnreadRequests + dbUnreadCounts.story_featured
-        : dbUnreadTotal
-    : user.role === 'DESIGNER'
-      ? designerUnreadRequests
-      : pendingSampleBadge + pendingInquiryBadge;
+        ? designerUnreadRequests
+        : pendingSampleBadge + pendingInquiryBadge;
 
   const handleAvatarClick = () => {
+    if (!user) {
+      openAuthGate('login');
+      return;
+    }
     if (user.role === 'DESIGNER') {
       navigateTo(MY_PAGE_PATH);
       setSelectedMaterial(null);
@@ -1501,32 +1608,65 @@ const App: React.FC = () => {
           points={points} 
           onLogoClick={goToExploreLibrary}
           onProfileClick={() => {
+            if (!user) {
+              openAuthGate('login');
+              return;
+            }
             redirectToRoleDashboard(user.dbRole);
             setCurrentView('DASHBOARD');
           }}
           onAvatarClick={handleAvatarClick}
           onMyPageClick={() => {
+            if (!user) {
+              openAuthGate('login');
+              return;
+            }
             if (pathname !== MY_PAGE_PATH) {
               navigateTo(MY_PAGE_PATH);
             }
             setCurrentView('HOME');
           }}
-          onMoodboardClick={() => setCurrentView('MOODBOARD')}
+          onMoodboardClick={() => {
+            if (!user) {
+              openAuthGate('login');
+              return;
+            }
+            setCurrentView('MOODBOARD');
+          }}
+          onAuthClick={() => openAuthGate('login')}
           onLogout={async () => {
             if (isSupabaseConfigured()) await signOut();
             setUser(null);
             setSavedMaterialIds([]);
             setMoodboards([]);
             setActiveMoodboardId('');
+            setSelectedMaterial(null);
+            setSelectedMoodboard(null);
+            setCurrentView('HOME');
+            navigateTo(LOGIN_PATH, true);
+            closeAuthGate();
           }}
-          onRechargeClick={() => setIsRechargeModalOpen(true)}
+          onRechargeClick={() => {
+            if (!user) {
+              openAuthGate('login');
+              return;
+            }
+            setIsRechargeModalOpen(true);
+          }}
           notifications={totalNotifications}
           searchTerm={searchTerm}
           onSearchChange={setSearchTerm}
+          onSearchSubmit={() => {
+            goToExploreLibrary();
+          }}
+          onSearchExit={() => {
+            setSearchTerm('');
+            goToExploreLibrary();
+          }}
         />
         
         <main className="flex-grow pt-20 px-4 md:px-8">
-          {onProfilePage && pageRoute.type === 'my-page' && user.role === 'DESIGNER' && currentView === 'HOME' && (
+          {user && onProfilePage && pageRoute.type === 'my-page' && user.role === 'DESIGNER' && currentView === 'HOME' && (
             <DesignerPage
               mode="owner"
               designerId={user.id}
@@ -1553,7 +1693,7 @@ const App: React.FC = () => {
             />
           )}
 
-          {onProfilePage && pageRoute.type === 'designer' && currentView === 'HOME' && (
+          {user && onProfilePage && pageRoute.type === 'designer' && currentView === 'HOME' && (
             <DesignerPage
               mode="public"
               designerId={pageRoute.id}
@@ -1565,11 +1705,11 @@ const App: React.FC = () => {
             />
           )}
 
-          {onProfilePage && pageRoute.type === 'my-page' && user.role !== 'DESIGNER' && (
+          {user && onProfilePage && pageRoute.type === 'my-page' && user.role !== 'DESIGNER' && (
             <div className="max-w-3xl mx-auto py-20 text-center">
-              <p className="text-gray-400 font-bold">仅设计师可访问我的主页</p>
+              <p className="text-gray-400 font-bold">{t('explore.designerOnlyPage')}</p>
               <button type="button" onClick={leaveProfilePages} className="mt-4 text-sm font-bold">
-                返回探索库
+                {t('common.backToExplore')}
               </button>
             </div>
           )}
@@ -1579,16 +1719,16 @@ const App: React.FC = () => {
               <div className="mb-8 md:mb-10 mt-4 md:mt-6 bg-black text-white p-6 md:p-12 rounded-[30px] md:rounded-[40px] relative overflow-hidden group min-h-[14rem] md:h-64 flex items-center">
                 <div className="absolute top-0 right-0 w-64 h-64 bg-white/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 group-hover:scale-110 transition-transform duration-700"></div>
                 <div className="relative z-10 w-full">
-                  <span className="text-[9px] md:text-[10px] font-black uppercase tracking-[0.2em] bg-white/20 px-3 py-1 rounded-full mb-4 md:mb-3 inline-block">Promoted / 推广</span>
-                  <h2 className="text-3xl md:text-5xl font-black tracking-tighter uppercase mb-3 md:mb-2 leading-none">WHAT's NEW</h2>
+                  <span className="text-[9px] md:text-[10px] font-black uppercase tracking-[0.2em] bg-white/20 px-3 py-1 rounded-full mb-4 md:mb-3 inline-block">{t('explore.promoted')}</span>
+                  <h2 className="text-3xl md:text-5xl font-black tracking-tighter uppercase mb-3 md:mb-2 leading-none">{t('explore.whatsNew')}</h2>
                   <p className="text-gray-400 font-medium text-xs md:text-sm max-w-md leading-relaxed md:leading-tight opacity-70">
-                    探索本季最受瞩目的创新材质。从可持续生物基材料到未来感金属涂层。
+                    {t('explore.heroDesc')}
                   </p>
                   <button 
                     onClick={() => setShowFeatureModal(true)}
                     className="mt-6 md:mt-8 bg-white text-black px-6 py-3 rounded-xl text-xs md:text-sm font-bold hover:scale-105 transition-transform"
                   >
-                    立即查看专题
+                    {t('explore.viewFeature')}
                   </button>
                 </div>
               </div>
@@ -1599,10 +1739,7 @@ const App: React.FC = () => {
               <PinterestFeed 
                 materials={library.filter(m => {
                   const matchesCategory = !selectedCategory || m.category === selectedCategory;
-                  const matchesSearch = !searchTerm || 
-                    m.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                    m.brand.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                    m.specifications.toLowerCase().includes(searchTerm.toLowerCase());
+                  const matchesSearch = materialMatchesSearchQuery(m, searchTerm);
                   return matchesCategory && matchesSearch;
                 })}
                 publishedMoodboards={
@@ -1617,22 +1754,40 @@ const App: React.FC = () => {
                       })
                     : []
                 }
-                onSelect={(m) => openMaterialDetail(m, 'home')}
-                onSelectMoodboard={openMoodboardFromFeed}
-                onSave={handleSaveMaterial}
-                savedIds={user.role === 'DESIGNER' ? savedMaterialIds : []}
-                moodboards={user.role === 'DESIGNER' ? moodboards : []}
+                onSelect={(m) => {
+                  if (!user) {
+                    openAuthGate('register', m.id);
+                    return;
+                  }
+                  openMaterialDetail(m, 'home');
+                }}
+                onSelectMoodboard={(board) => {
+                  if (!user) {
+                    openAuthGate('login');
+                    return;
+                  }
+                  openMoodboardFromFeed(board);
+                }}
+                onSave={(id, moodboardId, newMoodboardName) => {
+                  if (!user) {
+                    openAuthGate('login');
+                    return;
+                  }
+                  handleSaveMaterial(id, moodboardId, newMoodboardName);
+                }}
+                savedIds={user?.role === 'DESIGNER' ? savedMaterialIds : []}
+                moodboards={user?.role === 'DESIGNER' ? moodboards : []}
                 collectedMoodboardIds={
-                  user.role === 'DESIGNER' ? collectedMoodboardIds : []
+                  user?.role === 'DESIGNER' ? collectedMoodboardIds : []
                 }
                 onToggleCollectMoodboard={
-                  user.role === 'DESIGNER' ? handleToggleCollectMoodboard : undefined
+                  user?.role === 'DESIGNER' ? handleToggleCollectMoodboard : undefined
                 }
               />
             </div>
           )}
 
-          {currentView === 'MOODBOARD_VIEW' && selectedMoodboard && (
+          {user && currentView === 'MOODBOARD_VIEW' && selectedMoodboard && (
             <MoodBoardViewer
               board={selectedMoodboard}
               materials={library}
@@ -1645,7 +1800,7 @@ const App: React.FC = () => {
             />
           )}
 
-          {currentView === 'DETAILS' && selectedMaterial && (
+          {user && currentView === 'DETAILS' && selectedMaterial && (
             <MaterialDetail 
               material={selectedMaterial} 
               user={user}
@@ -1653,11 +1808,11 @@ const App: React.FC = () => {
               fromSupplierDashboard={materialDetailReturnTo === 'supplier'}
               backLabel={
                 materialDetailReturnTo === 'dashboard'
-                  ? '返回控制台'
+                  ? t('materialDetail.backDashboard')
                   : materialDetailReturnTo === 'supplier'
-                    ? '返回材料商后台'
+                    ? t('materialDetail.backSupplier')
                   : materialDetailReturnTo === 'moodboard'
-                    ? '返回情绪板'
+                    ? t('materialDetail.backMoodboard')
                     : undefined
               }
               onBack={closeMaterialDetail}
@@ -1690,7 +1845,7 @@ const App: React.FC = () => {
             />
           )}
 
-          {currentView === 'MOODBOARD' && user.role === 'DESIGNER' && (
+          {user && currentView === 'MOODBOARD' && user.role === 'DESIGNER' && (
             <MoodBoardDesigner 
               user={user}
               points={points}
@@ -1707,7 +1862,7 @@ const App: React.FC = () => {
             />
           )}
 
-          {!onProfilePage && currentView === 'DASHBOARD' && (() => {
+          {user && !onProfilePage && currentView === 'DASHBOARD' && (() => {
             switch (user.dbRole) {
               case 'admin':
                 return (
@@ -1751,6 +1906,11 @@ const App: React.FC = () => {
                 return (
                   <SupplierDashboard
                     user={user}
+                    points={points}
+                    onPointsUpdated={(balance) => {
+                      setPoints(balance);
+                      setUser((prev) => (prev ? { ...prev, points: balance } : prev));
+                    }}
                     library={library}
                     setLibrary={setLibrary}
                     pendingList={pendingMaterials}
@@ -1771,8 +1931,8 @@ const App: React.FC = () => {
                 // 未知角色：显示未授权，禁止 signOut
                 return (
                   <div className="min-h-[50vh] flex flex-col items-center justify-center gap-4 p-8">
-                    <p className="text-lg font-black text-gray-800">无权访问此工作台</p>
-                    <p className="text-sm text-gray-500">请使用对应身份入口登录（未清除会话）</p>
+                    <p className="text-lg font-black text-gray-800">{t('explore.unauthorized')}</p>
+                    <p className="text-sm text-gray-500">{t('explore.unauthorizedHint')}</p>
                     <button
                       type="button"
                       className="px-6 py-3 rounded-2xl bg-black text-white font-bold"
@@ -1782,7 +1942,7 @@ const App: React.FC = () => {
                         window.dispatchEvent(new PopStateEvent('popstate'));
                       }}
                     >
-                      返回登录
+                      {t('explore.returnLogin')}
                     </button>
                   </div>
                 );
@@ -1800,17 +1960,15 @@ const App: React.FC = () => {
           <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[200] flex items-center justify-center p-6">
             <div className="bg-white p-12 rounded-[50px] max-w-lg w-full text-center shadow-2xl relative">
               <div className="text-6xl mb-6">🎁</div>
-              <h3 className="text-3xl font-black mb-4 tracking-tighter">感谢您的加入！</h3>
+              <h3 className="text-3xl font-black mb-4 tracking-tighter">{t('explore.welcomeTitle')}</h3>
               <p className="text-gray-500 mb-8 leading-relaxed">
-                恭喜您成为物见（Matter Insight）前 500 名注册设计师。
-                我们已向您的账户存入 <span className="text-black font-black">1000 积分</span> 奖励，
-                祝您在材质探索之旅中收获无限灵感。
+                {t('explore.welcomeBody', { points: 1000 })}
               </p>
               <button 
                 onClick={() => setShowWelcomeBonus(false)}
                 className="w-full bg-black text-white py-5 rounded-2xl font-bold shadow-xl hover:scale-[1.02] transition-all"
               >
-                开始探索
+                {t('explore.startExploring')}
               </button>
             </div>
           </div>
@@ -1831,33 +1989,35 @@ const App: React.FC = () => {
                   alt="Feature" 
                   className="w-full h-auto cursor-pointer"
                   onClick={() => {
-                    const targetMat = library[0]; // Link to first material for demo
-                    setSelectedMaterial(targetMat);
-                    setCurrentView('DETAILS');
+                    const targetMat = library[0];
                     setShowFeatureModal(false);
+                    if (!targetMat) return;
+                    if (!user) {
+                      openAuthGate('register', targetMat.id);
+                      return;
+                    }
+                    openMaterialDetail(targetMat, 'home');
                   }}
                 />
                 <div className="p-12 space-y-8">
-                  <h2 className="text-4xl font-black tracking-tighter uppercase">2026 材质趋势：生物共生</h2>
+                  <h2 className="text-4xl font-black tracking-tighter uppercase">{t('explore.featureTitle')}</h2>
                   <p className="text-gray-600 leading-relaxed text-lg">
-                    在这一季的专题中，我们深入探讨了人类建筑与自然生态的边界。
-                    从菌丝体砖块到透明木材，这些材料不仅是结构，更是生命。
-                    点击上方图片，探索本专题推荐的核心单品。
+                    {t('explore.featureBody')}
                   </p>
                   <div className="grid grid-cols-2 gap-8">
                     <div className="space-y-4">
                       <div className="h-48 bg-gray-100 rounded-3xl overflow-hidden">
                         <img src="https://picsum.photos/seed/mat1/600/400" className="w-full h-full object-cover" />
                       </div>
-                      <h4 className="font-bold">可持续循环</h4>
-                      <p className="text-sm text-gray-400">所有材料均可实现 100% 生物降解。</p>
+                      <h4 className="font-bold">{t('explore.featureSustain')}</h4>
+                      <p className="text-sm text-gray-400">{t('explore.featureSustainDesc')}</p>
                     </div>
                     <div className="space-y-4">
                       <div className="h-48 bg-gray-100 rounded-3xl overflow-hidden">
                         <img src="https://picsum.photos/seed/mat2/600/400" className="w-full h-full object-cover" />
                       </div>
-                      <h4 className="font-bold">未来感美学</h4>
-                      <p className="text-sm text-gray-400">独特的纹理与光泽，定义下一代空间语言。</p>
+                      <h4 className="font-bold">{t('explore.featureAesthetic')}</h4>
+                      <p className="text-sm text-gray-400">{t('explore.featureAestheticDesc')}</p>
                     </div>
                   </div>
                 </div>
@@ -1869,27 +2029,27 @@ const App: React.FC = () => {
         {showAdminLogin && (
           <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[100] flex items-center justify-center p-6">
             <div className="bg-white p-10 rounded-[40px] w-full max-w-sm shadow-2xl">
-              <h3 className="text-2xl font-black mb-6">运营控制中心</h3>
+              <h3 className="text-2xl font-black mb-6">{t('admin.opsTitle')}</h3>
               <input 
                 type="password" 
                 autoComplete="new-password"
                 name="admin-access-token"
-                placeholder="请输入管理员访问密码"
+                placeholder={t('admin.opsPlaceholder')}
                 className="w-full p-4 bg-gray-50 rounded-2xl mb-4 border-none outline-none focus:ring-2 focus:ring-black"
                 value={adminPass}
                 onChange={(e) => setAdminPass(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleAdminAuth()}
               />
               <div className="flex gap-4">
-                <button type="button" onClick={() => setShowAdminLogin(false)} className="flex-1 py-4 font-bold text-gray-400">取消</button>
-                <button type="button" onClick={handleAdminAuth} className="flex-1 py-4 bg-black text-white rounded-2xl font-bold">进入后台</button>
+                <button type="button" onClick={() => setShowAdminLogin(false)} className="flex-1 py-4 font-bold text-gray-400">{t('common.cancel')}</button>
+                <button type="button" onClick={handleAdminAuth} className="flex-1 py-4 bg-black text-white rounded-2xl font-bold">{t('admin.enterAdmin')}</button>
               </div>
             </div>
           </div>
         )}
 
         <footer className="bg-white border-t py-6 text-center text-sm text-gray-500">
-          &copy; 2026 物见 | Matter Insight. All Rights Reserved.
+          {t('explore.footer')}
         </footer>
       </div>
     </ErrorBoundary>

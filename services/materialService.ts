@@ -3,6 +3,7 @@ import type { MaterialHumanDna } from '../types/materialDetail';
 import { getSupabase, getSupabaseForPortal, isSupabaseConfigured } from './supabaseClient';
 import { parseOssObjectKey } from '../utils/parseOssObjectKey';
 import { enrichMaterialsWithFreshImages } from './materialImageService';
+import { packLocalized, pickLocale, unpackLocalized, type LocalizedText } from '../utils/localizedText';
 
 type MaterialRow = {
   id: string;
@@ -16,10 +17,11 @@ type MaterialRow = {
   view_count?: number | null;
   favorite_count?: number | null;
   quote_count?: number | null;
+  official_mood_tags_i18n?: Array<{ zh?: string; en?: string }> | null;
 };
 
 const MATERIAL_SELECT =
-  'id, user_id, supplier_id, data, status, is_pending, is_custom, oss_object_key, view_count, favorite_count, quote_count';
+  'id, user_id, supplier_id, data, status, is_pending, is_custom, oss_object_key, view_count, favorite_count, quote_count, official_mood_tags_i18n';
 
 function mergeRowOssKey(
   data: Material | PendingMaterial,
@@ -48,14 +50,18 @@ function applyStatsColumns(
 }
 
 function rowToMaterial(row: MaterialRow): Material {
-  return applyStatsColumns(
+  const merged = mergeOfficialMoodTagsI18n(
     mergeRowOssKey(row.data, row.oss_object_key, row.is_custom),
-    row
-  ) as Material;
+    row.official_mood_tags_i18n
+  );
+  return applyStatsColumns(merged, row) as Material;
 }
 
 function rowToPending(row: MaterialRow): PendingMaterial {
-  return mergeRowOssKey(row.data, row.oss_object_key, row.is_custom) as PendingMaterial;
+  return mergeOfficialMoodTagsI18n(
+    mergeRowOssKey(row.data, row.oss_object_key, row.is_custom),
+    row.official_mood_tags_i18n
+  ) as PendingMaterial;
 }
 
 /** 材料详情浏览 +1；返回最新 view_count（失败返回 null） */
@@ -253,8 +259,54 @@ export function readHumanDnaFromMaterial(material: Material): MaterialHumanDna |
 function extractOfficialMoodTags(humanDna: MaterialHumanDna): string[] {
   return (humanDna.mood_tags ?? [])
     .filter((t) => t.is_brand_official)
-    .map((t) => t.tag)
+    .map((t) => pickLocale(t.tag, 'zh'))
+    .filter(Boolean)
     .slice(0, 3);
+}
+
+function extractOfficialMoodTagsI18n(
+  humanDna: MaterialHumanDna
+): Array<{ zh: string; en: string }> {
+  return (humanDna.mood_tags ?? [])
+    .filter((t) => t.is_brand_official)
+    .map((t) => {
+      const { zh, en } = unpackLocalized(t.tag as LocalizedText);
+      return { zh, en };
+    })
+    .filter((t) => t.zh)
+    .slice(0, 3);
+}
+
+/** Merge parallel official_mood_tags_i18n into humanDna brand tags when present */
+function mergeOfficialMoodTagsI18n(
+  data: Material | PendingMaterial,
+  i18n?: Array<{ zh?: string; en?: string }> | null
+): Material | PendingMaterial {
+  if (!i18n || !Array.isArray(i18n) || i18n.length === 0) return data;
+  const payload = data as Material & { humanDna?: MaterialHumanDna };
+  const dna = payload.humanDna;
+  if (!dna?.mood_tags?.length) return data;
+
+  const byZh = new Map(
+    i18n
+      .map((row) => {
+        const zh = (row.zh || '').trim();
+        const en = (row.en || '').trim();
+        return zh ? ([zh, en] as const) : null;
+      })
+      .filter((x): x is readonly [string, string] => !!x)
+  );
+  if (byZh.size === 0) return data;
+
+  const mood_tags = dna.mood_tags.map((tag) => {
+    if (!tag.is_brand_official) return tag;
+    const zh = pickLocale(tag.tag, 'zh');
+    const en = byZh.get(zh);
+    if (!en) return tag;
+    return { ...tag, tag: packLocalized(zh, en) };
+  });
+
+  return { ...payload, humanDna: { ...dna, mood_tags } };
 }
 
 export type MaterialPersistResult = { ok: true } | { ok: false; error: string };
@@ -288,6 +340,7 @@ export async function saveMaterialDraft(
       status: 'draft',
       is_pending: false,
       official_mood_tags: extractOfficialMoodTags(humanDna),
+      official_mood_tags_i18n: extractOfficialMoodTagsI18n(humanDna),
       updated_at: new Date().toISOString(),
       oss_object_key: material.ossObjectKey ?? parseOssObjectKey(material.image),
     })
@@ -330,6 +383,7 @@ export async function republishMaterial(
       status: '已发布',
       is_pending: false,
       official_mood_tags: extractOfficialMoodTags(humanDna),
+      official_mood_tags_i18n: extractOfficialMoodTagsI18n(humanDna),
       updated_at: new Date().toISOString(),
       oss_object_key: material.ossObjectKey ?? parseOssObjectKey(material.image),
     })

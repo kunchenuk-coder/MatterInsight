@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { Material, MoodBoard } from '../types';
 import {
   getMoodboardFeedMaterials,
@@ -22,6 +23,7 @@ const MoodBoardViewer: React.FC<MoodBoardViewerProps> = ({
   onSelectMaterial,
   onFindSimilar,
 }) => {
+  const { t } = useTranslation();
   const [highlightedItemId, setHighlightedItemId] = useState<string | null>(null);
 
   const mainImage = useMemo(() => getMoodboardMainRenderImage(board), [board]);
@@ -30,7 +32,7 @@ const MoodBoardViewer: React.FC<MoodBoardViewerProps> = ({
     [board, materials]
   );
 
-  const ownerLabel = board.ownerName ?? '设计师';
+  const ownerLabel = board.ownerName ?? t('feed.designerFallback');
 
   const handleItemClick = (item: MoodboardFeedMaterial) => {
     setHighlightedItemId(item.itemId);
@@ -47,7 +49,7 @@ const MoodBoardViewer: React.FC<MoodBoardViewerProps> = ({
         onClick={onBack}
         className="mb-6 text-sm font-bold text-gray-500 hover:text-black transition-colors"
       >
-        ← 返回探索库
+        {t('moodboard.backExplore')}
       </button>
 
       <div className="flex flex-col lg:flex-row gap-8 lg:gap-10">
@@ -88,7 +90,7 @@ const MoodBoardViewer: React.FC<MoodBoardViewerProps> = ({
               <p className="text-xs text-gray-400 font-bold mt-2">{ownerLabel}</p>
             )}
             <p className="text-[10px] text-gray-300 font-bold mt-1 uppercase tracking-wider">
-              {feedMaterials.length} 款材料
+              {t('feed.materialCount', { count: feedMaterials.length })}
             </p>
           </div>
 
@@ -141,14 +143,14 @@ const MoodBoardViewer: React.FC<MoodBoardViewerProps> = ({
                           : 'bg-white text-gray-700 border border-gray-200 hover:border-black'
                       }`}
                     >
-                      寻找类似
+                      {t('moodboard.findSimilar')}
                     </button>
                   )}
                 </div>
               </li>
             ))}
             {feedMaterials.length === 0 && (
-              <li className="text-center text-gray-300 text-sm py-12">暂无材料条目</li>
+              <li className="text-center text-gray-300 text-sm py-12">{t('moodboard.emptyItems')}</li>
             )}
           </ul>
         </div>

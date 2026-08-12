@@ -1,5 +1,6 @@
 
 import React, { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { User, Material, Category, MoodBoard, Inquiry, SampleRequest, InquiryFormPayload } from '../types';
 import jsPDF from 'jspdf';
 import 'jspdf-autotable';
@@ -11,6 +12,7 @@ import {
 import useMarkNotificationsRead from '../hooks/useMarkNotificationsRead';
 import { markDesignerRequestsRead } from '../services/commerceRequestService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
+import { pickLocale } from '../utils/localizedText';
 
 // Add type declaration for jspdf-autotable
 interface jsPDFWithPlugin extends jsPDF {
@@ -49,6 +51,7 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
   onRechargeClick, onOpenMoodboard, onViewMaterialDetail, inquiries, onInquiry, sampleRequests,
   onRequestsMarkedRead,
 }) => {
+  const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<'TABLES' | 'ASSETS' | 'RECORDS'>('TABLES');
   const [expandedCategory, setExpandedCategory] = useState<Category | null>(null);
   const [editingMbId, setEditingMbId] = useState<string | null>(null);
@@ -150,7 +153,7 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
         const inq = findDesignerMoodboardInquiry(inquiries, user.id, item.materialId, showQuotation.id);
         const quoteLabel = inq?.status === 'QUOTED' ? formatSupplierQuotePrice(inq.quotePrice) : null;
         return [
-          m?.name || '未知',
+          m ? pickLocale(m.name) : '未知',
           m?.brand || '未知',
           m?.specifications || '-',
           m?.priceRange || '-',
@@ -181,15 +184,15 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
     <div className="max-w-6xl mx-auto py-10 space-y-12">
       <header className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6">
         <div className="px-6 md:px-0">
-          <h1 className="text-3xl md:text-4xl font-black mb-2 tracking-tighter text-black uppercase">控制中心</h1>
-          <p className="text-gray-400 font-bold text-xs md:text-sm">{user.name} · {user.company || '独立设计师'} <span className="ml-2 text-black bg-gray-100 px-2 py-0.5 rounded text-[10px]">PRO</span></p>
+          <h1 className="text-3xl md:text-4xl font-black mb-2 tracking-tighter text-black uppercase">{t('designer.title')}</h1>
+          <p className="text-gray-400 font-bold text-xs md:text-sm">{user.name} · {user.company || t('designer.independentDesigner')} <span className="ml-2 text-black bg-gray-100 px-2 py-0.5 rounded text-[10px]">PRO</span></p>
         </div>
       </header>
 
       <div className="flex gap-4 md:gap-8 border-b px-6 md:px-0 overflow-x-auto no-scrollbar">
-        <button onClick={() => setActiveTab('TABLES')} className={`pb-4 text-[10px] md:text-sm font-black uppercase tracking-widest transition-all whitespace-nowrap ${activeTab === 'TABLES' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>材料表</button>
-        <button onClick={() => setActiveTab('ASSETS')} className={`pb-4 text-[10px] md:text-sm font-black uppercase tracking-widest transition-all whitespace-nowrap ${activeTab === 'ASSETS' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>资产库</button>
-        <button onClick={() => setActiveTab('RECORDS')} className={`pb-4 text-[10px] md:text-sm font-black uppercase tracking-widest transition-all whitespace-nowrap ${activeTab === 'RECORDS' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>申请记录</button>
+        <button onClick={() => setActiveTab('TABLES')} className={`pb-4 text-[10px] md:text-sm font-black uppercase tracking-widest transition-all whitespace-nowrap ${activeTab === 'TABLES' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>{t('designer.tabTables')}</button>
+        <button onClick={() => setActiveTab('ASSETS')} className={`pb-4 text-[10px] md:text-sm font-black uppercase tracking-widest transition-all whitespace-nowrap ${activeTab === 'ASSETS' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>{t('designer.tabAssets')}</button>
+        <button onClick={() => setActiveTab('RECORDS')} className={`pb-4 text-[10px] md:text-sm font-black uppercase tracking-widest transition-all whitespace-nowrap ${activeTab === 'RECORDS' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>{t('designer.tabRecords')}</button>
       </div>
 
       <div className="px-6 md:px-0">
@@ -241,10 +244,10 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
                         className="flex items-center gap-4 group/item cursor-pointer"
                       >
                          <div className="w-10 h-10 rounded-lg overflow-hidden bg-gray-50 border border-gray-100 shrink-0">
-                            <img src={m?.image} className="w-full h-full object-cover" alt={m?.name} />
+                            <img src={m?.image} className="w-full h-full object-cover" alt={m ? pickLocale(m.name) : ''} />
                          </div>
                          <div className="flex-1 min-w-0">
-                            <p className="text-xs font-black text-gray-900 truncate">{m?.name}</p>
+                            <p className="text-xs font-black text-gray-900 truncate">{m ? pickLocale(m.name) : ''}</p>
                             <p className="text-[10px] text-gray-400 font-bold uppercase tracking-tight">{m?.brand}</p>
                          </div>
                          <div className={`text-[10px] font-black transition-colors ${quoteLabel ? 'text-blue-600' : 'text-gray-300 group-hover/item:text-black'}`}>
@@ -338,7 +341,7 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
                         inq?.status === 'QUOTED' ? formatSupplierQuotePrice(inq.quotePrice) : null;
                       return (
                         <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
-                          <td className="py-4 px-2 font-bold text-black">{m?.name || '未命名材料'}</td>
+                          <td className="py-4 px-2 font-bold text-black">{m ? pickLocale(m.name) : '未命名材料'}</td>
                           <td className="py-4 px-2 text-sm text-gray-600">{m?.brand || '-'}</td>
                           <td className="py-4 px-2 text-xs text-gray-400">{m?.specifications || '-'}</td>
                           <td className="py-4 px-2 font-black text-gray-400">{m?.priceRange || '-'}</td>
@@ -456,7 +459,7 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
                       <td className="p-6 flex items-center gap-4">
                         <img src={m?.image} className="w-10 h-10 rounded-lg object-cover" />
                         <div>
-                          <p className="font-bold text-sm">{m?.name}</p>
+                          <p className="font-bold text-sm">{m ? pickLocale(m.name) : ''}</p>
                           <p className="text-[10px] text-gray-400 uppercase font-black">{m?.brand}</p>
                         </div>
                       </td>
@@ -486,7 +489,7 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
                       <td className="p-6 flex items-center gap-4">
                         <img src={m?.image} className="w-10 h-10 rounded-lg object-cover" />
                         <div>
-                          <p className="font-bold text-sm">{m?.name}</p>
+                          <p className="font-bold text-sm">{m ? pickLocale(m.name) : ''}</p>
                           <p className="text-[10px] text-gray-400 uppercase font-black">{m?.brand}</p>
                         </div>
                       </td>
@@ -524,7 +527,7 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
               })}
               {sampleRequests.filter(r => r.designerId === user.id).length === 0 && inquiries.filter(i => i.designerId === user.id).length === 0 && (
                 <tr>
-                  <td colSpan={5} className="p-20 text-center text-gray-300 italic">暂无申请记录</td>
+                  <td colSpan={5} className="p-20 text-center text-gray-300 italic">{t('designer.emptyRecords')}</td>
                 </tr>
               )}
             </tbody>
@@ -543,7 +546,7 @@ const DesignerDashboard: React.FC<DashboardProps> = ({
             <div className="space-y-6">
               <div>
                 <p className="text-[10px] font-black uppercase text-gray-400 mb-1">材料名称</p>
-                <p className="font-bold">{library.find(m => m.id === viewingQuote.materialId)?.name}</p>
+                <p className="font-bold">{(() => { const m = library.find(x => x.id === viewingQuote.materialId); return m ? pickLocale(m.name) : ''; })()}</p>
               </div>
               <div className="bg-blue-50 p-6 rounded-3xl border border-blue-100">
                 <p className="text-[10px] font-black uppercase text-blue-600 mb-1">当前报价</p>

@@ -1,5 +1,6 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Material, User, Inquiry, SampleRequest, MaterialStatus, InquiryFormPayload } from '../types';
 import { toMaterialDetail, buildHumanDnaSnapshot } from '../data/materialDetailMock';
 import {
@@ -26,7 +27,7 @@ import useMaterialViewCount from '../hooks/useMaterialViewCount';
 import useMarkNotificationsRead from '../hooks/useMarkNotificationsRead';
 import { portalFromUserRole } from '../utils/appPortal';
 import { isSupabaseConfigured } from '../services/supabaseClient';
-
+import { pickLocale } from '../utils/localizedText';
 interface MaterialDetailProps {
   material: Material;
   user: User | null;
@@ -57,6 +58,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
   inquiries, sampleRequests, isPublicView = false, backLabel,
   editMode = false, fromSupplierDashboard = false, onMaterialUpdated,
 }) => {
+  const { t } = useTranslation();
   const [selectedVariant, setSelectedVariant] = useState((material.variants && material.variants[0]) || { id: 'default', colorCode: '#FFFFFF', imageUrl: material.image, name: '默认' });
   const [isQuoting, setIsQuoting] = useState(false);
   const [isRequestingSample, setIsRequestingSample] = useState(false);
@@ -93,6 +95,13 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
     [user, material, isPublicView, editMode, fromSupplierDashboard]
   );
   const isManageMode = permissions.canManageApplicationCases;
+  const displayName = pickLocale(material.name);
+  const displayNotes = material.supplierNotes
+    ? pickLocale(material.supplierNotes)
+    : '';
+  const displayDescription = material.description
+    ? pickLocale(material.description)
+    : '';
 
   /** 真实浏览计数：进入详情页 +1（sessionStorage 防 F5）；材料商编辑模式不刷量 */
   const { viewCount } = useMaterialViewCount({
@@ -417,7 +426,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
           <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
-          {backLabel ?? (isPublicView ? '探索公开库' : isManageMode ? '返回材料商后台' : '返回列表')}
+          {backLabel ?? (isPublicView ? t('materialDetail.backExplore') : isManageMode ? t('materialDetail.backSupplier') : t('materialDetail.backList'))}
         </button>
         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           {isManageMode && (
@@ -434,14 +443,14 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
               onClick={handleShare}
               className={`flex items-center gap-2 px-6 py-1.5 rounded-full text-xs font-bold transition-all ${copySuccess ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'}`}
             >
-              {copySuccess ? '✓ 已复制链接' : '📢 分享材料'}
+              {copySuccess ? `✓ ${t('materialDetail.linkCopied')}` : `📢 ${t('materialDetail.share')}`}
             </button>
           )}
           {!isPublicView && (
             <div className="flex items-center gap-2">
               {permissions.showManageModeBanner && (
                 <span className="bg-violet-100 text-violet-800 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider">
-                  材料商编辑模式
+                  {t('materialDetail.editMode')}
                 </span>
               )}
               <div className="bg-gray-100 px-4 py-1.5 rounded-full hidden sm:block">
@@ -456,7 +465,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
       <div className="bg-white p-4 sm:p-8 rounded-2xl sm:rounded-3xl shadow-sm border border-gray-100">
         <MaterialDetailTopSection
           mainImageUrl={selectedVariant.imageUrl || material.image}
-          mainImageAlt={material.name}
+          mainImageAlt={displayName}
           colorAccent={selectedVariant.colorCode}
           aiTrainedStatus={materialDetail.ai_trained_status}
           applicationCases={applicationCases}
@@ -469,7 +478,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
                 <button
                   key={v.id}
                   onClick={() => setSelectedVariant(v)}
-                  title={v.name}
+                  title={pickLocale(v.name)}
                   className={`w-8 h-8 rounded-full border-2 transition-all hover:scale-110 ${selectedVariant.id === v.id ? 'scale-110 border-white ring-2 ring-black' : 'border-white/50'}`}
                   style={{ backgroundColor: v.colorCode }}
                 />
@@ -484,9 +493,9 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
           <div className="space-y-4 sm:space-y-5">
             <div>
               <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1">
-                <h1 className="text-2xl sm:text-3xl font-bold">{material.name}</h1>
+                <h1 className="text-2xl sm:text-3xl font-bold">{displayName}</h1>
                 <span className="text-xs font-bold text-gray-400 tabular-nums">
-                  👀 浏览 {viewCount}
+                  👀 {t('materialDetail.views', { count: viewCount })}
                 </span>
               </div>
               <p className="text-gray-500 font-medium">
@@ -494,32 +503,32 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
                   {displayBrand}
                 </span>
                 {!isPublicView && !hasRequestedSample && !hasInquired && user?.role === 'DESIGNER' && (
-                  <span className="ml-2 text-[10px] bg-gray-100 text-gray-400 px-2 py-0.5 rounded-full font-bold">申请后可见品牌</span>
+                  <span className="ml-2 text-[10px] bg-gray-100 text-gray-400 px-2 py-0.5 rounded-full font-bold">{t('materialDetail.brandAfterApply')}</span>
                 )}
                 {isPublicView && (
-                  <span className="ml-2 text-[10px] bg-black text-white px-2 py-0.5 rounded-full font-bold">公开预览</span>
+                  <span className="ml-2 text-[10px] bg-black text-white px-2 py-0.5 rounded-full font-bold">{t('materialDetail.publicPreview')}</span>
                 )}
                 <span className="mx-2">·</span>
-                {material.category}
+                {t(`category.${material.category}`, { defaultValue: material.category })}
               </p>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-gray-50 p-3 rounded-xl border border-gray-100">
-                <span className="text-[10px] text-gray-400 font-bold uppercase block mb-1">规格尺寸</span>
+                <span className="text-[10px] text-gray-400 font-bold uppercase block mb-1">{t('materialDetail.spec')}</span>
                 <span className="text-sm font-semibold">{material.specifications}</span>
               </div>
               <div className="bg-gray-50 p-3 rounded-xl border border-gray-100">
-                <span className="text-[10px] text-gray-400 font-bold uppercase block mb-1">价格区间</span>
+                <span className="text-[10px] text-gray-400 font-bold uppercase block mb-1">{t('materialDetail.priceRange')}</span>
                 <span className="text-sm font-semibold">{material.priceRange}</span>
               </div>
               <div className="bg-gray-50 p-3 rounded-xl border border-gray-100">
-                <span className="text-[10px] text-gray-400 font-bold uppercase block mb-1">防火等级</span>
+                <span className="text-[10px] text-gray-400 font-bold uppercase block mb-1">{t('materialDetail.fireRating')}</span>
                 <span className="text-sm font-semibold">{material.fireRating}</span>
               </div>
               <div className="bg-gray-50 p-3 rounded-xl border border-gray-100">
-                <span className="text-[10px] text-gray-400 font-bold uppercase block mb-1">库存/周期</span>
-                <span className="text-sm font-semibold">{material.stock ? '现货' : '定制'} · {material.leadTime}</span>
+                <span className="text-[10px] text-gray-400 font-bold uppercase block mb-1">{t('materialDetail.stockLead')}</span>
+                <span className="text-sm font-semibold">{material.stock ? t('materialDetail.inStock') : t('materialDetail.custom')} · {material.leadTime}</span>
               </div>
             </div>
 
@@ -535,7 +544,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
                   }}
                   className="flex-1 bg-black text-white py-4 rounded-2xl font-bold hover:bg-gray-800 transition-colors shadow-lg shadow-black/10"
                 >
-                  申领小样 ({material.pointsNeeded.sample}点)
+                  {t('materialDetail.requestSample', { points: material.pointsNeeded.sample })}
                 </button>
                 <button 
                   onClick={() => {
@@ -547,16 +556,19 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
                   }}
                   className="flex-1 border-2 border-black py-4 rounded-2xl font-bold hover:bg-gray-50 transition-colors"
                 >
-                  申请报价
+                  {t('materialDetail.requestQuote')}
                 </button>
               </div>
             )}
 
-            {material.supplierNotes && (
+            {displayNotes && (
               <div className="bg-yellow-50 p-4 rounded-2xl border border-yellow-100">
-                <span className="text-[10px] text-yellow-600 font-black uppercase block mb-1">材料商备注</span>
-                <p className="text-sm text-yellow-800 italic">{material.supplierNotes}</p>
+                <span className="text-[10px] text-yellow-600 font-black uppercase block mb-1">{t('materialDetail.supplierNotes')}</span>
+                <p className="text-sm text-yellow-800 italic">{displayNotes}</p>
               </div>
+            )}
+            {displayDescription && (
+              <p className="text-sm text-gray-600 leading-relaxed">{displayDescription}</p>
             )}
           </div>
         </div>
@@ -639,10 +651,10 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
       {isRequestingSample && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-md p-8 rounded-3xl shadow-2xl">
-            <h2 className="text-2xl font-bold mb-6">申领材料小样</h2>
+            <h2 className="text-2xl font-bold mb-6">{t('materialDetail.sampleTitle')}</h2>
             <form onSubmit={handleSampleOrder} className="space-y-4">
               <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">收件人姓名</label>
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">{t('materialDetail.recipient')}</label>
                 <input 
                   required 
                   type="text" 
@@ -652,7 +664,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
                 />
               </div>
               <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">联系电话</label>
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">{t('materialDetail.phone')}</label>
                 <input 
                   required 
                   type="tel" 
@@ -662,18 +674,18 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
                 />
               </div>
               <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">详细收货地址</label>
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">{t('materialDetail.address')}</label>
                 <textarea 
                   required 
                   value={sampleForm.address}
                   onChange={e => setSampleForm({...sampleForm, address: e.target.value})}
                   className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black h-24 resize-none"
-                  placeholder="请输入完整的收货地址..."
+                  placeholder={t('materialDetail.addressPlaceholder')}
                 ></textarea>
               </div>
               <div className="pt-4 flex gap-4">
-                <button type="button" onClick={() => setIsRequestingSample(false)} className="flex-1 py-3 text-gray-500 font-bold">取消</button>
-                <button type="submit" className="flex-1 py-3 bg-black text-white rounded-xl font-bold shadow-lg shadow-black/20">确认申领</button>
+                <button type="button" onClick={() => setIsRequestingSample(false)} className="flex-1 py-3 text-gray-500 font-bold">{t('common.cancel')}</button>
+                <button type="submit" className="flex-1 py-3 bg-black text-white rounded-xl font-bold shadow-lg shadow-black/20">{t('materialDetail.confirmSample')}</button>
               </div>
             </form>
           </div>
@@ -684,33 +696,33 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
       {isQuoting && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-md p-8 rounded-3xl shadow-2xl">
-            <h2 className="text-2xl font-bold mb-6">申请详细报价</h2>
+            <h2 className="text-2xl font-bold mb-6">{t('materialDetail.quoteTitle')}</h2>
             <form onSubmit={handleQuoteSubmit} className="space-y-4">
               <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">项目名称</label>
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">{t('materialDetail.projectName')}</label>
                 <input required type="text" value={quoteForm.project} onChange={e => setQuoteForm({...quoteForm, project: e.target.value})} className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black" />
               </div>
               <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">项目所在地</label>
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">{t('materialDetail.projectLocation')}</label>
                 <input required type="text" value={quoteForm.address} onChange={e => setQuoteForm({...quoteForm, address: e.target.value})} className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black" />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1">预估面积 (㎡)</label>
+                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1">{t('materialDetail.estimatedArea')}</label>
                   <input required type="number" value={quoteForm.area} onChange={e => setQuoteForm({...quoteForm, area: e.target.value})} className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black" />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1">交付时间</label>
+                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1">{t('materialDetail.deliveryDate')}</label>
                   <input required type="date" value={quoteForm.date} onChange={e => setQuoteForm({...quoteForm, date: e.target.value})} className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black" />
                 </div>
               </div>
               <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">额外备注</label>
-                <textarea value={quoteForm.notes} onChange={e => setQuoteForm({...quoteForm, notes: e.target.value})} className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black h-20 resize-none" placeholder="如有特殊需求请填写..."></textarea>
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">{t('materialDetail.extraNotes')}</label>
+                <textarea value={quoteForm.notes} onChange={e => setQuoteForm({...quoteForm, notes: e.target.value})} className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black h-20 resize-none" placeholder={t('materialDetail.notesPlaceholder')}></textarea>
               </div>
               <div className="pt-4 flex gap-4">
-                <button type="button" onClick={() => setIsQuoting(false)} className="flex-1 py-3 text-gray-500 font-bold">取消</button>
-                <button type="submit" className="flex-1 py-3 bg-black text-white rounded-xl font-bold shadow-lg shadow-black/20">提交申请</button>
+                <button type="button" onClick={() => setIsQuoting(false)} className="flex-1 py-3 text-gray-500 font-bold">{t('common.cancel')}</button>
+                <button type="submit" className="flex-1 py-3 bg-black text-white rounded-xl font-bold shadow-lg shadow-black/20">{t('materialDetail.submitRequest')}</button>
               </div>
             </form>
           </div>

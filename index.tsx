@@ -10,6 +10,7 @@ import { ensureRecoveryRoute } from './utils/authRoutes';
 // 最早拦截：邮件 recovery 链接落在首页时，立即归一化路由并锁定 recovery 模式
 ensureRecoveryRoute();
 
+import './i18n';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';

@@ -69,17 +69,21 @@ export interface AuditLog {
   operatorId: string;
 }
 
+import type { LocalizedText } from './utils/localizedText';
+
 export interface MaterialVariant {
   id: string;
   colorCode: string;
   imageUrl: string;
-  name: string;
+  /** string (legacy) or { zh, en } */
+  name: LocalizedText;
 }
 
 export interface Material {
   id: string;
-  name: string;
-  description?: string;
+  /** string (legacy) or { zh, en } */
+  name: LocalizedText;
+  description?: LocalizedText;
   category: Category;
   brand: string;
   specifications: string;
@@ -91,7 +95,7 @@ export interface Material {
   variants: MaterialVariant[];
   projectPhotos: string[];
   supplierId: string;
-  supplierNotes?: string;
+  supplierNotes?: LocalizedText;
   status: MaterialStatus;
   auditLog: AuditLog[];
   ratings: {
@@ -122,8 +126,8 @@ export interface Material {
 // Added PendingMaterial interface for supplier submission workflow
 export interface PendingMaterial {
   id: string;
-  name: string;
-  description?: string;
+  name: LocalizedText;
+  description?: LocalizedText;
   category: Category;
   brand: string;
   specifications: string;
@@ -135,7 +139,7 @@ export interface PendingMaterial {
   variants: MaterialVariant[];
   projectPhotos: string[];
   supplierId: string;
-  supplierNotes?: string;
+  supplierNotes?: LocalizedText;
   submitterId: string;
   submitDate: string;
   status: MaterialStatus;

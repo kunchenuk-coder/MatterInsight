@@ -1,13 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { MaterialEvaluations } from '../types/materialDetail';
 
-const EVALUATION_LABELS: Record<keyof MaterialEvaluations, string> = {
-  aesthetics: '美观',
-  durability: '耐用',
-  service: '服务',
-  cleanliness: '易洁',
-  recommendation: '推荐',
-};
+const EVAL_KEYS: Array<keyof MaterialEvaluations> = [
+  'aesthetics',
+  'durability',
+  'service',
+  'cleanliness',
+  'recommendation',
+];
 
 interface MaterialEvaluationsSectionProps {
   evaluations: MaterialEvaluations;
@@ -27,6 +28,7 @@ export const MaterialEvaluationsSection: React.FC<MaterialEvaluationsSectionProp
   hasSubmitted = false,
   onSubmitRating,
 }) => {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState<MaterialEvaluations>(evaluations);
   const [isEditing, setIsEditing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -40,6 +42,8 @@ export const MaterialEvaluationsSection: React.FC<MaterialEvaluationsSectionProp
     if (values.length === 0) return 0;
     return values.reduce((sum, v) => sum + v, 0) / values.length;
   }, [evaluations]);
+
+  const labelFor = (key: keyof MaterialEvaluations) => t(`eval.${key}`);
 
   const submitted = hasSubmitted;
   const canStartRating = interactive && !readOnly && !submitted && !isEditing;
@@ -67,10 +71,10 @@ export const MaterialEvaluationsSection: React.FC<MaterialEvaluationsSectionProp
   return (
     <div className="bg-gray-50 p-4 sm:p-6 rounded-2xl border border-gray-100">
       <div className="flex flex-wrap justify-between items-center gap-2 mb-4">
-        <h2 className="text-lg font-bold">材料综合评估</h2>
+        <h2 className="text-lg font-bold">{t('eval.title')}</h2>
         {showAggregateLabel && (
           <span className="text-[10px] font-bold bg-white px-3 py-1 rounded-full border text-gray-600">
-            已评/统计综合得分 · {aggregateScore.toFixed(1)}
+            {t('eval.aggregate', { score: aggregateScore.toFixed(1) })}
           </span>
         )}
         {interactive && !readOnly && (
@@ -89,25 +93,26 @@ export const MaterialEvaluationsSection: React.FC<MaterialEvaluationsSectionProp
             }`}
           >
             {submitted
-              ? '已提交评分'
+              ? t('eval.submitted')
               : isSubmitting
-                ? '提交中…'
+                ? t('eval.submitting')
                 : canSubmit
-                  ? '提交评分'
-                  : '我要评分'}
+                  ? t('eval.submit')
+                  : t('eval.rate')}
           </button>
         )}
       </div>
 
       <div className="space-y-4">
-        {(Object.keys(EVALUATION_LABELS) as Array<keyof MaterialEvaluations>).map((key) => {
+        {EVAL_KEYS.map((key) => {
           const aggregateVal = evaluations[key];
           const displayVal = sliderDisabled ? aggregateVal : draft[key];
+          const label = labelFor(key);
 
           return (
             <div key={key} className="flex items-center gap-3 sm:gap-4">
               <span className="w-16 sm:w-20 text-xs font-bold text-gray-500 shrink-0">
-                {EVALUATION_LABELS[key]}
+                {label}
               </span>
               <div className="flex-1 relative h-2 bg-gray-200 rounded-full overflow-hidden">
                 {interactive && !readOnly && (
@@ -139,7 +144,7 @@ export const MaterialEvaluationsSection: React.FC<MaterialEvaluationsSectionProp
                   className={`w-20 sm:w-24 shrink-0 accent-black ${
                     sliderDisabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'
                   }`}
-                  aria-label={EVALUATION_LABELS[key]}
+                  aria-label={label}
                 />
               )}
             </div>
@@ -149,7 +154,7 @@ export const MaterialEvaluationsSection: React.FC<MaterialEvaluationsSectionProp
 
       {readOnly && (
         <p className="mt-4 text-[11px] text-gray-400">
-          以上分数来自设计师社区反馈的综合统计，材料商不可修改。
+          {t('eval.readOnlyHint')}
         </p>
       )}
     </div>

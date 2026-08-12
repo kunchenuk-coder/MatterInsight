@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import html2canvas from 'html2canvas';
 // 检查下面这一行，确保包含 MoodBoardProps 里面用到的所有类型
 import { User, Material, MoodBoard, MoodBoardItem, Category, type LocalTemporaryMaterial } from '../types';
@@ -39,6 +40,7 @@ import {
   LOCAL_TEMP_DEFAULT_SPEC,
 } from '../utils/localDesignerMaterials';
 import { isQuotaExceededError } from "../utils/moodboardStorage";
+import { pickLocale } from '../utils/localizedText';
 import { uploadImage } from '../services/uploadService';
 import { fetchLocalMaterials, insertLocalMaterial, deleteLocalMaterial } from '../services/localMaterialService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
@@ -176,7 +178,7 @@ function syncCardRemark(name: string, spec: string): string {
 
 /** 材料库条目变更检测（名称/规格/图/库存/状态） */
 function materialRevisionFingerprint(m: Material): string {
-  return [m.name, m.specifications, m.image, String(m.stock), m.status].join("\u0001");
+  return [pickLocale(m.name, 'zh'), m.specifications, m.image, String(m.stock), m.status].join("\u0001");
 }
 
 function stampLinkedMaterialFields(mat: Material): Pick<
@@ -185,7 +187,7 @@ function stampLinkedMaterialFields(mat: Material): Pick<
 > {
   return {
     materialId: mat.id,
-    remark: syncCardRemark(mat.name, mat.specifications || "标准"),
+    remark: syncCardRemark(pickLocale(mat.name), mat.specifications || "标准"),
     libraryRevisionHash: materialRevisionFingerprint(mat),
     isEditedByUser: false,
   };
@@ -227,7 +229,7 @@ function getCardDisplay(
     ? item.displayName ?? parsed.name ?? ""
     : edited
       ? (item.displayName ?? parsed.name) || "未命名"
-      : (mat?.name ?? parsed.name ?? item.displayName) || "待匹配材质";
+      : ((mat ? pickLocale(mat.name) : undefined) ?? parsed.name ?? item.displayName) || "待匹配材质";
 
   const spec = edited
     ? (item.displaySpec ?? parsed.spec) || "—"
@@ -712,6 +714,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   onUnsaveMaterial,
   onMoodboardPublished,
 }) => {
+  const { t } = useTranslation();
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isEditingName, setIsEditingName] = useState(false);
   const [resizingItem, setResizingItem] = useState<{ id: string; startWidth: number; startHeight: number; startX: number; startY: number } | null>(null);
@@ -1691,7 +1694,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     const libraryId = readDraggedLibraryMaterialId(e);
     if (libraryId) {
       const mat = materials.find((m) => m.id === libraryId);
-      if (mat?.image) return { name: mat.name, imageUrl: mat.image };
+      if (mat?.image) return { name: pickLocale(mat.name), imageUrl: mat.image };
     }
     return null;
   };
@@ -3014,7 +3017,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     const mainLower = main.toLowerCase();
     if (mainLower) {
       for (const m of savedMaterials) {
-        const nl = (m.name || "").trim().toLowerCase();
+        const nl = pickLocale(m.name).trim().toLowerCase();
         if (!nl) continue;
         if (nl === mainLower || nl.includes(mainLower) || mainLower.includes(nl)) {
           return m;
@@ -3030,13 +3033,21 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     const pool = savedMaterials.length ? savedMaterials : materials;
     let best: Material | undefined;
     for (const m of pool) {
-      const name = m.name.toLowerCase();
+      const name = pickLocale(m.name).toLowerCase();
+      const nameZh = pickLocale(m.name, 'zh').toLowerCase();
+      const nameEn = pickLocale(m.name, 'en').toLowerCase();
       const spec = (m.specifications || "").toLowerCase();
-      if (name.includes(q) || q.includes(name) || (spec && q.includes(spec))) {
+      if (
+        name.includes(q) ||
+        nameZh.includes(q) ||
+        nameEn.includes(q) ||
+        q.includes(name) ||
+        (spec && q.includes(spec))
+      ) {
         best = m;
         break;
       }
-      if (item.main_name && name.includes(item.main_name.toLowerCase())) {
+      if (item.main_name && (name.includes(item.main_name.toLowerCase()) || nameZh.includes(item.main_name.toLowerCase()))) {
         best = m;
       }
     }
@@ -3301,7 +3312,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
       availableAgents.find((a) => a.id === selectedVisionAgentId) ?? availableAgents[0]!;
     const pointCost = getPointsCost(agent, recognitionDepth);
     if (points < pointCost) {
-      alert(`积分不足：本次识别需要 ${pointCost} 点，当前余额 ${points} 点。请充值后再试。`);
+      alert(t('vision.insufficientPoints', { cost: pointCost, points }));
       return;
     }
 
@@ -3332,7 +3343,13 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
 
       onDeductPoints(
         pointCost,
-        `智能识别(${agent.name}·${recognitionDepth === "deep" ? "深度10材质" : "基础3材质"})`
+        t('vision.chargeLabel', {
+          agent: agent.name,
+          depth:
+            recognitionDepth === "deep"
+              ? t('vision.depthDeepShort')
+              : t('vision.depthBasicShort'),
+        })
       );
 
       setLastVisionUsage(result.usage);
@@ -3432,7 +3449,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
   const skipAIToManualPlacement = () => {
     setIsAnalyzing(false);
     if (!aiImage) {
-      alert("请先上传效果图");
+      alert(t('vision.needImage'));
       return;
     }
     placeEffectImageOnly(aiImage, "空间效果图（手动标注）");
@@ -3595,7 +3612,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                   >
                     <img src={mat.image} className="w-12 h-12 rounded-lg object-cover shadow-sm" />
                     <div className="flex-1 min-w-0">
-                      <p className="text-xs font-bold truncate">{mat.name}</p>
+                      <p className="text-xs font-bold truncate">{pickLocale(mat.name)}</p>
                       <p className="text-[9px] text-gray-400 font-bold">{mat.brand}</p>
                     </div>
                     <div className="opacity-0 group-hover:opacity-100 transition-opacity">
@@ -3754,7 +3771,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                                 <img src={mat.image} className="w-full h-full object-cover" />
                               </div>
                               <div className="flex-1 min-w-0">
-                                <p className="text-[11px] font-black truncate text-black">{mat.name}</p>
+                                <p className="text-[11px] font-black truncate text-black">{pickLocale(mat.name)}</p>
                                 <p className="text-[9px] text-gray-400 font-bold tracking-tight uppercase">{mat.brand}</p>
                               </div>
                               <div className="bg-black text-white p-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity">
@@ -4932,10 +4949,10 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
       ? "bottom-[6.75rem] right-6 h-11 w-11 justify-center gap-0 px-0"
       : "bottom-8 right-8 h-14 px-6 gap-3"
   }`}
-  aria-label="智能匹配"
+  aria-label={t('vision.uploadImage')}
 >
   <span className="text-xl group-hover:rotate-12 transition-transform">✨</span>
-  <span className={`text-sm font-black tracking-widest ${smartMatchSucceeded ? "hidden md:inline" : ""}`}>智能匹配</span>
+  <span className={`text-sm font-black tracking-widest ${smartMatchSucceeded ? "hidden md:inline" : ""}`}>{t('vision.uploadImage')}</span>
 </button>
       </div>
 
@@ -5215,8 +5232,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
         <div className="fixed inset-0 z-[8000] flex items-end md:items-center justify-center bg-black/60 backdrop-blur-md p-0 md:p-4">
           <div className="bg-white rounded-t-[28px] md:rounded-[40px] shadow-2xl w-full max-w-4xl max-h-[94dvh] md:max-h-[90vh] flex flex-col overflow-hidden">
             <div className="shrink-0 flex items-center justify-between px-5 py-3.5 border-b md:hidden">
-              <h2 className="text-base font-black">智能材质识别</h2>
-              <button type="button" onClick={closeAIModal} className="text-gray-400 p-1" aria-label="关闭">
+              <h2 className="text-base font-black">{t('vision.modalTitle')}</h2>
+              <button type="button" onClick={closeAIModal} className="text-gray-400 p-1" aria-label={t('vision.close')}>
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/></svg>
               </button>
             </div>
@@ -5225,17 +5242,17 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
               <div className="w-full md:w-[42%] p-5 md:p-10 border-b md:border-b-0 md:border-r border-gray-100 shrink-0">
                 <div className="hidden md:block">
                   <div className="bg-black text-white text-[10px] font-black px-3 py-1 rounded inline-block mb-4 tracking-tighter">AI INSIGHT</div>
-                  <h2 className="text-3xl font-black text-black leading-tight mb-4">智能材质识别系统</h2>
+                  <h2 className="text-3xl font-black text-black leading-tight mb-4">{t('vision.modalTitleSystem')}</h2>
                 </div>
                 <p className="text-gray-500 text-xs md:text-sm leading-relaxed font-medium">
-                  上传空间效果图，AI 分析材质构成并匹配材料库。1000 点为注册赠送免费额度，每次识别按所选 Agent 扣点。
+                  {t('vision.modalDesc')}
                 </p>
 
                 <div className="hidden md:flex flex-col gap-3 mt-6">
                   {[
-                    { step: 1, label: "上传效果图", active: analysisStep === 1 && !isAnalyzing },
-                    { step: 2, label: "AI 识别", active: isAnalyzing },
-                    { step: 3, label: "生成情绪板", active: analysisStep === 3 },
+                    { step: 1, label: t('vision.stepUpload'), active: analysisStep === 1 && !isAnalyzing },
+                    { step: 2, label: t('vision.stepAi'), active: isAnalyzing },
+                    { step: 3, label: t('vision.stepMoodboard'), active: analysisStep === 3 },
                   ].map((s) => (
                     <div key={s.step} className={`flex items-center gap-3 ${s.active ? "opacity-100" : "opacity-30"}`}>
                       <div className="w-7 h-7 rounded-full bg-black text-white flex items-center justify-center text-[10px] font-bold">{s.step}</div>
@@ -5245,14 +5262,26 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                 </div>
 
                 <div className="mt-5 space-y-2">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">识别 Agent</p>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">{t('vision.agentLabel')}</p>
                   {availableVisionAgents.length === 0 ? (
-                    <p className="text-xs text-red-500">未配置任何视觉 API Key</p>
+                    <p className="text-xs text-red-500">{t('vision.noApiKey')}</p>
                   ) : (
                     availableVisionAgents.map((agent) => {
                       const selected = activeVisionAgent?.id === agent.id;
                       const est = getTokenEstimate(agent, recognitionDepth);
                       const cost = getPointsCost(agent, recognitionDepth);
+                      const subtitleKey =
+                        agent.id === 'gemini'
+                          ? 'vision.agentGeminiSubtitle'
+                          : agent.id === 'qwen'
+                            ? 'vision.agentQwenSubtitle'
+                            : 'vision.agentDeepseekSubtitle';
+                      const badgeKey =
+                        agent.id === 'gemini'
+                          ? 'vision.badgeRecommended'
+                          : agent.id === 'deepseek'
+                            ? 'vision.badgeSavePoints'
+                            : null;
                       return (
                         <button
                           key={agent.id}
@@ -5265,13 +5294,13 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                         >
                           <div className="flex items-center justify-between gap-2">
                             <span className="text-xs font-black text-black">{agent.name}</span>
-                            {agent.badge && (
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">{agent.badge}</span>
+                            {badgeKey && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">{t(badgeKey)}</span>
                             )}
                           </div>
-                          <p className="text-[10px] text-gray-500 mt-0.5">{agent.subtitle}</p>
+                          <p className="text-[10px] text-gray-500 mt-0.5">{t(subtitleKey)}</p>
                           <p className="text-[10px] text-gray-400 mt-1 font-mono">
-                            {getAgentModelLabel(agent.id)} · ≈{est.total} tokens · {cost} 点/次
+                            {getAgentModelLabel(agent.id)} · ≈{est.total} tokens · {t('vision.pointsPerRun', { cost })}
                           </p>
                         </button>
                       );
@@ -5290,7 +5319,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                         : "bg-white text-gray-600 border-gray-200"
                     }`}
                   >
-                    基础 · 3 材质
+                    {t('vision.depthBasic')}
                   </button>
                   <button
                     type="button"
@@ -5302,21 +5331,20 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                         : "bg-white text-gray-600 border-gray-200"
                     }`}
                   >
-                    深度 · 10 材质
+                    {t('vision.depthDeep')}
                   </button>
                 </div>
 
                 <p className="mt-3 text-[10px] text-gray-400 leading-relaxed">
-                  余额 <span className="font-black text-black">{points}</span> 点
+                  {t('vision.balance', { points })}
                   {visionTokenEst && activeVisionAgent && (
-                    <> · 预计消耗 ≈{visionTokenEst.total} tokens（{visionPointCost} 点）</>
+                    <> · {t('vision.estTokens', { tokens: visionTokenEst.total, cost: visionPointCost })}</>
                   )}
                   {lastVisionUsage && (
-                    <> · 上次实际 {lastVisionUsage.totalTokens} tokens</>
+                    <> · {t('vision.lastTokens', { tokens: lastVisionUsage.totalTokens })}</>
                   )}
                 </p>
               </div>
-
               <form
                 autoComplete="off"
                 onSubmit={(e) => e.preventDefault()}
@@ -5326,7 +5354,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                   type="button"
                   onClick={closeAIModal}
                   className="absolute top-4 right-4 text-gray-300 hover:text-black transition-colors hidden md:block"
-                  aria-label="关闭"
+                  aria-label={t('vision.close')}
                 >
                   <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/></svg>
                 </button>
@@ -5339,7 +5367,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                         alt=""
                         draggable={false}
                         onContextMenu={(e) => e.preventDefault()}
-                        title="点击图片可指定颜色采样参考点"
+                        title={t('vision.sampleHint')}
                         className="w-full h-full max-h-[28vh] md:max-h-none object-contain touch-none [-webkit-touch-callout:none]"
                         onClick={(ev) => {
                           if (isAnalyzing) return;
@@ -5349,8 +5377,8 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                       {isAnalyzing && (
                         <div className="absolute inset-0 bg-black/40 backdrop-blur-sm flex flex-col items-center justify-center text-white p-4 text-center">
                           <div className="w-10 h-10 border-4 border-white/20 border-t-white rounded-full animate-spin mb-3" />
-                          <p className="text-xs font-bold">正在解析空间...</p>
-                          <p className="text-[10px] opacity-60 mt-1">匹配库中对应材质</p>
+                          <p className="text-xs font-bold">{t('vision.parsingSpace')}</p>
+                          <p className="text-[10px] opacity-60 mt-1">{t('vision.matchingLibrary')}</p>
                         </div>
                       )}
                     </>
@@ -5377,7 +5405,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                       <div className="w-14 h-14 bg-gray-50 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
                         <svg className="w-7 h-7 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"/></svg>
                       </div>
-                      <p className="text-xs font-bold text-gray-400">点击上传空间图</p>
+                      <p className="text-xs font-bold text-gray-400">{t('vision.clickUpload')}</p>
                     </label>
                   )}
                 </div>
@@ -5393,7 +5421,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                         : "bg-gray-200 text-gray-400 cursor-not-allowed"
                     }`}
                   >
-                    {isAnalyzing ? "识别中…" : `开始识别（${visionPointCost} 点）`}
+                    {isAnalyzing ? t('vision.analyzing') : t('vision.startRecognize', { cost: visionPointCost })}
                   </button>
                   <button
                     type="button"
@@ -5405,7 +5433,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                         : "border-gray-100 bg-gray-100 text-gray-400 cursor-not-allowed"
                     }`}
                   >
-                    跳过 AI，手动生成情绪板
+                    {t('vision.skipAi')}
                   </button>
                 </div>
               </form>
@@ -5422,7 +5450,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                     : "bg-gray-200 text-gray-400 cursor-not-allowed"
                 }`}
               >
-                {isAnalyzing ? "识别中…" : `开始识别（${visionPointCost} 点）`}
+                {isAnalyzing ? t('vision.analyzing') : t('vision.startRecognize', { cost: visionPointCost })}
               </button>
               <button
                 type="button"
@@ -5434,7 +5462,7 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
                     : "border-gray-100 bg-gray-100 text-gray-400 cursor-not-allowed"
                 }`}
               >
-                跳过 AI，手动生成情绪板
+                {t('vision.skipAi')}
               </button>
             </div>
           </div>

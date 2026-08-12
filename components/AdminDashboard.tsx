@@ -1,9 +1,11 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { User, Material, Category, PendingMaterial, SampleRequest, MaterialStatus } from '../types';
 import { fetchReadUrlsForObjectKeys, resolveUrlFromMap } from '../services/assetReadUrlService';
 import { enrichMaterialsWithFreshImages } from '../services/materialImageService';
 import { parseOssObjectKey } from '../utils/parseOssObjectKey';
+import { pickLocale } from '../utils/localizedText';
 import {
   fetchDesignersForAdmin,
   type AdminDesignerRow,
@@ -53,6 +55,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   user, library, setLibrary, pendingList, onApprove, onReject, sampleRequests, onShipSample,
   verificationRequests, onVerifySupplier
 }) => {
+  const { t } = useTranslation();
   const [subTab, setSubTab] = useState<AdminSubTab>('DESIGNERS');
   const [selectedCategory, setSelectedCategory] = useState<Category | 'ALL'>('ALL');
   const [editingMaterial, setEditingMaterial] = useState<Material | null>(null);
@@ -383,35 +386,35 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     <div className="max-w-7xl mx-auto py-10 space-y-10">
       <header className="flex justify-between items-center">
         <div>
-          <h1 className="text-4xl font-black tracking-tighter uppercase">运营管控后台</h1>
+          <h1 className="text-4xl font-black tracking-tighter uppercase">{t('admin.title')}</h1>
           <p className="text-gray-400 font-medium">数据透明化 · 流程标准化 · 生态健康化</p>
         </div>
         <div className="flex gap-4">
            <div className="bg-black text-white px-8 py-3 rounded-2xl flex flex-col items-center">
-              <span className="text-[10px] font-bold opacity-50 uppercase tracking-widest">总计预估收入 (CNY)</span>
+              <span className="text-[10px] font-bold opacity-50 uppercase tracking-widest">{t('admin.estimatedRevenue')}</span>
               <span className="text-xl font-black">¥ {estimatedIncome}</span>
            </div>
         </div>
       </header>
 
       <div className="flex flex-wrap gap-1 bg-gray-100 p-1.5 rounded-[24px] max-w-full">
-        <button type="button" onClick={() => setSubTab('DESIGNERS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'DESIGNERS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>设计师管理</button>
-        <button type="button" onClick={() => setSubTab('MATERIALS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'MATERIALS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>材料库监管</button>
-        <button type="button" onClick={() => setSubTab('SUPPLIERS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'SUPPLIERS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>供应商评估</button>
+        <button type="button" onClick={() => setSubTab('DESIGNERS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'DESIGNERS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>{t('admin.tabDesigners')}</button>
+        <button type="button" onClick={() => setSubTab('MATERIALS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'MATERIALS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>{t('admin.tabMaterials')}</button>
+        <button type="button" onClick={() => setSubTab('SUPPLIERS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'SUPPLIERS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>{t('admin.tabSuppliers')}</button>
         <button type="button" onClick={() => setSubTab('SAMPLES')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'SAMPLES' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
-          小样申请 {sampleRequests.filter(s => s.status === 'PENDING').length > 0 && <span className="ml-1 bg-orange-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{sampleRequests.filter(s => s.status === 'PENDING').length}</span>}
+          {t('admin.tabSamples')} {sampleRequests.filter(s => s.status === 'PENDING').length > 0 && <span className="ml-1 bg-orange-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{sampleRequests.filter(s => s.status === 'PENDING').length}</span>}
         </button>
         <button type="button" onClick={() => setSubTab('PENDING')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'PENDING' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
-          上架审核 {pendingList.filter(p => p.status === MaterialStatus.PENDING).length > 0 && <span className="ml-1 bg-red-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{pendingList.filter(p => p.status === MaterialStatus.PENDING).length}</span>}
+          {t('admin.tabPending')} {pendingList.filter(p => p.status === MaterialStatus.PENDING).length > 0 && <span className="ml-1 bg-red-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{pendingList.filter(p => p.status === MaterialStatus.PENDING).length}</span>}
         </button>
         <button type="button" onClick={() => setSubTab('VERIFICATIONS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'VERIFICATIONS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
-          供应商认证 {verificationRequests.length > 0 && <span className="ml-1 bg-blue-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{verificationRequests.length}</span>}
+          {t('admin.tabVerifications')} {verificationRequests.length > 0 && <span className="ml-1 bg-blue-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{verificationRequests.length}</span>}
         </button>
         <button type="button" onClick={() => setSubTab('STORIES')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'STORIES' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}>
-          灵感故事管理 {pendingStories.length > 0 && <span className="ml-1 bg-amber-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{pendingStories.length}</span>}
+          {t('admin.tabStories')} {pendingStories.length > 0 && <span className="ml-1 bg-amber-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{pendingStories.length}</span>}
         </button>
         <button type="button" onClick={() => setSubTab('MOOD_TAGS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'MOOD_TAGS' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}>
-          情绪标签管理
+          {t('admin.tabMoodTags')}
         </button>
       </div>
 
@@ -522,7 +525,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                      <td className="p-6 flex items-center gap-4">
                         <img src={m.image} className="w-10 h-10 rounded-lg object-cover" />
                         <div>
-                          <p className="font-bold">{m.name}</p>
+                          <p className="font-bold">{pickLocale(m.name)}</p>
                           <p className="text-[10px] text-gray-400 uppercase font-black">{m.brand}</p>
                         </div>
                      </td>
@@ -673,7 +676,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <td className="p-6 flex items-center gap-4">
                          <img src={m?.image} className="w-10 h-10 rounded-lg object-cover" />
                          <div>
-                           <p className="font-bold">{m?.name}</p>
+                           <p className="font-bold">{m ? pickLocale(m.name) : ''}</p>
                            <p className="text-[10px] text-gray-400 uppercase font-black">{m?.brand}</p>
                          </div>
                       </td>
@@ -735,7 +738,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                      <td className="p-6 flex items-center gap-4">
                         <img src={p.image} className="w-10 h-10 rounded-lg object-cover" />
                         <div>
-                          <p className="font-bold">{p.name}</p>
+                          <p className="font-bold">{pickLocale(p.name)}</p>
                           <p className="text-[10px] text-gray-400 uppercase font-black">{p.brand}</p>
                         </div>
                      </td>
@@ -1274,7 +1277,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <label className="block text-[10px] font-black uppercase text-gray-400 mb-2">材料名称</label>
                   <input 
                     type="text" 
-                    value={editingMaterial.name}
+                    value={pickLocale(editingMaterial.name, 'zh')}
                     onChange={e => setEditingMaterial({...editingMaterial, name: e.target.value})}
                     className="w-full p-4 bg-gray-50 rounded-2xl border-none outline-none focus:ring-2 focus:ring-black"
                   />
@@ -1341,7 +1344,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div>
                 <label className="block text-[10px] font-black uppercase text-gray-400 mb-2">材料商备注</label>
                 <textarea 
-                  value={editingMaterial.supplierNotes || ''}
+                  value={pickLocale(editingMaterial.supplierNotes, 'zh')}
                   onChange={e => setEditingMaterial({...editingMaterial, supplierNotes: e.target.value})}
                   className="w-full p-4 bg-gray-50 rounded-2xl border-none outline-none focus:ring-2 focus:ring-black h-24 resize-none"
                 ></textarea>
@@ -1377,7 +1380,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 .map((m) => (
                 <div key={m.id} className="bg-gray-50 rounded-3xl p-4 border border-gray-100">
                   <img src={m.image} className="w-full aspect-video object-cover rounded-2xl mb-4" />
-                  <h4 className="font-bold mb-1">{m.name}</h4>
+                  <h4 className="font-bold mb-1">{pickLocale(m.name)}</h4>
                   <div className="flex justify-between items-center">
                     <span className="text-xs text-gray-400">{m.category}</span>
                     <div className="flex items-center gap-3">
@@ -1443,7 +1446,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
         <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-[180] flex items-center justify-center p-6">
           <div className="bg-white w-full max-w-4xl p-10 rounded-[40px] shadow-2xl overflow-y-auto max-h-[90vh]">
             <div className="flex justify-between items-center mb-8">
-              <h3 className="text-2xl font-black">申请详情: {viewingPendingMaterial.name}</h3>
+              <h3 className="text-2xl font-black">申请详情: {pickLocale(viewingPendingMaterial.name)}</h3>
               <button onClick={() => setViewingPendingMaterial(null)} className="text-gray-400 hover:text-black text-xl">✕</button>
             </div>
             
@@ -1477,7 +1480,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
                 <div>
                   <p className="text-[10px] font-black uppercase text-gray-400 mb-1">供应商备注</p>
-                  <p className="text-sm text-gray-600 bg-gray-50 p-4 rounded-2xl italic">"{viewingPendingMaterial.supplierNotes || '无'}"</p>
+                  <p className="text-sm text-gray-600 bg-gray-50 p-4 rounded-2xl italic">"{pickLocale(viewingPendingMaterial.supplierNotes) || '无'}"</p>
                 </div>
                 {viewingPendingMaterial.variants && viewingPendingMaterial.variants.length > 0 && (
                   <div>
@@ -1485,7 +1488,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <div className="flex flex-wrap gap-2">
                       {viewingPendingMaterial.variants.map(v => (
                         <div key={v.id} className="w-12 h-12 rounded-lg border overflow-hidden">
-                          <img src={v.imageUrl} className="w-full h-full object-cover" title={v.name} />
+                          <img src={v.imageUrl} className="w-full h-full object-cover" title={pickLocale(v.name)} />
                         </div>
                       ))}
                     </div>

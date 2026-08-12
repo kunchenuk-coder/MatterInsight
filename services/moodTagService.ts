@@ -1,6 +1,7 @@
 import type { MaterialMoodTag } from '../types/materialDetail';
 import { getSupabase, getSupabaseForPortal, isSupabaseConfigured } from './supabaseClient';
 import type { AppPortal } from '../utils/appPortal';
+import { isLocalizedObject, type LocalizedText } from '../utils/localizedText';
 
 export type MoodTagWriteMode = 'brand' | 'custom';
 
@@ -9,9 +10,12 @@ function mapMoodTags(raw: unknown): MaterialMoodTag[] {
   return raw
     .map((item) => {
       const t = item as Record<string, unknown>;
-      if (!t?.tag) return null;
+      if (t?.tag == null || t.tag === '') return null;
+      const tag: LocalizedText = isLocalizedObject(t.tag)
+        ? t.tag
+        : String(t.tag);
       return {
-        tag: String(t.tag),
+        tag,
         count: typeof t.count === 'number' ? t.count : Number(t.count) || 0,
         is_custom: Boolean(t.is_custom),
         is_brand_official: Boolean(t.is_brand_official),

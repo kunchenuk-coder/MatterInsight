@@ -1,9 +1,11 @@
 
 import React, { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { User, Category, PendingMaterial, Material, Inquiry, SampleRequest, MaterialStatus, AuditLog, MaterialVariant } from '../types';
 import { CATEGORIES } from '../constants';
 import MaterialVoiceFillButton from './MaterialVoiceFillButton';
 import PublishMaterialMobilePanel from './PublishMaterialMobilePanel';
+import AiBilingualFillButton, { type PublishFormState } from './AiBilingualFillButton';
 import { uploadImage } from '../services/uploadService';
 import {
   EMPTY_UNREAD_COUNTS,
@@ -11,6 +13,7 @@ import {
   type UnreadNotificationCounts,
 } from '../services/notificationService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
+import { packLocalized, unpackLocalized, pickLocale } from '../utils/localizedText';
 
 const COMMON_COLORS = [
   { name: '白色', code: '#FFFFFF' },
@@ -25,6 +28,8 @@ const COMMON_COLORS = [
 
 interface SupplierDashboardProps {
   user: User;
+  points: number;
+  onPointsUpdated: (balanceAfter: number) => void;
   library: Material[];
   setLibrary: React.Dispatch<React.SetStateAction<Material[]>>;
   pendingList: PendingMaterial[];
@@ -42,6 +47,25 @@ interface SupplierDashboardProps {
   onUnreadChanged?: () => void;
 }
 
+const EMPTY_PUBLISH_FORM = (brand: string): PublishFormState => ({
+  name: '',
+  nameEn: '',
+  description: '',
+  descriptionEn: '',
+  category: Category.ST,
+  brand,
+  specifications: '',
+  priceRange: '',
+  stock: true,
+  leadTime: '',
+  fireRating: 'Class A',
+  supplierNotes: '',
+  supplierNotesEn: '',
+  image: '',
+  variants: [],
+  projectPhotos: [],
+});
+
 const UPLOAD_FOLDER: Record<'image' | 'projectPhotos' | 'variants', 'materials' | 'project-photos' | 'variants'> = {
   image: 'materials',
   projectPhotos: 'project-photos',
@@ -49,10 +73,11 @@ const UPLOAD_FOLDER: Record<'image' | 'projectPhotos' | 'variants', 'materials' 
 };
 
 const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
-  user, library, setLibrary, pendingList, setPendingMaterials, onSubmitForReview, onRechargeClick, inquiries, onQuote,
+  user, points, onPointsUpdated, library, setLibrary, pendingList, setPendingMaterials, onSubmitForReview, onRechargeClick, inquiries, onQuote,
   sampleRequests, onShipSample, onRequestVerification, onViewMaterialDetail,
   unreadCounts = EMPTY_UNREAD_COUNTS, onUnreadChanged,
 }) => {
+  const { t } = useTranslation();
   const [isPublishing, setIsPublishing] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -181,24 +206,19 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
     );
   }
 
-  const [formData, setFormData] = useState({
-    name: '',
-    category: Category.ST,
-    brand: user.company || '',
-    specifications: '',
-    priceRange: '',
-    stock: true,
-    leadTime: '',
-    fireRating: 'Class A',
-    supplierNotes: '',
-    image: '',
-    variants: [] as MaterialVariant[],
-    projectPhotos: [] as string[]
-  });
+  const [formData, setFormData] = useState<PublishFormState>(() =>
+    EMPTY_PUBLISH_FORM(user.company || '')
+  );
 
   const handleReapply = (material: PendingMaterial) => {
+    const name = unpackLocalized(material.name);
+    const notes = unpackLocalized(material.supplierNotes);
+    const desc = unpackLocalized(material.description);
     setFormData({
-      name: material.name,
+      name: name.zh,
+      nameEn: name.en,
+      description: desc.zh,
+      descriptionEn: desc.en,
       category: material.category,
       brand: material.brand,
       specifications: material.specifications,
@@ -206,10 +226,14 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
       stock: material.stock,
       leadTime: material.leadTime,
       fireRating: material.fireRating,
-      supplierNotes: material.supplierNotes || '',
+      supplierNotes: notes.zh,
+      supplierNotesEn: notes.en,
       image: material.image,
-      variants: material.variants || [],
-      projectPhotos: material.projectPhotos || []
+      variants: (material.variants || []).map((v) => {
+        const vn = unpackLocalized(v.name);
+        return { ...v, name: vn.zh, nameEn: vn.en };
+      }),
+      projectPhotos: material.projectPhotos || [],
     });
     // Remove the old rejected entry
     setPendingMaterials(prev => prev.filter(p => p.id !== material.id));
@@ -305,7 +329,26 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
     };
 
     const newPending: PendingMaterial = {
-      ...formData,
+      name: packLocalized(formData.name, formData.nameEn),
+      description: packLocalized(formData.description, formData.descriptionEn) || undefined,
+      category: formData.category,
+      brand: formData.brand,
+      specifications: formData.specifications,
+      priceRange: formData.priceRange,
+      stock: formData.stock,
+      leadTime: formData.leadTime,
+      fireRating: formData.fireRating,
+      supplierNotes: packLocalized(formData.supplierNotes, formData.supplierNotesEn) || undefined,
+      variants: formData.variants.map((v) => {
+        const zh = typeof v.name === 'string' ? v.name : unpackLocalized(v.name).zh;
+        return {
+          id: v.id,
+          colorCode: v.colorCode,
+          imageUrl: v.imageUrl,
+          name: packLocalized(zh, v.nameEn),
+        };
+      }),
+      projectPhotos: formData.projectPhotos,
       id: generateId(),
       image: formData.image || (formData.variants && formData.variants.length > 0 ? formData.variants[0].imageUrl : ''),
       submitterId: user.id,
@@ -319,20 +362,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
       setIsPublishing(false);
       alert('材料已提交审核，请耐心等待平台审核结果。');
       // Reset form
-      setFormData({
-        name: '',
-        category: Category.ST,
-        brand: user.company || '',
-        specifications: '',
-        priceRange: '',
-        stock: true,
-        leadTime: '',
-        fireRating: 'Class A',
-        supplierNotes: '',
-        image: '',
-        variants: [],
-        projectPhotos: []
-      });
+      setFormData(EMPTY_PUBLISH_FORM(user.company || ''));
     } catch (error) {
       console.error('Submission error:', error);
       alert('提交失败，可能是由于图片数据过大。请尝试减少图片数量或压缩图片后再试。');
@@ -368,7 +398,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
     <div className="max-w-6xl mx-auto py-10 space-y-12">
       <header className="flex justify-between items-end">
         <div>
-          <h1 className="text-4xl font-black mb-2 tracking-tighter text-black uppercase">{user.company} 控制台</h1>
+          <h1 className="text-4xl font-black mb-2 tracking-tighter text-black uppercase">{user.company} {t('supplier.titleSuffix')}</h1>
           <p className="text-gray-500 font-medium">发布您的材料，实时获取设计师询价</p>
         </div>
         <div className="flex gap-4">
@@ -376,7 +406,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
             onClick={() => setIsPublishing(true)}
             className="bg-black text-white px-8 py-3 rounded-2xl font-bold shadow-xl shadow-black/20 hover:scale-105 transition-transform h-fit self-center"
           >
-            + 发布新材料
+            {t('supplier.publishNew')}
           </button>
         </div>
       </header>
@@ -391,14 +421,14 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
               {unreadCounts.tag_added}
             </span>
           )}
-          <p className={`${activeTab === 'PRODUCTS' ? 'text-gray-400' : 'text-gray-400'} text-[10px] font-bold uppercase mb-1`}>上架单品</p>
+          <p className={`${activeTab === 'PRODUCTS' ? 'text-gray-400' : 'text-gray-400'} text-[10px] font-bold uppercase mb-1`}>{t('supplier.statProducts')}</p>
           <p className="text-3xl font-black">{supplierProducts.length + myPendingProducts.length} / 50</p>
           <div className={`w-full ${activeTab === 'PRODUCTS' ? 'bg-gray-800' : 'bg-gray-100'} h-1.5 mt-4 rounded-full overflow-hidden`}>
             <div className={`${activeTab === 'PRODUCTS' ? 'bg-white' : 'bg-black'} h-full`} style={{ width: `${((supplierProducts.length + myPendingProducts.length) / 50) * 100}%` }}></div>
           </div>
         </div>
         <div className="bg-white p-6 rounded-3xl border text-center shadow-sm">
-          <p className="text-gray-400 text-[10px] font-bold uppercase mb-1">本月浏览</p>
+          <p className="text-gray-400 text-[10px] font-bold uppercase mb-1">{t('supplier.statViews')}</p>
           <p className="text-3xl font-black">{supplierProducts.reduce((acc, curr) => acc + (curr.clicks || 0), 0)}</p>
         </div>
         <div 
@@ -410,27 +440,27 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
               {pendingSampleCount}
             </span>
           )}
-          <p className={`${activeTab === 'SAMPLES' ? 'text-gray-400' : 'text-gray-400'} text-[10px] font-bold uppercase mb-1`}>小样申请</p>
+          <p className={`${activeTab === 'SAMPLES' ? 'text-gray-400' : 'text-gray-400'} text-[10px] font-bold uppercase mb-1`}>{t('supplier.statSamples')}</p>
           <p className={`text-3xl font-black ${activeTab === 'SAMPLES' ? 'text-white' : 'text-orange-500'}`}>{pendingSampleCount}</p>
         </div>
         <div className="bg-white p-6 rounded-3xl border text-center shadow-sm">
-          <p className="text-gray-400 text-[10px] font-bold uppercase mb-1">信誉分</p>
+          <p className="text-gray-400 text-[10px] font-bold uppercase mb-1">{t('supplier.statReputation')}</p>
           <p className="text-3xl font-black text-green-500">4.9</p>
         </div>
       </div>
 
       <div className="flex gap-8 border-b">
         <button onClick={() => setActiveTab('ORDERS')} className={`relative pb-4 text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'ORDERS' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>
-          待处理询价单
+          {t('supplier.tabOrders')}
           {unreadCounts.inquiry > 0 && (
             <span className="ml-2 inline-flex min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-black items-center justify-center align-middle">
               {unreadCounts.inquiry}
             </span>
           )}
         </button>
-        <button onClick={() => setActiveTab('SAMPLES')} className={`pb-4 text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'SAMPLES' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>小样申请单</button>
+        <button onClick={() => setActiveTab('SAMPLES')} className={`pb-4 text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'SAMPLES' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>{t('supplier.tabSamples')}</button>
         <button onClick={() => setActiveTab('PRODUCTS')} className={`relative pb-4 text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'PRODUCTS' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>
-          我的上架单品
+          {t('supplier.tabProducts')}
           {unreadCounts.tag_added > 0 && (
             <span className="ml-2 inline-flex min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-black items-center justify-center align-middle">
               {unreadCounts.tag_added}
@@ -452,7 +482,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                     </div>
                     <div>
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="text-sm font-bold">询价材料: {m?.name}</span>
+                        <span className="text-sm font-bold">询价材料: {m ? pickLocale(m.name) : ''}</span>
                         {inq.status === 'PENDING' && <span className="text-[10px] bg-red-500 text-white px-2 py-0.5 rounded-full font-bold">NEW</span>}
                       </div>
                       <p className="text-xs text-gray-400">
@@ -507,7 +537,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                     </div>
                     <div>
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="text-sm font-bold">申领材料: {m?.name}</span>
+                        <span className="text-sm font-bold">申领材料: {m ? pickLocale(m.name) : ''}</span>
                         {req.status === 'PENDING' && <span className="text-[10px] bg-orange-500 text-white px-2 py-0.5 rounded-full font-bold">待寄送</span>}
                       </div>
                       <p className="text-xs text-gray-500 font-medium">收件人: {req.contactName} ({req.phone})</p>
@@ -534,7 +564,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                 </div>
               );
             })}
-            {supplierSamples.length === 0 && <p className="text-center py-20 text-gray-300 italic">暂无小样申请</p>}
+            {supplierSamples.length === 0 && <p className="text-center py-20 text-gray-300 italic">{t('supplier.emptySamples')}</p>}
           </div>
         </section>
       )}
@@ -552,7 +582,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                   <div className="absolute top-4 right-4 w-3 h-3 bg-red-500 rounded-full border-2 border-white z-20"></div>
                 )}
                 <img src={product.image} className={`w-full aspect-video object-cover rounded-2xl mb-4 ${product.status === MaterialStatus.REJECTED ? '' : 'grayscale-[50%]'}`} />
-                <h4 className="font-bold mb-1">{product.name}</h4>
+                <h4 className="font-bold mb-1">{pickLocale(product.name)}</h4>
                 <div className="flex justify-between items-center">
                   <span className="text-xs text-gray-400">{product.category}</span>
                   <div className="flex items-center gap-3">
@@ -599,7 +629,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                   <div className="absolute top-4 right-4 w-3 h-3 bg-red-500 rounded-full border-2 border-white z-20"></div>
                 )}
                 <img src={product.image} className="w-full aspect-video object-cover rounded-2xl mb-4" />
-                <h4 className="font-bold mb-1">{product.name}</h4>
+                <h4 className="font-bold mb-1">{pickLocale(product.name)}</h4>
                 <div className="flex justify-between items-center">
                   <span className="text-xs text-gray-400">{product.category}</span>
                   <div className="flex items-center gap-3">
@@ -659,7 +689,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                   <p className="text-[10px] font-black uppercase text-gray-400 mb-1">询价材料</p>
                   <div className="flex items-center gap-4 mt-2">
                     <img src={library.find(m => m.id === showOrderDetails.materialId)?.image} className="w-16 h-16 rounded-xl object-cover border" />
-                    <p className="font-bold text-lg">{library.find(m => m.id === showOrderDetails.materialId)?.name}</p>
+                    <p className="font-bold text-lg">{(() => { const mat = library.find(x => x.id === showOrderDetails.materialId); return mat ? pickLocale(mat.name) : ''; })()}</p>
                   </div>
                 </div>
                 <div className="bg-gray-50 p-6 rounded-3xl">
@@ -739,7 +769,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
             <div className="space-y-6">
               <div>
                 <p className="text-[10px] font-black uppercase text-gray-400 mb-1">针对材料</p>
-                <p className="font-bold">{library.find(m => m.id === showQuoteForm.materialId)?.name}</p>
+                <p className="font-bold">{(() => { const mat = library.find(x => x.id === showQuoteForm.materialId); return mat ? pickLocale(mat.name) : ''; })()}</p>
               </div>
               <div>
                 <label className="block text-[10px] font-black uppercase text-gray-400 mb-2">您的报价 (¥/㎡)</label>
@@ -776,7 +806,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
         <div className="hidden md:flex fixed inset-0 bg-black/60 backdrop-blur-md z-[100] items-center justify-center p-4">
           <div className="bg-white w-full max-w-4xl max-h-[90vh] overflow-y-auto p-10 rounded-[40px] shadow-2xl custom-scrollbar">
             <div className="flex justify-between items-center mb-10">
-              <h2 className="text-3xl font-bold">发布新材料</h2>
+              <h2 className="text-3xl font-bold">{t('supplier.publishTitle')}</h2>
               <button onClick={() => setIsPublishing(false)} className="text-gray-400 hover:text-black text-2xl">✕</button>
             </div>
 
@@ -797,6 +827,39 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                   <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">材料名称</label>
                   <input required autoComplete="new-password" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} type="text" className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all" placeholder="例如: 意式极简大理石" />
                 </div>
+                <div>
+                  <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">{t('supplier.nameEn')}</label>
+                  <input autoComplete="new-password" value={formData.nameEn} onChange={e => setFormData({...formData, nameEn: e.target.value})} type="text" className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all" placeholder="e.g. Italian Minimal Marble" />
+                </div>
+                <AiBilingualFillButton
+                  formData={formData}
+                  setFormData={setFormData}
+                  points={points}
+                  onPointsUpdated={onPointsUpdated}
+                  disabled={isProcessing}
+                />
+                <div>
+                  <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">{t('supplier.description')}</label>
+                  <textarea
+                    autoComplete="new-password"
+                    value={formData.description}
+                    onChange={e => setFormData({...formData, description: e.target.value})}
+                    className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all h-20 resize-none"
+                    placeholder="可选：材料卖点与场景说明"
+                  />
+                </div>
+                {(formData.descriptionEn || formData.description) && (
+                  <div>
+                    <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">{t('supplier.descriptionEn')}</label>
+                    <textarea
+                      autoComplete="new-password"
+                      value={formData.descriptionEn}
+                      onChange={e => setFormData({...formData, descriptionEn: e.target.value})}
+                      className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all h-20 resize-none"
+                      placeholder="English description"
+                    />
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">材料分类</label>
@@ -838,6 +901,18 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                     placeholder="例如: 该材料为天然石材，纹理具有唯一性..."
                   ></textarea>
                 </div>
+                {(formData.supplierNotesEn || formData.supplierNotes) && (
+                  <div>
+                    <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">{t('supplier.notesEn')}</label>
+                    <textarea
+                      autoComplete="new-password"
+                      value={formData.supplierNotesEn}
+                      onChange={e => setFormData({...formData, supplierNotesEn: e.target.value})}
+                      className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all h-24 resize-none"
+                      placeholder="English supplier notes"
+                    />
+                  </div>
+                )}
               </div>
 
               {/* Form Right: Images */}
@@ -936,6 +1011,8 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
             onClose={() => setIsPublishing(false)}
             onSubmit={handleSubmit}
             onFileChange={handleFileChange}
+            points={points}
+            onPointsUpdated={onPointsUpdated}
           />
         </div>
       )}

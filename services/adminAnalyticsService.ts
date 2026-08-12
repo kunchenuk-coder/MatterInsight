@@ -1,4 +1,5 @@
 import { getSupabaseForPortal, isSupabaseConfigured } from './supabaseClient';
+import type { AppPortal } from '../utils/appPortal';
 
 export type AdminSupplierEvaluation = {
   id: string;
@@ -34,7 +35,7 @@ export async function fetchSupplierEvaluations(): Promise<AdminSupplierEvaluatio
   }));
 }
 
-/** 设计师消费积分并（可选）记一笔供应商订单 */
+/** 消费积分并（可选）记一笔供应商订单；portal 需与当前登录端一致 */
 export async function recordPointsConsume(options: {
   amount: number;
   description?: string;
@@ -42,12 +43,13 @@ export async function recordPointsConsume(options: {
   materialId?: string | null;
   orderType?: 'sample' | 'quote' | 'purchase' | 'recharge' | 'other' | null;
   amountCny?: number;
+  portal?: AppPortal;
 }): Promise<{ ok: true; balanceAfter: number } | { ok: false; error: string }> {
   if (!isSupabaseConfigured()) {
     return { ok: false, error: 'Supabase not configured' };
   }
 
-  const { data, error } = await getSupabaseForPortal('designer').rpc(
+  const { data, error } = await getSupabaseForPortal(options.portal ?? 'designer').rpc(
     'record_points_consume',
     {
       p_amount: options.amount,

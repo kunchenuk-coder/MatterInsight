@@ -18,12 +18,14 @@
     "browser-image-compression": "^2.0.2",
     "cos-nodejs-sdk-v5": "^2.15.4",
     "html2canvas": "^1.4.1",
+    "i18next": "^26.3.6",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.7",
     "multer": "^2.1.1",
     "node-fetch": "^3.3.2",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "react-i18next": "^17.0.11",
     "replicate": "^1.4.0"
   },
   "devDependencies": {

@@ -16,6 +16,8 @@ export interface ProfileRow {
   verification_doc_url?: string | null;
   status?: string | null;
   is_verified?: boolean | null;
+  points?: number | null;
+  current_points?: number | null;
 }
 
 export type DesignerProfileUpdate = {
@@ -26,7 +28,7 @@ export type DesignerProfileUpdate = {
 };
 
 const PROFILE_COLUMNS =
-  'id, email, role, username, avatar, bio, company, registered_phone, verification_doc_url, status, is_verified';
+  'id, email, role, username, avatar, bio, company, registered_phone, verification_doc_url, status, is_verified, points, current_points';
 
 export function userRoleToDbRole(role: UserRole): DbRole {
   return role.toLowerCase() as DbRole;

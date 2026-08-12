@@ -1,4 +1,5 @@
 import type { Material } from '../types';
+import type { LocalizedText } from '../utils/localizedText';
 
 /** Application case image for slider display and LoRA training (max 10). */
 export interface MaterialApplicationCase {
@@ -18,7 +19,8 @@ export interface MaterialEvaluations {
 
 /** Mood label with dynamic click vector; custom tags are designer-authored. */
 export interface MaterialMoodTag {
-  tag: string;
+  /** string (legacy) or { zh, en } for official brand tags */
+  tag: LocalizedText;
   count: number;
   /** Designer-authored community tag */
   is_custom?: boolean;

@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { getAppLanguage } from "../i18n";
 
 /** 所有带图视觉请求共用的 System 人格（Gemini systemInstruction / 千问与 DeepSeek 的 system 消息） */
 export const VISION_INTERIOR_DESIGNER_SYSTEM_PROMPT =
@@ -8,6 +9,25 @@ export const VISION_INTERIOR_DESIGNER_SYSTEM_PROMPT =
   "空间逻辑：结合上下文判断它是地面、墙面还是家具面。\n" +
   "材料库命名：输出中的材质称呼须带齐颜色/花色词（如「黑色大理石」「鱼肚白大理石」），勿只用「大理石」等泛称，以便与材料库条目对齐。\n" +
   "禁止错误：严禁将明显的深色/黑色材质识别为白色。";
+
+/** Appended so model fields follow the user's UI locale. */
+export function getVisionOutputLanguageInstruction(): string {
+  if (getAppLanguage() === "en") {
+    return (
+      "\n【Language】Write ALL human-readable analysis fields (main_name, parameter, and any prose) in English " +
+      '(e.g. "Black marble with white veining", "White oak veneer"). JSON keys must remain exactly as specified. ' +
+      "Do not use Chinese in those fields."
+    );
+  }
+  return (
+    "\n【语言】main_name、parameter 及所有解释性文字请使用简体中文（如「黑色大理石带白色根纹」）。" +
+    "JSON 字段名保持英文不变。"
+  );
+}
+
+export function getLocalizedVisionSystemPrompt(): string {
+  return VISION_INTERIOR_DESIGNER_SYSTEM_PROMPT + getVisionOutputLanguageInstruction();
+}
 
 /** 与 Gemini / 千问共用，保证解析与看板逻辑一致（最多 3 条：1 主材质 + 2 备选） */
 export const MATERIAL_ANALYSIS_PROMPT =
@@ -252,7 +272,8 @@ export type VisionAnalysisResult = {
 };
 
 export function getAnalysisPromptForDepth(depth: 'basic' | 'deep'): string {
-  return depth === 'deep' ? DEEP_MATERIAL_ANALYSIS_PROMPT : MATERIAL_ANALYSIS_PROMPT;
+  const base = depth === 'deep' ? DEEP_MATERIAL_ANALYSIS_PROMPT : MATERIAL_ANALYSIS_PROMPT;
+  return base + getVisionOutputLanguageInstruction();
 }
 
 export function getGeminiApiKey(): string | undefined {
@@ -446,7 +467,7 @@ export async function analyzeWithGemini(
     usedModel = modelName;
     const model = genAI.getGenerativeModel({
       model: modelName,
-      systemInstruction: opts?.systemInstruction ?? VISION_INTERIOR_DESIGNER_SYSTEM_PROMPT,
+      systemInstruction: opts?.systemInstruction ?? getLocalizedVisionSystemPrompt(),
     });
     for (let attempt = 0; attempt <= GEMINI_RETRY_DELAYS_MS.length; attempt++) {
       const run = (async () => {
@@ -526,7 +547,7 @@ export async function analyzeWithQwen(
     ? dataUrlOrBase64
     : `data:image/jpeg;base64,${dataUrlOrBase64}`;
 
-  const systemText = opts?.systemInstruction ?? VISION_INTERIOR_DESIGNER_SYSTEM_PROMPT;
+  const systemText = opts?.systemInstruction ?? getLocalizedVisionSystemPrompt();
   const modelId = getQwenVisionModelName();
 
   let lastErr: unknown;
@@ -625,7 +646,7 @@ export async function analyzeWithDeepSeekVision(
   const imageUrl = dataUrlOrBase64.startsWith("data:")
     ? dataUrlOrBase64
     : `data:image/jpeg;base64,${dataUrlOrBase64}`;
-  const systemText = opts?.systemInstruction ?? VISION_INTERIOR_DESIGNER_SYSTEM_PROMPT;
+  const systemText = opts?.systemInstruction ?? getLocalizedVisionSystemPrompt();
 
   let lastErr: unknown;
   for (let attempt = 0; attempt <= DEEPSEEK_RETRY_DELAYS_MS.length; attempt++) {

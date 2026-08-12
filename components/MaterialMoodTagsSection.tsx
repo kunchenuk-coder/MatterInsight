@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { User } from '../types';
 import type { MaterialMoodTag } from '../types/materialDetail';
 import {
@@ -9,6 +10,8 @@ import {
   MOOD_TAG_RELIABILITY_PENALTY,
 } from '../utils/moodTagModeration';
 import { persistMaterialMoodTag, voteMaterialMoodTag } from '../services/moodTagService';
+import { pickLocale, tagIdentity } from '../utils/localizedText';
+import type { LocalizedText } from '../utils/localizedText';
 
 interface BubbleBurst {
   id: string;
@@ -43,6 +46,7 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
   compact = false,
   onMoodTagInteract,
 }) => {
+  const { t } = useTranslation();
   const [tags, setTags] = useState(materialMoodTagsSorted(moodTags));
   const [bubbles, setBubbles] = useState<BubbleBurst[]>([]);
   const [showAddInput, setShowAddInput] = useState(false);
@@ -100,11 +104,17 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
     }, 720);
   };
 
-  const handleTagClick = async (tagName: string, event: React.MouseEvent<HTMLButtonElement>) => {
+  const handleTagClick = async (
+    tagValue: LocalizedText,
+    event: React.MouseEvent<HTMLButtonElement>
+  ) => {
     if (!isDesignerInteractive || persistBusy) return;
+    const tagName = tagIdentity(tagValue);
     spawnBubble(tagName, event);
-    const target = tags.find((t) => t.tag === tagName);
-    const optimistic = tags.map((t) => (t.tag === tagName ? { ...t, count: t.count + 1 } : t));
+    const target = tags.find((t) => tagIdentity(t.tag) === tagName);
+    const optimistic = tags.map((t) =>
+      tagIdentity(t.tag) === tagName ? { ...t, count: t.count + 1 } : t
+    );
     commitTags(optimistic);
     if (target) onMoodTagInteract?.(tagName, target);
 
@@ -131,7 +141,7 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
       setAddError('标签最多 12 个字');
       return;
     }
-    if (tags.some((t) => t.tag.toLowerCase() === trimmed.toLowerCase())) {
+    if (tags.some((t) => tagIdentity(t.tag).toLowerCase() === trimmed.toLowerCase())) {
       setAddError('该标签已存在');
       return;
     }
@@ -196,9 +206,10 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
     commitTags(result.mood_tags);
   };
 
-  const handleDeleteTag = (tagName: string, isBrand: boolean) => {
+  const handleDeleteTag = (tagValue: LocalizedText, isBrand: boolean) => {
     if (isAdmin || (canAddBrandMoodTags && isBrand)) {
-      commitTags(tags.filter((t) => t.tag !== tagName));
+      const id = tagIdentity(tagValue);
+      commitTags(tags.filter((t) => tagIdentity(t.tag) !== id));
     }
   };
 
@@ -235,13 +246,13 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
           <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-0.5">
             Human DNA
           </p>
-          <h2 className={`font-bold ${compact ? 'text-base' : 'text-lg'}`}>情绪标签 MOOD</h2>
+          <h2 className={`font-bold ${compact ? 'text-base' : 'text-lg'}`}>{t('mood.title')}</h2>
           <p className="text-[11px] sm:text-xs text-gray-500 mt-0.5">
             {canAddBrandMoodTags
-              ? '添加最多 3 个官方品牌情绪标签'
+              ? t('mood.hintBrand')
               : isDesignerInteractive
-                ? '点击标签 +1 · 每位设计师最多添加 3 个自定义标签'
-                : '社区设计师共同标注的材料情绪向量'}
+                ? t('mood.hintDesigner')
+                : t('mood.hintView')}
           </p>
         </div>
         {addMode === 'brand' && (
@@ -252,7 +263,10 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
                 : 'bg-white text-gray-500 border-gray-200'
             }`}
           >
-            官方 {brandTagCount}/{MAX_SUPPLIER_BRAND_MOOD_TAGS}
+            {t('mood.officialCount', {
+              current: brandTagCount,
+              max: MAX_SUPPLIER_BRAND_MOOD_TAGS,
+            })}
           </span>
         )}
         {addMode === 'custom' && isDesignerInteractive && (
@@ -263,7 +277,10 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
                 : 'bg-white text-gray-500 border-gray-200'
             }`}
           >
-            我的自定义 {designerCustomCount}/{MAX_DESIGNER_CUSTOM_MOOD_TAGS}
+            {t('mood.customCount', {
+              current: designerCustomCount,
+              max: MAX_DESIGNER_CUSTOM_MOOD_TAGS,
+            })}
           </span>
         )}
       </div>
@@ -275,8 +292,11 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
       )}
 
       <div className="flex flex-wrap gap-2 items-center">
-        {tags.map((item) => (
-          <div key={item.tag} className="relative group/tag">
+        {tags.map((item) => {
+          const idKey = tagIdentity(item.tag);
+          const label = pickLocale(item.tag);
+          return (
+          <div key={idKey} className="relative group/tag">
             <button
               type="button"
               onClick={(e) => handleTagClick(item.tag, e)}
@@ -288,15 +308,17 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
               } ${tagButtonClass(item)}`}
             >
               {item.is_brand_official && (
-                <span className="text-[9px] font-black uppercase text-amber-600/80">官方</span>
+                <span className="text-[9px] font-black uppercase text-amber-600/80">
+                  {t('mood.official')}
+                </span>
               )}
-              <span>{item.tag}</span>
+              <span>{label}</span>
               <span className="text-[10px] font-black opacity-50 tabular-nums">{item.count}</span>
             </button>
 
             <span className="pointer-events-none absolute inset-0 overflow-visible">
               {bubbles
-                .filter((b) => b.tag === item.tag)
+                .filter((b) => b.tag === idKey)
                 .map((bubble) => (
                   <span
                     key={bubble.id}
@@ -313,13 +335,14 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
                 type="button"
                 onClick={() => handleDeleteTag(item.tag, !!item.is_brand_official)}
                 className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-black opacity-0 group-hover/tag:opacity-100 transition-opacity shadow-md hover:bg-red-600"
-                aria-label={`删除标签 ${item.tag}`}
+                aria-label={t('mood.deleteTag', { tag: label })}
               >
                 ×
               </button>
             ) : null}
           </div>
-        ))}
+          );
+        })}
 
         {addMode && (
           <div className="relative">
@@ -342,13 +365,13 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
                       ? 'border-gray-200 text-gray-300 cursor-not-allowed'
                       : 'border-gray-300 text-gray-500 hover:border-black hover:text-black hover:bg-white cursor-pointer'
                   }`}
-                  aria-label={addMode === 'brand' ? '添加官方标签' : '添加自定义标签'}
+                  aria-label={addMode === 'brand' ? t('mood.addOfficial') : t('mood.addCustom')}
                 >
                   +
                 </button>
                 {showAddHint && !addLimitReached && (
                   <span className="absolute left-1/2 -translate-x-1/2 top-full mt-1.5 whitespace-nowrap px-2.5 py-1 rounded-lg bg-black text-white text-[10px] font-bold shadow-lg z-10">
-                    {addMode === 'brand' ? '添加官方品牌标签' : '添加自定义标签'}
+                    {addMode === 'brand' ? t('mood.addOfficial') : t('mood.addCustom')}
                   </span>
                 )}
               </div>
@@ -374,7 +397,7 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
                         setAddError(null);
                       }
                     }}
-                    placeholder={addMode === 'brand' ? '如：温润、自然…' : '如：冷静、理性…'}
+                    placeholder={t('mood.placeholder')}
                     maxLength={12}
                     className="flex-1 px-2.5 py-1.5 text-sm rounded-lg border border-gray-200 bg-white outline-none focus:border-black"
                   />
@@ -383,7 +406,7 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
                     onClick={handleAddTag}
                     className="px-2.5 py-1.5 rounded-lg bg-black text-white text-xs font-bold"
                   >
-                    添加
+                    {t('mood.confirmAdd')}
                   </button>
                 </div>
                 {addError && <p className="text-[10px] text-red-500 font-medium">{addError}</p>}
@@ -395,9 +418,7 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
 
       {tags.length === 0 && (
         <p className="mt-3 text-xs text-gray-400">
-          {addMode === 'brand'
-            ? '点击 + 添加官方品牌情绪标签（最多 3 个）'
-            : '暂无情绪标签'}
+          {addMode === 'brand' ? t('mood.emptyBrand') : t('mood.empty')}
         </p>
       )}
     </section>

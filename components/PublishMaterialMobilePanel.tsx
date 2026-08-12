@@ -1,22 +1,9 @@
 import React, { useState } from "react";
-import { Category, MaterialVariant } from "../types";
+import { useTranslation } from "react-i18next";
+import { Category } from "../types";
 import { CATEGORIES } from "../constants";
 import MaterialVoiceFillButton from "./MaterialVoiceFillButton";
-
-type PublishFormState = {
-  name: string;
-  category: Category;
-  brand: string;
-  specifications: string;
-  priceRange: string;
-  stock: boolean;
-  leadTime: string;
-  fireRating: string;
-  supplierNotes: string;
-  image: string;
-  variants: MaterialVariant[];
-  projectPhotos: string[];
-};
+import AiBilingualFillButton, { type PublishFormState } from "./AiBilingualFillButton";
 
 interface PublishMaterialMobilePanelProps {
   formData: PublishFormState;
@@ -29,6 +16,8 @@ interface PublishMaterialMobilePanelProps {
     e: React.ChangeEvent<HTMLInputElement>,
     field: "image" | "projectPhotos" | "variants"
   ) => void;
+  points: number;
+  onPointsUpdated: (balanceAfter: number) => void;
 }
 
 const fieldCls =
@@ -44,14 +33,17 @@ const PublishMaterialMobilePanel: React.FC<PublishMaterialMobilePanelProps> = ({
   onClose,
   onSubmit,
   onFileChange,
+  points,
+  onPointsUpdated,
 }) => {
+  const { t } = useTranslation();
   const [moreOpen, setMoreOpen] = useState(false);
   const [mediaOpen, setMediaOpen] = useState(false);
 
   return (
     <div className="fixed inset-0 z-[100] flex flex-col bg-white overflow-hidden touch-none">
       <div className="flex items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2 shrink-0 border-b border-gray-100">
-        <h2 className="text-lg font-black tracking-tight">发布新材料</h2>
+        <h2 className="text-lg font-black tracking-tight">{t('supplier.publishTitle')}</h2>
         <button
           type="button"
           onClick={onClose}
@@ -79,7 +71,7 @@ const PublishMaterialMobilePanel: React.FC<PublishMaterialMobilePanelProps> = ({
         autoComplete="off"
         className="flex flex-1 flex-col min-h-0 px-4 pt-3 pb-[calc(5.5rem+env(safe-area-inset-bottom))]"
       >
-        <div className="flex-1 flex flex-col gap-2 min-h-0 overflow-hidden">
+        <div className="flex-1 flex flex-col gap-2 min-h-0 overflow-y-auto">
           <div>
             <label className={labelCls}>材料名称</label>
             <input
@@ -92,6 +84,24 @@ const PublishMaterialMobilePanel: React.FC<PublishMaterialMobilePanelProps> = ({
               placeholder="例如: 意式极简大理石"
             />
           </div>
+          <div>
+            <label className={labelCls}>{t('supplier.nameEn')}</label>
+            <input
+              autoComplete="new-password"
+              value={formData.nameEn}
+              onChange={(e) => setFormData({ ...formData, nameEn: e.target.value })}
+              type="text"
+              className={fieldCls}
+              placeholder="e.g. Italian Minimal Marble"
+            />
+          </div>
+          <AiBilingualFillButton
+            formData={formData}
+            setFormData={setFormData}
+            points={points}
+            onPointsUpdated={onPointsUpdated}
+            disabled={isProcessing}
+          />
 
           <div className="grid grid-cols-2 gap-2">
             <div>
@@ -192,6 +202,20 @@ const PublishMaterialMobilePanel: React.FC<PublishMaterialMobilePanelProps> = ({
                   placeholder="天然石材，纹理唯一…"
                 />
               </div>
+              {(formData.supplierNotesEn || formData.supplierNotes) && (
+                <div>
+                  <label className={labelCls}>{t('supplier.notesEn')}</label>
+                  <textarea
+                    autoComplete="new-password"
+                    value={formData.supplierNotesEn}
+                    onChange={(e) =>
+                      setFormData({ ...formData, supplierNotesEn: e.target.value })
+                    }
+                    className={`${fieldCls} h-16 resize-none`}
+                    placeholder="English notes"
+                  />
+                </div>
+              )}
             </div>
           )}
 

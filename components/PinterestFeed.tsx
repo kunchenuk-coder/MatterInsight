@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { Material, MoodBoard } from '../types';
 import {
   buildMixedFeed,
@@ -7,6 +8,7 @@ import {
 } from '../utils/moodboardFeedUtils';
 import DesignerAuthorLink from './DesignerAuthorLink';
 import { getDesignerPublicPath, navigateTo } from '../router';
+import { pickLocale } from '../utils/localizedText';
 
 interface PinterestFeedProps {
   materials: Material[];
@@ -31,6 +33,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
   collectedMoodboardIds = [],
   onToggleCollectMoodboard,
 }) => {
+  const { t } = useTranslation();
   const [showSaveMenu, setShowSaveMenu] = useState<string | null>(null);
   const [isCreatingNewFromFeed, setIsCreatingNewFromFeed] = useState<string | null>(null);
   const [likedIds, setLikedIds] = useState<string[]>([]);
@@ -57,7 +60,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
   const shareMoodboard = (e: React.MouseEvent, board: MoodBoard) => {
     e.stopPropagation();
     const url = `${window.location.origin}${getDesignerPublicPath(board.ownerId ?? '')}`;
-    navigator.clipboard.writeText(url).then(() => window.alert('设计师主页链接已复制'));
+    navigator.clipboard.writeText(url).then(() => window.alert(t('feed.linkCopied')));
   };
 
   return (
@@ -67,7 +70,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
           const board = entry.board;
           const cover = getMoodboardCoverImage(board, materials);
           const count = moodboardMaterialCount(board);
-          const ownerName = board.ownerName ?? '设计师';
+          const ownerName = board.ownerName ?? t('feed.designerFallback');
           const isCollected = collectedMoodboardIds.includes(board.id);
 
           return (
@@ -111,12 +114,12 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
                 )}
                 <div className="flex items-center justify-between mt-2">
                   <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
-                    {count} 款材料
+                    {t('feed.materialCount', { count })}
                   </p>
                   <div className="flex items-center gap-1">
                     <button
                       type="button"
-                      title={isCollected ? '已收藏，点击取消' : '收藏情绪板'}
+                      title={isCollected ? t('feed.uncollect') : t('feed.collectMoodboard')}
                       onClick={(e) => {
                         e.stopPropagation();
                         onToggleCollectMoodboard?.(board.id);
@@ -144,7 +147,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
                     </button>
                     <button
                       type="button"
-                      title="分享"
+                      title={t('common.share')}
                       onClick={(e) => shareMoodboard(e, board)}
                       className="p-2 rounded-full shadow-md bg-white text-gray-400 hover:text-blue-500 transition-colors"
                     >
@@ -159,6 +162,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
 
         const mat = entry.material;
         const isCollected = savedIds.includes(mat.id);
+        const matName = pickLocale(mat.name);
 
         return (
           <div
@@ -168,7 +172,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
           >
             <img
               src={getDisplayImage(mat)}
-              alt={mat.name}
+              alt={matName}
               className="w-full h-auto object-cover group-hover:scale-105 transition-transform duration-500"
             />
 
@@ -181,6 +185,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
                       e.stopPropagation();
                       setActiveVariantMap((prev) => ({ ...prev, [mat.id]: v.id }));
                     }}
+                    title={pickLocale(v.name)}
                     className={`w-4 h-4 rounded-full border border-white shadow-sm transition-transform hover:scale-125 ${
                       activeVariantMap[mat.id] === v.id ? 'ring-2 ring-black scale-110' : ''
                     }`}
@@ -192,7 +197,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
 
             <div className="p-4">
               <div className="flex justify-between items-start mb-1">
-                <h3 className="font-bold text-gray-900 line-clamp-1">{mat.name}</h3>
+                <h3 className="font-bold text-gray-900 line-clamp-1">{matName}</h3>
                 <span className="text-[10px] bg-gray-100 px-2 py-0.5 rounded-full font-bold uppercase">
                   {mat.category.slice(0, 2)}
                 </span>
@@ -217,10 +222,10 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
                     onClick={(e) => {
                       e.stopPropagation();
                       const shareUrl = `${window.location.origin}${window.location.pathname}#/share/${mat.id}`;
-                      navigator.clipboard.writeText(shareUrl).then(() => window.alert('分享链接已复制'));
+                      navigator.clipboard.writeText(shareUrl).then(() => window.alert(t('materialDetail.linkCopied')));
                     }}
                     className="flex items-center gap-1 text-[10px] text-gray-400 font-bold hover:text-blue-500 transition-colors ml-1"
-                    title="分享"
+                    title={t('common.share')}
                   >
                     📢
                   </button>
@@ -228,7 +233,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
                 <div className="relative flex items-center gap-1">
                   <button
                     type="button"
-                    title={isCollected ? '已收藏，点击取消' : '加入收藏'}
+                    title={isCollected ? t('feed.uncollect') : t('feed.addToCollection')}
                     onClick={(e) => {
                       e.stopPropagation();
                       onSave(mat.id);
@@ -256,7 +261,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
                   </button>
                   <button
                     type="button"
-                    title="存入情绪板"
+                    title={t('feed.saveToMoodboard')}
                     onClick={(e) => {
                       e.stopPropagation();
                       setShowSaveMenu(showSaveMenu === mat.id ? null : mat.id);
@@ -285,7 +290,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
                     <div className="absolute bottom-full right-0 mb-2 w-48 bg-white rounded-2xl shadow-2xl border border-gray-100 z-50 overflow-hidden">
                       <div className="p-3 border-b bg-gray-50">
                         <p className="text-[10px] font-black uppercase text-gray-400 tracking-widest">
-                          存入情绪板
+                          {t('feed.saveToMoodboard')}
                         </p>
                       </div>
                       <div className="max-h-48 overflow-y-auto">
@@ -309,7 +314,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
                           <input
                             autoFocus
                             type="text"
-                            placeholder="新情绪板名称"
+                            placeholder={t('feed.newMoodboardName')}
                             className="flex-1 text-[10px] bg-white border rounded px-2 py-1 outline-none font-bold"
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') {
@@ -331,7 +336,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
                             }}
                             className="text-gray-400 text-[10px] font-bold"
                           >
-                            取消
+                            {t('common.cancel')}
                           </button>
                         </div>
                       ) : (
@@ -342,7 +347,7 @@ const PinterestFeed: React.FC<PinterestFeedProps> = ({
                           }}
                           className="w-full text-left px-4 py-3 text-[10px] font-black text-gray-800 border-t hover:bg-gray-50 uppercase tracking-widest"
                         >
-                          + 新建情绪板
+                          {t('feed.createMoodboard')}
                         </button>
                       )}
                     </div>

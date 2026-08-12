@@ -1,11 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { MaterialApplicationCase } from '../types/materialDetail';
 import { uploadImage } from '../services/uploadService';
 
 const MAX_APPLICATION_CASES = 10;
-
-const AI_TOOLTIP_TEXT =
-  '该材料已接收AI训练，可以用于效果图的题图。试试将材料拖入你的情绪板效果图中。';
 
 interface MaterialDetailTopSectionProps {
   mainImageUrl: string;
@@ -30,6 +28,7 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
   canUploadApplicationCases = false,
   variantPicker,
 }) => {
+  const { t } = useTranslation();
   const [caseModalIndex, setCaseModalIndex] = useState<number | null>(null);
   const [aiTooltipVisible, setAiTooltipVisible] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -119,7 +118,7 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
     if (!files?.length || !onApplicationCasesChange) return;
     const remaining = MAX_APPLICATION_CASES - applicationCases.length;
     if (remaining <= 0) {
-      alert(`最多上传 ${MAX_APPLICATION_CASES} 张应用案例图`);
+      alert(t('cases.uploadMax', { n: MAX_APPLICATION_CASES }));
       e.target.value = '';
       return;
     }
@@ -138,7 +137,7 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
       }
       onApplicationCasesChange([...applicationCases, ...uploaded]);
     } catch {
-      alert('上传失败，请重试');
+      alert(t('cases.uploadFailed'));
     } finally {
       setIsUploading(false);
       e.target.value = '';
@@ -191,7 +190,7 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
                   <button
                     type="button"
                     className="lg:hidden w-7 h-7 rounded-full bg-black/40 text-white text-xs backdrop-blur-sm border border-white/20"
-                    aria-label="AI 训练说明"
+                    aria-label={t('cases.aiTooltipAria')}
                     onClick={() => setAiTooltipVisible((v) => !v)}
                   >
                     i
@@ -206,8 +205,8 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
                   }`}
                 >
                   <div className="rounded-2xl bg-white/95 backdrop-blur-md border border-violet-100 shadow-xl shadow-violet-500/10 px-4 py-3 text-sm text-gray-700 leading-relaxed">
-                    <p className="font-semibold text-violet-700 text-xs mb-1">AI 效果图题图</p>
-                    {AI_TOOLTIP_TEXT}
+                    <p className="font-semibold text-violet-700 text-xs mb-1">{t('cases.aiTooltipTitle')}</p>
+                    {t('cases.aiTooltipBody')}
                   </div>
                 </div>
               </>
@@ -220,7 +219,7 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
         {/* Right: application cases */}
         <div className="lg:col-span-7 flex flex-col min-h-0">
           <div className="flex items-center justify-between mb-4 gap-3">
-            <h2 className="text-xl font-bold">应用案例</h2>
+            <h2 className="text-xl font-bold">{t('cases.title')}</h2>
             <div className="flex items-center gap-2">
               {canUploadApplicationCases && (
                 <>
@@ -238,7 +237,7 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
                     onClick={() => fileInputRef.current?.click()}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black text-white text-[10px] font-black uppercase tracking-wide disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-800 transition-colors"
                   >
-                    {isUploading ? '上传中…' : '+ 上传图片'}
+                    {isUploading ? t('cases.uploading') : t('cases.upload')}
                   </button>
                 </>
               )}
@@ -255,11 +254,11 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
               <div className="w-14 h-14 rounded-2xl bg-white border border-gray-100 flex items-center justify-center text-2xl shadow-sm">
                 🖼
               </div>
-              <p className="text-sm font-bold text-gray-500">暂无应用案例</p>
+              <p className="text-sm font-bold text-gray-500">{t('cases.empty')}</p>
               <p className="text-xs text-gray-400 max-w-xs">
                 {canUploadApplicationCases
-                  ? '上传项目实拍图，勾选「参加训练」即可用于 AI 模型训练。'
-                  : '该材料尚未收录项目应用实拍图。'}
+                  ? t('cases.emptyHintUpload')
+                  : t('cases.emptyHintView')}
               </p>
               {canUploadApplicationCases && (
                 <button
@@ -268,7 +267,7 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
                   onClick={() => fileInputRef.current?.click()}
                   className="mt-2 px-5 py-2.5 rounded-xl bg-black text-white text-xs font-bold hover:bg-gray-800 disabled:opacity-50 transition-colors"
                 >
-                  {isUploading ? '上传中…' : '上传第一张案例图'}
+                  {isUploading ? t('cases.uploading') : t('cases.uploadFirst')}
                 </button>
               )}
             </div>
@@ -294,16 +293,16 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
                   >
                     <img
                       src={item.url}
-                      alt={`应用案例 ${index + 1}`}
+                      alt={t('cases.caseAlt', { n: index + 1 })}
                       className="w-full h-full object-cover transition-transform duration-500 group-hover/card:scale-[1.03] pointer-events-none"
                       draggable={false}
                     />
                     <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-transparent opacity-0 group-hover/card:opacity-100 transition-opacity flex items-end p-4">
-                      <span className="text-white text-xs font-bold">点击查看大图</span>
+                      <span className="text-white text-xs font-bold">{t('cases.viewLarge')}</span>
                     </div>
                     {item.is_for_training && (
                       <span className="absolute top-3 right-3 px-2 py-0.5 rounded-full bg-violet-600/90 text-white text-[9px] font-black uppercase tracking-wide">
-                        训练
+                        {t('cases.training')}
                       </span>
                     )}
                   </button>
@@ -316,7 +315,7 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
                         onChange={(e) => toggleTraining(item.id, e.target.checked)}
                         className="w-4 h-4 rounded border-gray-300 text-violet-600 focus:ring-violet-500"
                       />
-                      <span className="text-xs font-semibold text-gray-600">参加训练</span>
+                      <span className="text-xs font-semibold text-gray-600">{t('cases.joinTraining')}</span>
                     </label>
                   )}
                 </div>
@@ -342,7 +341,7 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
               type="button"
               onClick={closeCaseModal}
               className="absolute -top-2 right-0 sm:-top-4 sm:right-0 z-20 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 text-white backdrop-blur-sm border border-white/20 transition-colors"
-              aria-label="关闭"
+              aria-label={t('cases.close')}
             >
               ✕
             </button>
@@ -353,7 +352,7 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
                   type="button"
                   onClick={goToPrevCase}
                   className="absolute left-0 sm:-left-14 top-1/2 -translate-y-1/2 z-20 w-11 h-11 rounded-full bg-white/10 hover:bg-white/25 text-white backdrop-blur-sm border border-white/20 transition-colors hidden sm:flex items-center justify-center"
-                  aria-label="上一张"
+                  aria-label={t('cases.prev')}
                 >
                   ‹
                 </button>
@@ -361,7 +360,7 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
                   type="button"
                   onClick={goToNextCase}
                   className="absolute right-0 sm:-right-14 top-1/2 -translate-y-1/2 z-20 w-11 h-11 rounded-full bg-white/10 hover:bg-white/25 text-white backdrop-blur-sm border border-white/20 transition-colors hidden sm:flex items-center justify-center"
-                  aria-label="下一张"
+                  aria-label={t('cases.next')}
                 >
                   ›
                 </button>
@@ -371,7 +370,7 @@ export const MaterialDetailTopSection: React.FC<MaterialDetailTopSectionProps> =
             <div className="rounded-2xl overflow-hidden shadow-2xl bg-black/20 border border-white/10 max-h-[80vh]">
               <img
                 src={applicationCases[caseModalIndex].url}
-                alt={`应用案例 ${caseModalIndex + 1}`}
+                alt={t('cases.caseAlt', { n: caseModalIndex + 1 })}
                 className="max-w-full max-h-[80vh] object-contain"
               />
             </div>
