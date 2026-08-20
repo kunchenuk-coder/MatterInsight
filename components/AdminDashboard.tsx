@@ -26,6 +26,8 @@ import {
   fetchSupplierEvaluations,
   type AdminSupplierEvaluation,
 } from '../services/adminAnalyticsService';
+import AdminTopicReviewPanel from './topics/AdminTopicReviewPanel';
+import { fetchPendingTopicReviews } from '../services/topicArticleAdminService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 
 interface AdminDashboardProps {
@@ -49,7 +51,8 @@ type AdminSubTab =
   | 'SAMPLES'
   | 'VERIFICATIONS'
   | 'STORIES'
-  | 'MOOD_TAGS';
+  | 'MOOD_TAGS'
+  | 'TOPICS';
 
 const AdminDashboard: React.FC<AdminDashboardProps> = ({ 
   user, library, setLibrary, pendingList, onApprove, onReject, sampleRequests, onShipSample,
@@ -80,6 +83,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [moodTagBusy, setMoodTagBusy] = useState<string | null>(null);
   const [supplierEvals, setSupplierEvals] = useState<AdminSupplierEvaluation[]>([]);
   const [suppliersLoading, setSuppliersLoading] = useState(false);
+  const [pendingTopicsCount, setPendingTopicsCount] = useState(0);
   const materialImageRefreshKeyRef = React.useRef('');
 
   /** 后台材料缩略图：localStorage 可能残留空 image（刷新失败曾被清空），进监管页时强制重签 OSS */
@@ -171,6 +175,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // Badge count for story review tab
   useEffect(() => {
     void loadPendingStories();
+    void fetchPendingTopicReviews().then((rows) => setPendingTopicsCount(rows.length));
   }, [loadPendingStories]);
 
   const handleApproveStory = async (id: string) => {
@@ -412,6 +417,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </button>
         <button type="button" onClick={() => setSubTab('STORIES')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'STORIES' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}>
           {t('admin.tabStories')} {pendingStories.length > 0 && <span className="ml-1 bg-amber-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{pendingStories.length}</span>}
+        </button>
+        <button type="button" onClick={() => setSubTab('TOPICS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'TOPICS' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}>
+          {t('admin.tabTopics')} {pendingTopicsCount > 0 && <span className="ml-1 bg-violet-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{pendingTopicsCount}</span>}
         </button>
         <button type="button" onClick={() => setSubTab('MOOD_TAGS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'MOOD_TAGS' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}>
           {t('admin.tabMoodTags')}
@@ -1093,6 +1101,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
             )}
           </div>
         )}
+
+        {subTab === 'TOPICS' && <AdminTopicReviewPanel onPendingCountChange={setPendingTopicsCount} />}
 
         {subTab === 'MOOD_TAGS' && (
           <div>

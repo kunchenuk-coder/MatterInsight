@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { User, Category, PendingMaterial, Material, Inquiry, SampleRequest, MaterialStatus, AuditLog, MaterialVariant } from '../types';
 import { CATEGORIES } from '../constants';
@@ -13,7 +13,10 @@ import {
   type UnreadNotificationCounts,
 } from '../services/notificationService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
+import { fetchSupplierMaterials } from '../services/materialService';
 import { packLocalized, unpackLocalized, pickLocale } from '../utils/localizedText';
+import { navigateTo, SUPPLIER_TOPIC_NEW_PATH } from '../router';
+import SupplierTopicList from './topics/SupplierTopicList';
 
 const COMMON_COLORS = [
   { name: '白色', code: '#FFFFFF' },
@@ -113,6 +116,51 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
   const [quotePrice, setQuotePrice] = useState('');
   const [quoteNotes, setQuoteNotes] = useState('');
   const [verificationForm, setVerificationForm] = useState({ phone: '', doc: '' });
+  /** 材料商产品单一数据源：仅云端 fetchSupplierMaterials，禁止与 LocalStorage 合并 */
+  const [cloudPublished, setCloudPublished] = useState<Material[]>([]);
+  const [cloudPending, setCloudPending] = useState<PendingMaterial[]>([]);
+  const [productsHydrated, setProductsHydrated] = useState(false);
+
+  useEffect(() => {
+    try {
+      localStorage.removeItem('matter_insight_library');
+      localStorage.removeItem('matter_insight_pending');
+    } catch {
+      /* ignore */
+    }
+
+    if (!isSupabaseConfigured()) {
+      setCloudPublished(library.filter((m) => m.supplierId === user.id));
+      setCloudPending(pendingList.filter((p) => p.submitterId === user.id));
+      setProductsHydrated(true);
+      return;
+    }
+
+    let cancelled = false;
+    void fetchSupplierMaterials(user.id)
+      .then(({ published, pending }) => {
+        if (cancelled) return;
+        // 全量替换，严禁 merge 旧 pending
+        setCloudPublished(published);
+        setCloudPending(pending);
+        setPendingMaterials(pending);
+        setLibrary((prev) => [
+          ...prev.filter((m) => m.supplierId !== user.id),
+          ...published,
+        ]);
+        setProductsHydrated(true);
+      })
+      .catch((err) => {
+        console.error('[SupplierDashboard] fetchSupplierMaterials failed:', err);
+        if (!cancelled) setProductsHydrated(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // 仅按材料商身份拉一次云端真相；勿依赖 library/pendingList 以免脏合并
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user.id]);
 
   const handleVerificationSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -236,11 +284,14 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
       projectPhotos: material.projectPhotos || [],
     });
     // Remove the old rejected entry
-    setPendingMaterials(prev => prev.filter(p => p.id !== material.id));
+    setPendingMaterials((prev) => prev.filter((p) => p.id !== material.id));
+    setCloudPending((prev) => prev.filter((p) => p.id !== material.id));
     setIsPublishing(true);
   };
-  const supplierProducts = library.filter(m => m.supplierId === user.id);
-  const myPendingProducts = pendingList.filter(p => p.submitterId === user.id);
+  const publishedIds = new Set(cloudPublished.map((m) => m.id));
+  const supplierProducts = cloudPublished;
+  // 待审只展示云端 pending；若同 id 已在已发布中则剔除（防双状态）
+  const myPendingProducts = cloudPending.filter((p) => !publishedIds.has(p.id));
   // 仅按真实 supplier_id 过滤（不再兼容假 ID supplier_1）
   const supplierInquiries = inquiries.filter((inq) => inq.supplierId === user.id);
   const supplierSamples = sampleRequests.filter((req) => req.supplierId === user.id);
@@ -359,6 +410,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
     };
     try {
       onSubmitForReview(newPending);
+      setCloudPending((prev) => [...prev.filter((p) => p.id !== newPending.id), newPending]);
       setIsPublishing(false);
       alert('材料已提交审核，请耐心等待平台审核结果。');
       // Reset form
@@ -371,7 +423,8 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
 
   const handleDeleteProduct = (id: string) => {
     if (confirm('确定要下架并删除该产品吗？')) {
-      setLibrary(prev => prev.filter(m => m.id !== id));
+      setLibrary((prev) => prev.filter((m) => m.id !== id));
+      setCloudPublished((prev) => prev.filter((m) => m.id !== id));
     }
   };
 
@@ -401,12 +454,19 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
           <h1 className="text-4xl font-black mb-2 tracking-tighter text-black uppercase">{user.company} {t('supplier.titleSuffix')}</h1>
           <p className="text-gray-500 font-medium">发布您的材料，实时获取设计师询价</p>
         </div>
-        <div className="flex gap-4">
+        <div className="flex flex-wrap gap-4 justify-end">
           <button 
             onClick={() => setIsPublishing(true)}
             className="bg-black text-white px-8 py-3 rounded-2xl font-bold shadow-xl shadow-black/20 hover:scale-105 transition-transform h-fit self-center"
           >
             {t('supplier.publishNew')}
+          </button>
+          <button
+            type="button"
+            onClick={() => navigateTo(SUPPLIER_TOPIC_NEW_PATH)}
+            className="bg-black text-white px-8 py-3 rounded-2xl font-bold shadow-xl shadow-black/20 hover:scale-105 transition-transform h-fit self-center"
+          >
+            {t('supplier.publishTopic')}
           </button>
         </div>
       </header>
@@ -448,6 +508,11 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
           <p className="text-3xl font-black text-green-500">4.9</p>
         </div>
       </div>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-black tracking-tight">{t('topics.mineTitle')}</h2>
+        <SupplierTopicList supplierId={user.id} />
+      </section>
 
       <div className="flex gap-8 border-b">
         <button onClick={() => setActiveTab('ORDERS')} className={`relative pb-4 text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'ORDERS' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>
@@ -571,6 +636,12 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
 
       {activeTab === 'PRODUCTS' && (
         <section className="bg-white rounded-[40px] border border-gray-100 p-10 shadow-sm">
+          {!productsHydrated ? (
+            <div className="py-20 flex flex-col items-center gap-3 text-gray-400">
+              <div className="w-8 h-8 border-2 border-gray-200 border-t-black rounded-full animate-spin" />
+              <p className="text-sm font-bold">{t('common.loading')}</p>
+            </div>
+          ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {/* Pending Products */}
             {myPendingProducts.map(product => (
@@ -652,6 +723,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
               </div>
             ))}
           </div>
+          )}
         </section>
       )}
 

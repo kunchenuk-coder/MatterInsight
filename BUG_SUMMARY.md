@@ -1,6 +1,75 @@
 # MatterInsight Bug / 经验汇总
 
-> 与 `PROJECT_MEMORY.md` 配套。Agent 做 GitHub 推送前先读记忆库。
+> 与 `PROJECT_MEMORY.md` 配套。Agent 做 GitHub 推送前先读记忆库。  
+> **鉴权 / 材料列表相关修改前：必读下方 P0 与 `PROJECT_MEMORY.md` §0.5。**
+
+---
+
+## 推广专题 What's New（2026-08-20）
+
+> **功能：** 材料商撰文 → 提交审核 → Admin 通过后出现在探索库黑色栏目；访客点击整栏进入 `/topics/:id`。  
+> **不是**材料商自发布。状态只能经 security definer RPC 变更。专题正文 **禁止**写入 LocalStorage。
+
+### 已修 Bug
+
+| # | 现象 | 原因 | 修复 |
+|---|------|------|------|
+| 1 | 保存草稿 / 提交审核报 `infinite recursion detected in policy for relation "topic_articles"` | `topic_articles` 与 `topic_article_versions` 的 RLS 互相 `EXISTS` 查对方；Postgres 会评估每条 permissive 策略 | `topic_article_has_published` / `topic_article_is_active` / `topic_article_owned_by`（SECURITY DEFINER）切断环；迁移 `20260820193000_fix_topic_articles_rls_recursion.sql` |
+| 2 | 点首页黑栏仍打开「2026 材质趋势：生物共生」假文 | 静态 hero + picsum 占位弹窗 | 假文已删；只展示 `status=published` 且未下架的版本 |
+| 3 | 编辑器要逐段「添加段落 / 插入图片」 | 分块 UI | 单一窗口连续输入；拖图插在光标后；图与图之间可打字；↑↓ / 拖动换位 |
+| 4 | 主页栏写死 WHAT's NEW / 推广标签 /「立即查看专题」 | 占位文案 | 大字=真实标题，小字=副标题（≤50 字）；整栏可点；悬停只去掉黑色半透明，不缩放图片 |
+| 5 | 刷新 `/supplier/topics/...` 后保存失败或跳错身份 | `getAppPortal()` 只认 `/supplier-dashboard` | `/supplier/topics` 视为 supplier portal，用材料商 JWT |
+
+### 流程与表
+
+- 表：`topic_articles`（稳定 id）+ `topic_article_versions`（内容快照）。  
+- 状态：`draft` → `pending_review` → `published`（拒绝 `rejected`，可改后再交；改已发布会复制新草稿，线上仍显示旧版直到新版通过）。  
+- RPC：`submit_topic_article_version`、`withdraw_topic_article_version`、`approve_topic_article_version`、`reject_topic_article_version`、`archive_topic_article`。  
+- OSS 目录：`topics`（压缩 + 预签名，只存 `ossObjectKey`）。  
+- Admin：`TOPICS` / 推广专题审核（待审池，非卡死 FIFO）。
+
+### 防复发
+
+- **禁止**客户端 `.update({ status: 'published' })`；状态只走 RPC。  
+- **禁止**专题 JSON 写入 LocalStorage（库已 QuotaExceeded）。  
+- 首页无已发布专题时：保留黑底栏 + 默认介绍，**不要**再挂假文章。  
+- 远程 schema 须 MCP/`apply_migration`，只推 git 不会改 Supabase。
+
+---
+
+## P0 · SSO 互踢跳错账号 + 材料双状态（2026-08-12）
+
+> **严重程度：P0（安全 + 数据一致性）** · 同类问题已反复出现两次。  
+> **规范依据：《登录架构宪法》§4.2 / §4.3**
+
+### 现象
+
+1. **SSO 互踢后跳错账号**：Localhost 材料商登录顶号后，网页端未回登录页，反而进入 **设计师后台**（身份污染 / 越权观感）。
+2. **材料商后台双状态**：同一材料（如「水泥花砖」）同时显示「待审核」与「已通过」；控制台 `QuotaExceededError` / `Failed to save library`（`matter_insight_library` 体积可达 ~700KB+）。
+
+### 根因
+
+| # | 根因 | 违宪点 |
+|---|------|--------|
+| 1 | 互踢只 `signOut` **当前 portal**，同浏览器残留 `designer-auth-session` | 未全退 |
+| 2 | 踢后 `location.assign(原路径)` 或软跳到 `/`；`/` 默认 portal=designer → `restoreSession` 静默恢复设计师 | 未硬跳 `/login` |
+| 3 | `library` / `pending` 读写 LocalStorage；云端空数组不覆盖（`if (length > 0)`）→ 脏 pending 与已发布并存 | 禁止业务 LocalStorage |
+| 4 | 材料商未坚持以 `fetchSupplierMaterials(supplier_id)` 为唯一列表源，易与全局库/本地状态 merge | 数据唯一真理源 |
+
+### 修复方案（已落地原则）
+
+1. **全退策略**：互踢时清除 designer + supplier + admin 全部 Auth Session / 设备指纹 / 对应 storageKey，再 **`window.location.replace('/login')`**。
+2. **独立登录页**：`LOGIN_PATH = '/login'`；`/` 仅探索库；`isAuthRoute` 不再把 `/` 当登录页。
+3. **禁用业务 LocalStorage**：禁止 `matter_insight_library` / `matter_insight_pending` 读写；启动与材料商后台挂载时 `removeItem` 清残留。
+4. **云端为准**：空数组也必须 `setState`；材料商产品/待审来自 `fetchSupplierMaterials`，展示侧对已发布 id 去重。
+5. **探索水合守卫**：`libraryHydrated` 完成前不渲染空 Feed（骨架屏），避免闪回。
+
+### 防复发警告（给 Agent / 后人）
+
+- 修改 `useDeviceSessionGuard` / `authService` / `App` 路由守卫时：**禁止**恢复「只退当前 portal」的互踢逻辑。
+- 修改材料列表同步时：**禁止**重新启用 LocalStorage 水合或 `if (cloud.length > 0) setState`。
+- 登录落地 **禁止**再用 `/`；测试互踢必须验证：被踢端只能停在 `/login`，且同浏览器刷新 `/` 不得自动进任何后台。
+- 详规见 `PROJECT_MEMORY.md` §0.5。
 
 ---
 

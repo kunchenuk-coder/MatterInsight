@@ -16,6 +16,9 @@ import SupplierDashboard from './components/SupplierDashboard';
 import DesignerDashboard from './components/DesignerDashboard';
 import AdminDashboard from './components/AdminDashboard';
 import RechargeModal from './components/RechargeModal';
+import WhatsNewSection from './components/topics/WhatsNewSection';
+import TopicArticleDetail from './components/topics/TopicArticleDetail';
+import TopicArticleEditor from './components/topics/TopicArticleEditor';
 import {
   clearMoodboardDraftCaches,
   estimateJsonBytes,
@@ -36,6 +39,7 @@ import {
   submitPendingMaterial,
   approveMaterial as cloudApproveMaterial,
   rejectMaterial as cloudRejectMaterial,
+  fetchSupplierMaterials,
 } from './services/materialService';
 import { recordPointsConsume } from './services/adminAnalyticsService';
 import { pickLocale } from './utils/localizedText';
@@ -63,6 +67,7 @@ import {
 } from './services/inquiryService';
 import {
   isAdminPortal,
+  isAuthRoute,
   isPasswordRecoveryMode,
   lockPasswordRecoveryMode,
 } from './utils/authRoutes';
@@ -198,6 +203,11 @@ const App: React.FC = () => {
   const pendingMaterialIdRef = useRef<string | null>(null);
   /** 登录后库尚未就绪时，等 hydrate 再打开材料 */
   const [postAuthMaterialId, setPostAuthMaterialId] = useState<string | null>(null);
+  /**
+   * 探索库云端水合完成标记。
+   * Supabase 模式下初始 false：禁止在材料列表到达前渲染空 Feed（防闪回旧壳）。
+   */
+  const [libraryHydrated, setLibraryHydrated] = useState(() => !isSupabaseConfigured());
 
   const {
     total: dbUnreadTotal,
@@ -227,19 +237,19 @@ const App: React.FC = () => {
   const designerStorageKey = (userId: string, key: string) => `matter_insight_designer_${userId}_${key}`;
 
   const saveToLocal = (key: string, data: unknown, designerUserId?: string) => {
+    // 材料库 / 待审：永久禁止写入 LocalStorage（防配额爆红 + 双状态幽灵）
+    if (key === 'library' || key === 'pending') {
+      return;
+    }
     const storageKey = designerUserId ? designerStorageKey(designerUserId, key) : `matter_insight_${key}`;
     const write = (payload: unknown) => {
       const size = estimateJsonBytes(payload);
-      console.log("storage payload size:", size, "key:", storageKey);
       if (size > LOCALSTORAGE_PAYLOAD_MAX_BYTES) {
         console.warn(
           "Skipped localStorage save because payload too large",
           { key: storageKey, size, max: LOCALSTORAGE_PAYLOAD_MAX_BYTES }
         );
-        throw Object.assign(new Error("Payload too large for localStorage"), {
-          name: "QuotaExceededError",
-          code: 22,
-        });
+        return;
       }
       localStorage.setItem(storageKey, JSON.stringify(payload));
     };
@@ -302,10 +312,11 @@ const App: React.FC = () => {
   };
 
   // States with Persistence
+  // Supabase 模式：材料库/待审禁止 LocalStorage 水合（防待审+已通过双状态）
   const [library, setLibrary] = useState<Material[]>(() => {
+    if (isSupabaseConfigured()) return [];
     const saved = getFromLocal('library');
     if (!saved) return MOCK_MATERIALS;
-    // Migration: Ensure all materials have variants array and stats
     return saved.map((m: any) => ({
       ...m,
       variants: m.variants || [],
@@ -314,6 +325,7 @@ const App: React.FC = () => {
     }));
   });
   const [pendingMaterials, setPendingMaterials] = useState<PendingMaterial[]>(() => {
+    if (isSupabaseConfigured()) return [];
     const saved = getFromLocal('pending');
     if (!saved) return [];
     return saved.map((m: any) => ({
@@ -342,15 +354,21 @@ const App: React.FC = () => {
   const [verifiedUserIds, setVerifiedUserIds] = useState<string[]>(() => getFromLocal('verified_ids') || []);
   const [isRechargeModalOpen, setIsRechargeModalOpen] = useState(false);
   const [showWelcomeBonus, setShowWelcomeBonus] = useState(false);
-  const [showFeatureModal, setShowFeatureModal] = useState(false);
   const savedIdsRef = useRef<string[]>([]);
   const prevPathnameRef = useRef(pathname);
   const pageRoute = parseAppPageRoute(pathname);
   const onProfilePage = pageRoute.type === 'my-page' || pageRoute.type === 'designer';
 
   const goToExploreLibrary = () => {
-    if (onProfilePage || isDashboardPath(pathname)) {
-      navigateTo(LOGIN_PATH, true);
+    // 探索库首页是 `/`，不是 /login（保护先逛后登录）
+    if (
+      onProfilePage ||
+      isDashboardPath(pathname) ||
+      isAuthRoute(pathname) ||
+      pageRoute.type === 'topic' ||
+      pageRoute.type === 'supplier-topic-editor'
+    ) {
+      navigateTo('/', true);
     }
     setSelectedMaterial(null);
     setSelectedMoodboard(null);
@@ -466,12 +484,15 @@ const App: React.FC = () => {
     }
   };
 
-  /** 单设备顶号守卫：手机/PC 各允许一台，同类新登录踢掉旧会话 */
+  /** 单设备顶号守卫：互踢「全退」后由 hook 硬跳 /login；此处只清 React 状态 */
   useDeviceSessionGuard(user?.id, () => {
     setUser(null);
     setSavedMaterialIds([]);
     setMoodboards([]);
     setActiveMoodboardId('');
+    setPendingMaterials([]);
+    setSelectedMaterial(null);
+    setSelectedMoodboard(null);
   });
 
   /**
@@ -550,6 +571,23 @@ const App: React.FC = () => {
       return true;
     }
 
+    const landingRoute = parseAppPageRoute(window.location.pathname);
+    if (landingRoute.type === 'topic') {
+      setCurrentView('HOME');
+      return true;
+    }
+    if (landingRoute.type === 'supplier-topic-editor') {
+      if (userData.dbRole !== 'supplier') {
+        if (!redirectAfterAuth(userData.dbRole, true)) {
+          setUser(null);
+          return false;
+        }
+        return true;
+      }
+      setCurrentView('DASHBOARD');
+      return true;
+    }
+
     if (!redirectAfterAuth(userData.dbRole, true)) {
       // 权限/入口不符：卸下 UI，禁止 signOut
       setUser(null);
@@ -608,10 +646,10 @@ const App: React.FC = () => {
           loadDesignerCloudData(userData.id),
           loadGlobalCloudData(),
         ]);
-        if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
-        if (cloudGlobal.pendingMaterials.length > 0) {
-          setPendingMaterials(cloudGlobal.pendingMaterials);
-        }
+        // 云端为准：空数组也必须覆盖本地，禁止残留待审幽灵
+        setLibrary(cloudGlobal.library);
+        setPendingMaterials(cloudGlobal.pendingMaterials);
+        setLibraryHydrated(true);
 
         const boards = (
           cloud.moodboards.length > 0
@@ -631,22 +669,25 @@ const App: React.FC = () => {
         await hydrateCommerceRequests(userData);
       } else if (userData.dbRole === 'admin') {
         const cloudGlobal = await loadGlobalCloudData();
-        if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
-        if (cloudGlobal.pendingMaterials.length > 0) {
-          setPendingMaterials(cloudGlobal.pendingMaterials);
-        }
+        setLibrary(cloudGlobal.library);
+        setPendingMaterials(cloudGlobal.pendingMaterials);
+        setLibraryHydrated(true);
         await refreshVerificationRequestsFromCloud();
         await hydrateCommerceRequests(userData);
       } else {
-        const cloudGlobal = await loadGlobalCloudData();
-        if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
-        if (cloudGlobal.pendingMaterials.length > 0) {
-          setPendingMaterials(cloudGlobal.pendingMaterials);
-        }
+        // 材料商：显式按 supplier_id 拉自己的待审；探索库仍用已发布全局列表
+        const [supplierMats, cloudGlobal] = await Promise.all([
+          fetchSupplierMaterials(userData.id),
+          loadGlobalCloudData(),
+        ]);
+        setLibrary(cloudGlobal.library);
+        setPendingMaterials(supplierMats.pending);
+        setLibraryHydrated(true);
         await hydrateCommerceRequests(userData);
       }
     } catch (err) {
       console.error('[MatterInsight] 云端数据同步失败:', err);
+      setLibraryHydrated(true);
     } finally {
       setTimeout(() => {
         skipCloudSyncRef.current = false;
@@ -810,6 +851,16 @@ const App: React.FC = () => {
           setSavedMaterialIds([]);
           setMoodboards([]);
           setActiveMoodboardId('');
+          setPendingMaterials([]);
+          // Session 失效且仍在受保护路径：硬跳独立登录页，禁止静默留在后台
+          const path = window.location.pathname;
+          if (
+            isDashboardPath(path) ||
+            parseAppPageRoute(path).type === 'my-page' ||
+            parseAppPageRoute(path).type === 'supplier-topic-editor'
+          ) {
+            window.location.replace(LOGIN_PATH);
+          }
         }
       });
     } catch (err) {
@@ -919,32 +970,40 @@ const App: React.FC = () => {
     };
   }, [currentView, user?.id]);
 
-  /** 访客：拉取已发布材料库（anon RLS） */
+  /** 访客 / 已登录共用：拉取已发布材料库；完成前不渲染探索 Feed */
   useEffect(() => {
-    if (!authReady || user || isAdminPortal() || !isSupabaseConfigured()) return;
+    if (!authReady || isAdminPortal() || !isSupabaseConfigured()) return;
+    // 已登录走 hydrateCloudDataInBackground，避免重复拉取闪烁
+    if (user) return;
 
     let cancelled = false;
-    void loadGlobalCloudData().then((cloudGlobal) => {
-      if (cancelled) return;
-      if (cloudGlobal.library.length > 0) setLibrary(cloudGlobal.library);
-    });
+    void loadGlobalCloudData()
+      .then((cloudGlobal) => {
+        if (cancelled) return;
+        setLibrary(cloudGlobal.library);
+        setLibraryHydrated(true);
+      })
+      .catch((err) => {
+        console.error('[MatterInsight] 访客材料库加载失败:', err);
+        if (!cancelled) setLibraryHydrated(true);
+      });
 
     return () => {
       cancelled = true;
     };
   }, [authReady, user]);
 
-  /** 访客：工作台 / 主页 / 材料详情 URL 一律回到探索库 */
+  /** 访客：工作台强制 /login；公开材料/设计师页回探索库（先逛后登录） */
   useEffect(() => {
     if (!authReady || user || isAdminPortal() || showAuthGate) return;
+    if (isAuthRoute(pathname)) return;
     const route = parseAppPageRoute(pathname);
-    if (
-      route.type === 'dashboard' ||
-      route.type === 'my-page' ||
-      route.type === 'designer' ||
-      route.type === 'material'
-    ) {
-      navigateTo(LOGIN_PATH, true);
+    if (route.type === 'dashboard' || route.type === 'my-page' || route.type === 'supplier-topic-editor') {
+      window.location.replace(LOGIN_PATH);
+      return;
+    }
+    if (route.type === 'designer' || route.type === 'material') {
+      navigateTo('/', true);
       setCurrentView('HOME');
       setSelectedMaterial(null);
       setSelectedMoodboard(null);
@@ -1017,22 +1076,30 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Persistence Effect（询价/小样在 Supabase 模式下不再回写 LocalStorage）
+  // Persistence Effect：材料库/待审永不回写；Supabase 下其它业务单也不回写
   useEffect(() => {
-    saveToLocal('library', library);
-    saveToLocal('pending', pendingMaterials);
     if (!isSupabaseConfigured()) {
       saveToLocal('inquiries', inquiries);
       saveToLocal('samples', sampleRequests);
+      saveToLocal('verifications', verificationRequests);
     }
     saveToLocal('notifications', notifications);
     if (user?.role === 'DESIGNER') {
       saveToLocal('moodboards', pruneMoodboardsForQuota(moodboards), user.id);
       saveToLocal('saved_ids', savedMaterialIds, user.id);
     }
-    saveToLocal('verifications', verificationRequests);
     saveToLocal('verified_ids', verifiedUserIds);
-  }, [library, pendingMaterials, inquiries, sampleRequests, moodboards, notifications, savedMaterialIds, verificationRequests, verifiedUserIds, user]);
+  }, [inquiries, sampleRequests, moodboards, notifications, savedMaterialIds, verificationRequests, verifiedUserIds, user]);
+
+  /** 启动时物理清除历史材料缓存（无论是否已禁用写入） */
+  useEffect(() => {
+    try {
+      localStorage.removeItem('matter_insight_library');
+      localStorage.removeItem('matter_insight_pending');
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   /** 进入材料商/运营工作台时强制重拉云端小样与询价 */
   useEffect(() => {
@@ -1553,6 +1620,21 @@ const App: React.FC = () => {
     return <Auth onAuthSuccess={handleAuthSuccess} adminPortal />;
   }
 
+  // 独立 /login：强制登录页（互踢 / 登出落地），返回探索库用 onBack
+  if (!user && isAuthRoute(pathname)) {
+    return (
+      <Auth
+        key="auth-login-page"
+        onAuthSuccess={handleAuthSuccess}
+        initialMode="login"
+        onBack={() => {
+          navigateTo('/', true);
+          setCurrentView('HOME');
+        }}
+      />
+    );
+  }
+
   // 访客 Auth gate（点材料 / 顶栏登录）
   if (!user && showAuthGate) {
     return (
@@ -1642,9 +1724,10 @@ const App: React.FC = () => {
             setActiveMoodboardId('');
             setSelectedMaterial(null);
             setSelectedMoodboard(null);
+            setPendingMaterials([]);
             setCurrentView('HOME');
-            navigateTo(LOGIN_PATH, true);
             closeAuthGate();
+            window.location.replace(LOGIN_PATH);
           }}
           onRechargeClick={() => {
             if (!user) {
@@ -1714,76 +1797,101 @@ const App: React.FC = () => {
             </div>
           )}
 
-          {!onProfilePage && currentView === 'HOME' && (
+          {pageRoute.type === 'topic' && (
+            <TopicArticleDetail articleId={pageRoute.id} onBack={goToExploreLibrary} />
+          )}
+
+          {user && pageRoute.type === 'supplier-topic-editor' && user.dbRole === 'supplier' && (
+            <TopicArticleEditor
+              userId={user.id}
+              articleId={pageRoute.articleId}
+              onBack={() => {
+                navigateTo(SUPPLIER_DASHBOARD_PATH);
+                setCurrentView('DASHBOARD');
+              }}
+            />
+          )}
+
+          {!onProfilePage && currentView === 'HOME' && pageRoute.type !== 'topic' && pageRoute.type !== 'supplier-topic-editor' && (
             <div className="max-w-7xl mx-auto">
-              <div className="mb-8 md:mb-10 mt-4 md:mt-6 bg-black text-white p-6 md:p-12 rounded-[30px] md:rounded-[40px] relative overflow-hidden group min-h-[14rem] md:h-64 flex items-center">
-                <div className="absolute top-0 right-0 w-64 h-64 bg-white/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 group-hover:scale-110 transition-transform duration-700"></div>
-                <div className="relative z-10 w-full">
-                  <span className="text-[9px] md:text-[10px] font-black uppercase tracking-[0.2em] bg-white/20 px-3 py-1 rounded-full mb-4 md:mb-3 inline-block">{t('explore.promoted')}</span>
-                  <h2 className="text-3xl md:text-5xl font-black tracking-tighter uppercase mb-3 md:mb-2 leading-none">{t('explore.whatsNew')}</h2>
-                  <p className="text-gray-400 font-medium text-xs md:text-sm max-w-md leading-relaxed md:leading-tight opacity-70">
-                    {t('explore.heroDesc')}
-                  </p>
-                  <button 
-                    onClick={() => setShowFeatureModal(true)}
-                    className="mt-6 md:mt-8 bg-white text-black px-6 py-3 rounded-xl text-xs md:text-sm font-bold hover:scale-105 transition-transform"
-                  >
-                    {t('explore.viewFeature')}
-                  </button>
+              <WhatsNewSection />
+              {!libraryHydrated ? (
+                <div
+                  className="py-10 md:py-16"
+                  aria-busy="true"
+                  aria-live="polite"
+                  aria-label={t('common.loading')}
+                >
+                  <div className="flex flex-col items-center justify-center gap-4 mb-10">
+                    <div className="w-10 h-10 border-2 border-gray-200 border-t-black rounded-full animate-spin" />
+                    <p className="text-sm font-bold text-gray-400 tracking-wide">{t('common.loading')}</p>
+                  </div>
+                  <div className="columns-2 md:columns-3 lg:columns-4 gap-4 space-y-4">
+                    {Array.from({ length: 8 }).map((_, i) => (
+                      <div
+                        key={`explore-skel-${i}`}
+                        className="break-inside-avoid mb-4 rounded-2xl bg-gray-100 animate-pulse"
+                        style={{ height: `${160 + (i % 4) * 48}px` }}
+                      />
+                    ))}
+                  </div>
                 </div>
-              </div>
-              <CategoryBar 
-                selected={selectedCategory} 
-                onSelect={setSelectedCategory} 
-              />
-              <PinterestFeed 
-                materials={library.filter(m => {
-                  const matchesCategory = !selectedCategory || m.category === selectedCategory;
-                  const matchesSearch = materialMatchesSearchQuery(m, searchTerm);
-                  return matchesCategory && matchesSearch;
-                })}
-                publishedMoodboards={
-                  !selectedCategory
-                    ? publicMoodboards.filter((b) => {
-                        if (!searchTerm) return true;
-                        const q = searchTerm.toLowerCase();
-                        return (
-                          b.name.toLowerCase().includes(q) ||
-                          (b.ownerName?.toLowerCase().includes(q) ?? false)
-                        );
-                      })
-                    : []
-                }
-                onSelect={(m) => {
-                  if (!user) {
-                    openAuthGate('register', m.id);
-                    return;
-                  }
-                  openMaterialDetail(m, 'home');
-                }}
-                onSelectMoodboard={(board) => {
-                  if (!user) {
-                    openAuthGate('login');
-                    return;
-                  }
-                  openMoodboardFromFeed(board);
-                }}
-                onSave={(id, moodboardId, newMoodboardName) => {
-                  if (!user) {
-                    openAuthGate('login');
-                    return;
-                  }
-                  handleSaveMaterial(id, moodboardId, newMoodboardName);
-                }}
-                savedIds={user?.role === 'DESIGNER' ? savedMaterialIds : []}
-                moodboards={user?.role === 'DESIGNER' ? moodboards : []}
-                collectedMoodboardIds={
-                  user?.role === 'DESIGNER' ? collectedMoodboardIds : []
-                }
-                onToggleCollectMoodboard={
-                  user?.role === 'DESIGNER' ? handleToggleCollectMoodboard : undefined
-                }
-              />
+              ) : (
+                <>
+                  <CategoryBar 
+                    selected={selectedCategory} 
+                    onSelect={setSelectedCategory} 
+                  />
+                  <PinterestFeed 
+                    materials={library.filter(m => {
+                      const matchesCategory = !selectedCategory || m.category === selectedCategory;
+                      const matchesSearch = materialMatchesSearchQuery(m, searchTerm);
+                      return matchesCategory && matchesSearch;
+                    })}
+                    publishedMoodboards={
+                      !selectedCategory
+                        ? publicMoodboards.filter((b) => {
+                            if (!searchTerm) return true;
+                            const q = searchTerm.toLowerCase();
+                            return (
+                              b.name.toLowerCase().includes(q) ||
+                              (b.ownerName?.toLowerCase().includes(q) ?? false)
+                            );
+                          })
+                        : []
+                    }
+                    onSelect={(m) => {
+                      if (!user) {
+                        openAuthGate('register', m.id);
+                        return;
+                      }
+                      openMaterialDetail(m, 'home');
+                    }}
+                    onSelectMoodboard={(board) => {
+                      if (!user) {
+                        openAuthGate('login');
+                        return;
+                      }
+                      openMoodboardFromFeed(board);
+                    }}
+                    onSave={(id, moodboardId, newMoodboardName) => {
+                      if (!user) {
+                        openAuthGate('login');
+                        return;
+                      }
+                      handleSaveMaterial(id, moodboardId, newMoodboardName);
+                    }}
+                    savedIds={user?.role === 'DESIGNER' ? savedMaterialIds : []}
+                    moodboards={user?.role === 'DESIGNER' ? moodboards : []}
+                    collectedMoodboardIds={
+                      user?.role === 'DESIGNER' ? collectedMoodboardIds : []
+                    }
+                    onToggleCollectMoodboard={
+                      user?.role === 'DESIGNER' ? handleToggleCollectMoodboard : undefined
+                    }
+                  />
+                </>
+              )}
             </div>
           )}
 
@@ -1800,7 +1908,7 @@ const App: React.FC = () => {
             />
           )}
 
-          {user && currentView === 'DETAILS' && selectedMaterial && (
+          {user && currentView === 'DETAILS' && selectedMaterial && pageRoute.type !== 'topic' && pageRoute.type !== 'supplier-topic-editor' && (
             <MaterialDetail 
               material={selectedMaterial} 
               user={user}
@@ -1862,7 +1970,7 @@ const App: React.FC = () => {
             />
           )}
 
-          {user && !onProfilePage && currentView === 'DASHBOARD' && (() => {
+          {user && !onProfilePage && currentView === 'DASHBOARD' && pageRoute.type !== 'supplier-topic-editor' && pageRoute.type !== 'topic' && (() => {
             switch (user.dbRole) {
               case 'admin':
                 return (
@@ -1938,8 +2046,7 @@ const App: React.FC = () => {
                       className="px-6 py-3 rounded-2xl bg-black text-white font-bold"
                       onClick={() => {
                         setUser(null);
-                        window.history.replaceState({}, '', isAdminPortal() ? '/admin' : '/');
-                        window.dispatchEvent(new PopStateEvent('popstate'));
+                        window.location.replace(isAdminPortal() ? '/admin' : LOGIN_PATH);
                       }}
                     >
                       {t('explore.returnLogin')}
@@ -1970,58 +2077,6 @@ const App: React.FC = () => {
               >
                 {t('explore.startExploring')}
               </button>
-            </div>
-          </div>
-        )}
-
-        {showFeatureModal && (
-          <div className="fixed inset-0 bg-black/90 backdrop-blur-xl z-[200] flex items-center justify-center p-6 overflow-y-auto">
-            <div className="max-w-3xl w-full bg-white rounded-[40px] overflow-hidden relative my-10">
-              <button 
-                onClick={() => setShowFeatureModal(false)}
-                className="absolute top-6 right-6 z-50 bg-black/50 text-white w-10 h-10 rounded-full flex items-center justify-center hover:bg-black transition-colors"
-              >
-                ✕
-              </button>
-              <div className="relative">
-                <img 
-                  src="https://picsum.photos/seed/material_feature/1200/2400" 
-                  alt="Feature" 
-                  className="w-full h-auto cursor-pointer"
-                  onClick={() => {
-                    const targetMat = library[0];
-                    setShowFeatureModal(false);
-                    if (!targetMat) return;
-                    if (!user) {
-                      openAuthGate('register', targetMat.id);
-                      return;
-                    }
-                    openMaterialDetail(targetMat, 'home');
-                  }}
-                />
-                <div className="p-12 space-y-8">
-                  <h2 className="text-4xl font-black tracking-tighter uppercase">{t('explore.featureTitle')}</h2>
-                  <p className="text-gray-600 leading-relaxed text-lg">
-                    {t('explore.featureBody')}
-                  </p>
-                  <div className="grid grid-cols-2 gap-8">
-                    <div className="space-y-4">
-                      <div className="h-48 bg-gray-100 rounded-3xl overflow-hidden">
-                        <img src="https://picsum.photos/seed/mat1/600/400" className="w-full h-full object-cover" />
-                      </div>
-                      <h4 className="font-bold">{t('explore.featureSustain')}</h4>
-                      <p className="text-sm text-gray-400">{t('explore.featureSustainDesc')}</p>
-                    </div>
-                    <div className="space-y-4">
-                      <div className="h-48 bg-gray-100 rounded-3xl overflow-hidden">
-                        <img src="https://picsum.photos/seed/mat2/600/400" className="w-full h-full object-cover" />
-                      </div>
-                      <h4 className="font-bold">{t('explore.featureAesthetic')}</h4>
-                      <p className="text-sm text-gray-400">{t('explore.featureAestheticDesc')}</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
             </div>
           </div>
         )}

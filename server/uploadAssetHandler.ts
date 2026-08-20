@@ -24,6 +24,7 @@ const ALLOWED_CATEGORIES = new Set([
   'verification',
   'local-materials',
   'avatars',
+  'topics',
   'general',
 ]);
 

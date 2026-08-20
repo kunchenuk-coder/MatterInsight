@@ -1,5 +1,8 @@
 export type PublicAuthPath = '/login' | '/reset-password' | '/admin';
 
+/** 独立登录页（与 router.LOGIN_PATH 一致；本文件不 import router，避免循环依赖） */
+export const PUBLIC_LOGIN_PATH: PublicAuthPath = '/login';
+
 /** 隐藏的管理员入口路径（普通登录页不暴露管理端） */
 export const ADMIN_PORTAL_PATH = '/admin';
 /** 管理员登录 + 后台路径（本地开发常用） */
@@ -36,13 +39,13 @@ export function isResetPasswordRoute(pathname = getPathname()): boolean {
   return normalized === '/reset-password' || normalized.endsWith('/reset-password');
 }
 
+/**
+ * 是否为公开登录页。
+ * `/` 不再视为登录路由（探索库首页）；仅独立 `/login`。
+ */
 export function isAuthRoute(pathname = getPathname()): boolean {
-  const normalized = pathname.toLowerCase();
-  return (
-    normalized === '/' ||
-    normalized === '/login' ||
-    normalized.endsWith('/login')
-  );
+  const normalized = pathname.toLowerCase().replace(/\/+$/, '') || '/';
+  return normalized === PUBLIC_LOGIN_PATH || normalized.endsWith('/login');
 }
 
 export function isPasswordRecoveryFromUrl(): boolean {
@@ -103,10 +106,10 @@ export const getPasswordResetRedirectUrl = (): string => {
   return `${window.location.origin}/reset-password`;
 };
 
-/** 重置完成或取消：清除 recovery 并硬刷新到登录页 */
+/** 重置完成或取消：清除 recovery 并硬跳独立登录页（禁止回 `/` 静默恢复） */
 export function redirectToLoginAfterReset(): void {
   unlockPasswordRecoveryMode();
-  window.location.href = '/';
+  window.location.replace(PUBLIC_LOGIN_PATH);
 }
 
 export function cancelPasswordRecovery(): void {

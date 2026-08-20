@@ -1,31 +1,63 @@
 import { useEffect, useRef } from 'react';
-import { isSupabaseConfigured } from '../services/supabaseClient';
+import { getSupabaseForPortal, isSupabaseConfigured } from '../services/supabaseClient';
 import { isPasswordRecoveryMode } from '../utils/authRoutes';
-import { getAppPortal } from '../utils/appPortal';
+import {
+  AUTH_STORAGE_KEYS,
+  getAppPortal,
+  setPortalOverride,
+  type AppPortal,
+} from '../utils/appPortal';
 import {
   DEVICE_KICKED_MESSAGE,
   clearLocalDeviceSession,
   subscribeDeviceSessionGuard,
   validateDeviceSession,
 } from '../services/deviceSessionService';
-import { signOut } from '../services/authService';
 
 const POLL_INTERVAL_MS = 30_000;
+const LOGIN_LANDING_PATH = '/login';
+
+const ALL_PORTALS: AppPortal[] = ['designer', 'supplier', 'admin'];
 
 let kickInProgress = false;
 
 /**
- * 仅在「同用户 + 同类设备被明确顶号」时退出当前 portal。
- * 禁止因暂时不一致 / 跨 portal 干扰而清 session。
+ * 互踢「全退」：清除同浏览器全部 Portal 的 Auth Session + 设备指纹，
+ * 再硬跳 /login，禁止静默恢复任一角色。
  */
-async function executeDeviceKick(): Promise<void> {
+async function clearAllPortalSessions(userId?: string): Promise<void> {
+  setPortalOverride(null);
+
+  await Promise.all(
+    ALL_PORTALS.map(async (portal) => {
+      try {
+        await getSupabaseForPortal(portal).auth.signOut();
+      } catch {
+        /* 单 portal 失败不阻断全退 */
+      }
+      if (userId) {
+        clearLocalDeviceSession(userId, portal);
+      }
+      try {
+        window.localStorage.removeItem(AUTH_STORAGE_KEYS[portal]);
+      } catch {
+        /* ignore */
+      }
+    })
+  );
+}
+
+/**
+ * 仅在「同用户 + 同类设备被明确顶号」时触发。
+ * 全退所有 Portal，强制重新登录（/login），禁止 assign 原路径造成身份污染。
+ */
+async function executeDeviceKick(userId?: string): Promise<void> {
   if (kickInProgress) return;
   kickInProgress = true;
   try {
-    // signOut 只清当前 portal 的 auth storageKey + 当前 user 的 device key
-    await signOut({ removeDeviceRecord: false });
+    await clearAllPortalSessions(userId);
     window.alert(DEVICE_KICKED_MESSAGE);
-    window.location.assign(window.location.pathname + window.location.search);
+    window.location.replace(LOGIN_LANDING_PATH);
   } finally {
     kickInProgress = false;
   }
@@ -33,7 +65,7 @@ async function executeDeviceKick(): Promise<void> {
 
 /**
  * 全局设备会话守卫：轮询 + Realtime。
- * 查询失败 / 暂时不一致 → 不踢；仅明确顶号才退当前 portal。
+ * 查询失败 / 暂时不一致 → 不踢；仅明确顶号才「全退」并跳转 /login。
  */
 export function useDeviceSessionGuard(
   userId: string | undefined,
@@ -52,8 +84,7 @@ export function useDeviceSessionGuard(
     const kick = () => {
       if (stopped) return;
       onKickedRef.current?.();
-      clearLocalDeviceSession(userId, portal);
-      void executeDeviceKick();
+      void executeDeviceKick(userId);
     };
 
     const check = async () => {

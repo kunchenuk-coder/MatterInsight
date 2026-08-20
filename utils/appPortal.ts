@@ -63,7 +63,11 @@ export function getAppPortal(pathname?: string): AppPortal {
   }
 
   const path = (pathname ?? window.location.pathname).toLowerCase().replace(/\/+$/, '') || '/';
-  if (path === SUPPLIER_DASHBOARD_PATH || path.endsWith(SUPPLIER_DASHBOARD_PATH)) {
+  if (
+    path === SUPPLIER_DASHBOARD_PATH ||
+    path.endsWith(SUPPLIER_DASHBOARD_PATH) ||
+    path.startsWith('/supplier/topics')
+  ) {
     return 'supplier';
   }
   if (path === DESIGNER_DASHBOARD_PATH || path.endsWith(DESIGNER_DASHBOARD_PATH)) {

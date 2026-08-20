@@ -2,17 +2,70 @@
 
 > **用法：** 每次在 Cursor 新开对话处理本项目时，先 `@PROJECT_MEMORY.md` 或粘贴本文要点。  
 > **硬规则：** 用户只要提到 **推送 GitHub / git push / 发到远端**，Agent **必须先读本文**（尤其 §9），再执行 commit/push。详见 `.cursor/rules/github-push-memory.mdc`。  
-> **更新日期：** 2026-08-05  
+> **更新日期：** 2026-08-20  
 > **仓库：** https://github.com/kunchenuk-coder/MatterInsight.git  
-> **当前 HEAD（参考）：** `73ccf16` — Fix: 修复线上OSS图片裂图与Admin白块，并固化防复发规范  
+> **当前 HEAD（参考）：** 推送后以 `git log -1` 为准 — 新增加推广专题功能  
 > **Supabase 项目：** `matterinsight` / `wwtfjxrfnkoixgptuemw`（ap-southeast-1）  
 > **Vercel 主站项目：** `matterinsight`（`prj_PN5lW6r3wwhLBdV4YkwoBOFOuRhK`）— Admin 域名是同项目 alias，**不是**独立项目  
+> **登录最高规范：** 《登录架构宪法》+ 本文 §0.5；改鉴权/互踢/材料列表前必读。
 
 ---
 
 ## 0. 一句话架构
 
-React + Vite 前端，按 **portal（designer / supplier / admin）** 拆分 Auth storage；业务数据以 **Supabase Postgres + RLS** 为准，LocalStorage 仅作降级缓存。OSS 图片走阿里云私有桶，展示前必须刷新可读 URL。
+React + Vite 前端，按 **portal（designer / supplier / admin）** 拆分 Auth storageKey；业务数据以 **Supabase Postgres + RLS** 为唯一真相。OSS 图片走阿里云私有桶，展示前必须刷新可读 URL。
+
+---
+
+## 0.5 核心架构与登录原则（2026-08-12 · 宪法级）
+
+> 违反本节视为严重缺陷，必须回滚。完整条文见《登录架构宪法》。
+
+### 0.5.1 三端隔离、单库共享
+
+| 客户端 | 入口 | 角色 | Auth storageKey |
+|--------|------|------|-----------------|
+| 设计师 | `matterinsight.vercel.app` / localhost | `designer` | `designer-auth-session` |
+| 材料商 | 同上 | `supplier` | `supplier-auth-session` |
+| 管理员 | **`matterinsightadmin.vercel.app` 或 `/admin`** | `admin` | `admin-auth-session` |
+
+- 三端 **共享同一 Supabase 库**，靠 RLS + JWT 隔离数据。
+- 设计师/材料商 **绝对不能** 从主站 UI 跳进 Admin；Admin 须独立域名/路径并重新验证。
+- 登录写入对应 portal 的 storageKey，日常查询用当前 portal 的 JWT。
+
+### 0.5.2 全退策略（互踢 / 强制下线 · 最高安全）
+
+当检测到异地登录（设备会话互踢）或需要强制下线时：
+
+1. **必须清除同浏览器下全部 Portal**（Designer + Supplier + Admin）的 Auth Session 与设备指纹 LocalStorage。
+2. **严禁「只退当前角色」**：局部 `signOut` 会留下另一 portal 的 JWT → `/` 默认 designer portal 会 **静默恢复成设计师后台**（已两次 P0）。
+3. 使用 **`window.location.replace('/login')`** 硬跳独立登录页；禁止 `assign(原后台路径)`，禁止依赖软 `history` 跳转后指望守卫。
+4. 被踢后必须 **重新输入密码**，禁止任何静默自动登录。
+
+关键实现：`hooks/useDeviceSessionGuard.ts`（`clearAllPortalSessions`）、`router.LOGIN_PATH = '/login'`。
+
+### 0.5.3 首页体验隔离
+
+| 路径 | 用途 |
+|------|------|
+| `/` | **公开探索库**（先逛后登录），不是登录页 |
+| `/login` | **独立安全登录通道**（互踢/登出/未授权落地） |
+| `/admin` | 管理员入口 |
+
+**严禁**把 `/` 兼作登录落地：`getAppPortal('/')` 默认为 `designer`，会读出残留的 `designer-auth-session` 造成身份污染。
+
+### 0.5.4 数据唯一真理源（禁止业务 LocalStorage）
+
+- **严禁**用 LocalStorage 存储/水合业务列表：`matter_insight_library`、`matter_insight_pending`、材料审核状态等。
+- 探索库 / 材料商产品：以 Supabase 为唯一来源；云端返回 **空数组也必须覆盖** 内存状态（禁止 `if (length > 0) setState`）。
+- 材料商后台：调用 **`fetchSupplierMaterials(user.id)`**，显式 `supplier_id`；待审与已发布 **禁止与本地旧状态 merge**。
+- 探索页须等云端水合完成再渲染 Feed（`libraryHydrated` + 骨架屏），杜绝空壳闪回。
+- LocalStorage 仅允许：各 portal 的 Auth session、设备指纹、非业务偏好（如语言）；写入超限只跳过，勿抛错刷屏。
+
+### 0.5.5 与旧「勿清其他 portal」的关系
+
+- **日常登录/错入口丢弃 session**：仍只清当前 portal，避免误伤。
+- **互踢 / 强制下线 / 用户要求全退**：必须走 §0.5.2 全退，优先于旧注释里的「禁止跨 portal signOut」。
 
 ---
 
@@ -180,6 +233,15 @@ count = count_designer_unread_requests()
 - `role`：小写 `designer` \| `supplier` \| `admin`
 - `avatar`、`company`、`username`、`is_verified`、`status`
 
+### 2.7 推广专题 `topic_articles` / `topic_article_versions`
+
+- **身份表** `topic_articles`：`id` 稳定（详情路由 `/topics/:id`）、`supplier_id` → `profiles(id)`、`is_archived`。
+- **内容表** `topic_article_versions`：`title`、`subtitle`（≤50）、`content` jsonb（text/image 块，图片只存 `ossObjectKey`）、`status` ∈ `draft|pending_review|rejected|published|superseded`。
+- 同一篇文章：最多一个 `published`、最多一个 inflight（`draft` 或 `pending_review`）。
+- **状态只经 RPC**：`submit_topic_article_version`、`withdraw_topic_article_version`、`approve_topic_article_version`、`reject_topic_article_version`（必须写原因）、`archive_topic_article`。
+- RLS 交叉查询会无限递归 → 必须用 `topic_article_*` SECURITY DEFINER 助手，见 `BUG_SUMMARY.md` 推广专题节。
+- **禁止**把专题草稿写入 LocalStorage。
+
 ---
 
 ## 3. 前端状态枚举映射（防呆）
@@ -202,12 +264,14 @@ closed               → COMPLETED
 
 ## 4. Portal / Auth / RLS 约束
 
-1. **一邮箱可多身份，但 session 按 portal 分 storage**（`utils/appPortal.ts`、`services/supabaseClient.ts`）。
-2. Admin 入口：`isAdminPortal()`（host/path）；非 admin 不得挂载 Admin UI，且 **禁止乱 signOut 清掉其他 portal**。
-3. 材料商写材料：必须用 **supplier portal JWT**（详情页 URL 默认可能是 designer portal）。
-4. 设计师不能靠 RLS 直接 UPDATE `materials` 改标签 → 必须 RPC。
-5. UPDATE 需要配套 SELECT policy，否则静默 0 行——发货已用 security definer 规避。
-6. **禁止**用 `user_metadata` 做授权；角色以 `profiles.role` / `app_metadata` 为准。
+1. Session 按 portal 分 storageKey（`utils/appPortal.ts`、`services/supabaseClient.ts`）；**一邮箱一身份**（`profiles.role`）。
+2. Admin 入口：`isAdminPortal()`（host/path）；非 admin 不得挂载 Admin UI。
+3. **互踢 / 强制下线：全退所有 portal → `replace('/login')`**（见 §0.5.2）。日常错入口丢弃 session 仍可只清当前 portal。
+4. 材料商写材料：必须用 **supplier portal JWT**（详情页 URL 默认可能是 designer portal → 需 `setPortalOverride`）。
+5. 设计师不能靠 RLS 直接 UPDATE `materials` 改标签 → 必须 RPC。
+6. UPDATE 需要配套 SELECT policy，否则静默 0 行——发货已用 security definer 规避。
+7. **禁止**用 `user_metadata` 做授权；角色以 `profiles.role` / `app_metadata` 为准。
+8. **禁止** LocalStorage 存材料库/待审等业务列表（见 §0.5.4）。
 
 ---
 
@@ -216,13 +280,14 @@ closed               → COMPLETED
 | 场景 | 文件 |
 |------|------|
 | 总装 / 角标 / hydrate | `App.tsx` |
-| 运营后台菜单 | `components/AdminDashboard.tsx`（含 STORIES / MOOD_TAGS） |
+| 运营后台菜单 | `components/AdminDashboard.tsx`（含 STORIES / MOOD_TAGS / **TOPICS 推广专题审核**） |
 | 设计师申请记录 | `components/DesignerDashboard.tsx` |
 | 材料详情 / 情绪标签 UI | `components/MaterialDetail.tsx`、`MaterialMoodTagsSection.tsx` |
+| 推广专题 | `components/topics/*`、`services/topicArticleService.ts`、`services/topicArticleAdminService.ts` |
 | 小样询价服务 | `services/commerceRequestService.ts` |
 | 情绪标签服务 | `services/moodTagService.ts` |
 | 图片刷新 | `services/materialImageService.ts`、`assetReadUrlService.ts`、`api/get-read-url.ts` |
-| 路由 | `router/index.ts`、`utils/authRoutes.ts` |
+| 路由 | `router/index.ts`（`/topics/:id`、`/supplier/topics/new`、`/supplier/topics/:id/edit`）、`utils/authRoutes.ts` |
 
 **近期迁移（按时间）：**
 
@@ -234,6 +299,9 @@ closed               → COMPLETED
 - `20260804113948_designer_unread_and_avatar.sql`
 - `20260804115720_fix_mood_tags_fetch_and_vote.sql`
 - `20260805030000_heal_incomplete_material_humandna.sql`（远程名 `heal_incomplete_material_humandna`）
+- `20260820180000_topic_articles.sql`（远程名 `topic_articles_and_versions`）
+- `20260820193000_fix_topic_articles_rls_recursion.sql`（远程名 `fix_topic_articles_rls_recursion`）
+- `20260820200000_topic_article_subtitle.sql`（远程名 `topic_article_subtitle`）
 
 ---
 
@@ -248,6 +316,7 @@ closed               → COMPLETED
 | K5 | RAG / 知识图谱表格与同步 | 待查 | 提交说明「RAG表格待查」；024 迁移含 enqueue_kg_sync |
 | K6 | 设计师角标与 `quote_received` 通知表双轨 | 可接受 | 角标以 `is_read_by_designer` 为主 |
 | K7 | PowerShell 下 git HEREDOC「推送失败」误判 | **已写入规范** | 见 §9 / `BUG_SUMMARY.md` |
+| K8 | 推广专题保存草稿 RLS 无限递归 | **已修 2026-08-20** | 见 `BUG_SUMMARY.md` 推广专题节 |
 
 ---
 
@@ -262,6 +331,7 @@ closed               → COMPLETED
 7. 改 schema：**先** `supabase migration new`，再改 SQL，再 `apply_migration`（远程）并推 git。  
 8. **不要**在用户提「推送 GitHub」时跳过阅读本文 §9；**不要**用 bash HEREDOC 在 PowerShell 里 commit。  
 9. **不要**假设存在独立 Vercel 项目 `matterinsightadmin`；Admin = 同项目 alias。
+10. **不要**让材料商自把专题标为 published；首页 What's New 只读已审核版本。专题图片走 OSS `topics` 目录，禁止把预签名 URL 当真相。
 
 ---
 

@@ -306,7 +306,8 @@ export type UploadFolder =
   | 'project-photos'
   | 'verification'
   | 'local-materials'
-  | 'avatars';
+  | 'avatars'
+  | 'topics';
 
 /** 资产 AI 审核状态 */
 export type AssetReviewStatus = 'pending_review' | 'approved' | 'rejected';
