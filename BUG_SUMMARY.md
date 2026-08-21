@@ -5,6 +5,34 @@
 
 ---
 
+## 供应商入驻审核（2026-08-21）
+
+> **功能：** 材料商注册必须提交账号名、邮箱、密码、营业执照 → 进入 Admin「供应商认证」→ 通过后才能发布材料。  
+> 证件存 OSS `verification` 目录的 object key；Admin 用预签名 URL 查看原图。
+
+### 已修 Bug
+
+| # | 现象 | 原因 | 修复 |
+|---|------|------|------|
+| 1 | 新供应商入驻后 Admin 供应商认证为空 | `handle_new_user` 把所有人写成 `status=approved` + `is_verified=true`；队列还要求必须已有 `verification_doc_url` | 供应商默认 `pending` / `is_verified=false`；队列列出所有未认证供应商；无证件也可出现并提示「未上传」 |
+| 2 | 材料商头像常年红数字 3，卡片右上角红点，但没有新通知 | 头像把「待报价询价条数」当通知；卡片用材料 JSON 里写死的 `isAcknowledged=false` | 头像只计 `notifications` 未读；去掉卡片伪红点 |
+| 3 | Admin 点「查看证件」看不到文件 | 前端把过期预签名 URL 写入 `verification_doc_url`，且无缩略图 | 写入 OSS object key；认证列表缩略图 + 大图刷新可读 URL |
+
+### 流程
+
+1. 注册（材料商）：账号名 → 邮箱 → 密码 → 营业执照。  
+2. `profiles.status=pending`，`is_verified=false`；登录后只能看到「审核中」，不能发布材料。  
+3. Admin「供应商认证」看账号名 / 邮箱 / 执照；无执照不能点「通过认证」。  
+4. `approveSupplier` 写 `status=approved` + `is_verified=true`（非管理员无法改这两列）。
+
+### 防复发
+
+- **禁止** `handle_new_user` 再给供应商默认 approved/verified。  
+- **禁止**用询价/小样 `status=pending` 条数充当头像通知数字。  
+- 营业执照只存 object key，不要存预签名 URL。
+
+---
+
 ## 推广专题 What's New（2026-08-20）
 
 > **功能：** 材料商撰文 → 提交审核 → Admin 通过后出现在探索库黑色栏目；访客点击整栏进入 `/topics/:id`。  

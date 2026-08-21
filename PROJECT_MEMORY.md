@@ -2,7 +2,7 @@
 
 > **用法：** 每次在 Cursor 新开对话处理本项目时，先 `@PROJECT_MEMORY.md` 或粘贴本文要点。  
 > **硬规则：** 用户只要提到 **推送 GitHub / git push / 发到远端**，Agent **必须先读本文**（尤其 §9），再执行 commit/push。详见 `.cursor/rules/github-push-memory.mdc`。  
-> **更新日期：** 2026-08-20  
+> **更新日期：** 2026-08-21  
 > **仓库：** https://github.com/kunchenuk-coder/MatterInsight.git  
 > **当前 HEAD（参考）：** 推送后以 `git log -1` 为准 — 新增加推广专题功能  
 > **Supabase 项目：** `matterinsight` / `wwtfjxrfnkoixgptuemw`（ap-southeast-1）  
@@ -104,10 +104,10 @@ count = count_designer_unread_requests()
 | 材料商报价 | `inquiries.is_read_by_designer = false`，`quote_read_at = null` |
 | 设计师打开「申请记录」或报价详情 | RPC `mark_designer_requests_read()` → 全部标 `true`，角标清零 |
 
-**材料商角标：** pending 小样 + pending 询价 + `notifications.type='tag_added'` 未读。
+**材料商头像角标：** 仅 `notifications` 表未读（`inquiry` + `sample_request` + `tag_added`），**不要**用「status=pending 的询价/小样条数」充当通知数字。待处理工单仍在控制台订单/小样 Tab 展示。
 
 **迁移：** `20260804113948_designer_unread_and_avatar.sql`  
-**前端：** `App.tsx`（`designerUnreadRequests`）、`DesignerDashboard.tsx`（进 RECORDS 调 mark）
+**前端：** `App.tsx`（`designerUnreadRequests` / `dbUnreadCounts`）、`DesignerDashboard.tsx`（进 RECORDS 调 mark）
 
 ### 1.4 本地与线上环境差异
 
@@ -232,6 +232,7 @@ count = count_designer_unread_requests()
 
 - `role`：小写 `designer` \| `supplier` \| `admin`
 - `avatar`、`company`、`username`、`is_verified`、`status`
+- 材料商入驻：`status=pending` + `is_verified=false`，必须提交营业执照；Admin「供应商认证」看 `verification_doc_url`（OSS object key）。`handle_new_user` **禁止**把供应商写成 approved/verified。
 
 ### 2.7 推广专题 `topic_articles` / `topic_article_versions`
 
@@ -302,6 +303,7 @@ closed               → COMPLETED
 - `20260820180000_topic_articles.sql`（远程名 `topic_articles_and_versions`）
 - `20260820193000_fix_topic_articles_rls_recursion.sql`（远程名 `fix_topic_articles_rls_recursion`）
 - `20260820200000_topic_article_subtitle.sql`（远程名 `topic_article_subtitle`）
+- `20260821065029_supplier_verification_onboarding.sql`（远程名 `supplier_verification_onboarding`）
 
 ---
 
@@ -317,6 +319,7 @@ closed               → COMPLETED
 | K6 | 设计师角标与 `quote_received` 通知表双轨 | 可接受 | 角标以 `is_read_by_designer` 为主 |
 | K7 | PowerShell 下 git HEREDOC「推送失败」误判 | **已写入规范** | 见 §9 / `BUG_SUMMARY.md` |
 | K8 | 推广专题保存草稿 RLS 无限递归 | **已修 2026-08-20** | 见 `BUG_SUMMARY.md` 推广专题节 |
+| K9 | 供应商入驻未进审核队列 + 材料商头像假红点 | **已修 2026-08-21** | 见 `BUG_SUMMARY.md` 供应商入驻审核节 |
 
 ---
 

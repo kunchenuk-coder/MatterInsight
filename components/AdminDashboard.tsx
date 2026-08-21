@@ -30,6 +30,61 @@ import AdminTopicReviewPanel from './topics/AdminTopicReviewPanel';
 import { fetchPendingTopicReviews } from '../services/topicArticleAdminService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 
+const VerificationDocCell: React.FC<{
+  req: User;
+  onOpen: (req: User) => void;
+}> = ({ req, onOpen }) => {
+  const [thumb, setThumb] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    const stored = req.verificationDoc?.trim();
+    if (!stored) {
+      setThumb('');
+      return;
+    }
+    const key = parseOssObjectKey(stored);
+    if (!key && (stored.startsWith('data:') || stored.startsWith('http'))) {
+      setThumb(stored);
+      return;
+    }
+    void fetchReadUrlsForObjectKeys([key ?? stored]).then((map) => {
+      if (cancelled) return;
+      setThumb(resolveUrlFromMap(stored, key, map));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [req.verificationDoc]);
+
+  if (!req.verificationDoc) {
+    return <p className="text-xs text-gray-400">未上传营业执照</p>;
+  }
+
+  return (
+    <div className="flex items-center gap-3">
+      {thumb ? (
+        <button type="button" onClick={() => onOpen(req)} className="shrink-0">
+          <img
+            src={thumb}
+            alt=""
+            className="w-14 h-14 object-cover rounded-xl border border-gray-100"
+          />
+        </button>
+      ) : (
+        <div className="w-14 h-14 rounded-xl bg-gray-100 animate-pulse shrink-0" />
+      )}
+      <button
+        type="button"
+        onClick={() => onOpen(req)}
+        className="text-xs font-bold text-blue-600 hover:underline"
+      >
+        查看证件大图
+      </button>
+    </div>
+  );
+};
+
 interface AdminDashboardProps {
   user: User;
   library: Material[];
@@ -792,7 +847,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                  >
                    <div>
                      <p className="text-[10px] font-black uppercase text-gray-400 tracking-widest mb-1">供应商信息</p>
-                     <p className="font-bold text-base break-words">{req.company}</p>
+                     <p className="font-bold text-base break-words">{req.company || req.name || '—'}</p>
                      <p className="text-xs text-gray-400 break-all mt-1">{req.email}</p>
                    </div>
                    <div>
@@ -801,24 +856,15 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                    </div>
                    <div>
                      <p className="text-[10px] font-black uppercase text-gray-400 tracking-widest mb-1">认证文件</p>
-                     {req.verificationDoc ? (
-                       <button
-                         type="button"
-                         onClick={() => void openVerificationDoc(req)}
-                         className="text-xs font-bold text-blue-600 hover:underline"
-                       >
-                         查看证件大图
-                       </button>
-                     ) : (
-                       <p className="text-xs text-gray-400">未上传</p>
-                     )}
+                     <VerificationDocCell req={req} onOpen={openVerificationDoc} />
                    </div>
                    <div className="pt-2 border-t border-gray-100 space-y-2">
                      <p className="text-[10px] font-black uppercase text-gray-400 tracking-widest">管理操作</p>
                      <button
                        type="button"
+                       disabled={!req.verificationDoc}
                        onClick={() => onVerifySupplier(req.id)}
-                       className="w-full py-3 bg-black text-white rounded-xl text-xs font-bold active:scale-[0.98] transition-transform"
+                       className="w-full py-3 bg-black text-white rounded-xl text-xs font-bold active:scale-[0.98] transition-transform disabled:opacity-40 disabled:cursor-not-allowed"
                      >
                        通过认证
                      </button>
@@ -850,22 +896,18 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                  {verificationRequests.map(req => (
                    <tr key={req.id} className="border-b hover:bg-gray-50 transition-colors">
                      <td className="p-6">
-                        <p className="font-bold">{req.company}</p>
+                        <p className="font-bold">{req.company || req.name || '—'}</p>
                         <p className="text-[10px] text-gray-400">{req.email}</p>
                      </td>
-                     <td className="p-6 font-black">{req.registeredPhone}</td>
+                     <td className="p-6 font-black">{req.registeredPhone || '—'}</td>
                      <td className="p-6">
-                        <button 
-                          onClick={() => void openVerificationDoc(req)}
-                          className="text-xs font-bold text-blue-600 hover:underline"
-                        >
-                          查看证件大图
-                        </button>
+                        <VerificationDocCell req={req} onOpen={openVerificationDoc} />
                      </td>
                      <td className="p-6 text-right space-x-4">
                        <button 
+                         disabled={!req.verificationDoc}
                          onClick={() => onVerifySupplier(req.id)}
-                         className="text-xs font-bold bg-black text-white px-4 py-2 rounded-xl hover:scale-105 transition-transform"
+                         className="text-xs font-bold bg-black text-white px-4 py-2 rounded-xl hover:scale-105 transition-transform disabled:opacity-40 disabled:hover:scale-100 disabled:cursor-not-allowed"
                        >
                          通过认证
                        </button>

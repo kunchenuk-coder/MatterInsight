@@ -1141,7 +1141,7 @@ const App: React.FC = () => {
         savedBy: [],
         ratings: { aesthetic: 0, durable: 0, service: 0, cleanliness: 0, recommendation: 0 },
         pointsNeeded: { sample: 10, board: 20, export: 20 },
-        isAcknowledged: false
+        isAcknowledged: true
       };
       setLibrary(prev => [...prev, newMat]);
       setPendingMaterials(prev => prev.filter(p => p.id !== id));
@@ -1543,12 +1543,24 @@ const App: React.FC = () => {
     alert('供应商认证已通过！');
   };
 
-  const handleRequestVerification = async (phone: string, doc: string) => {
+  const handleRequestVerification = async (
+    payload: { phone?: string; doc: string; company?: string }
+  ) => {
     if (!user) return;
-    const updatedUser = { ...user, registeredPhone: phone, verificationDoc: doc };
+    const updatedUser = {
+      ...user,
+      company: payload.company?.trim() || user.company,
+      registeredPhone: payload.phone || user.registeredPhone,
+      verificationDoc: payload.doc,
+      accountStatus: 'pending' as const,
+    };
 
     if (isSupabaseConfigured()) {
-      const ok = await updateVerificationRequest(user.id, phone, doc);
+      const ok = await updateVerificationRequest(user.id, {
+        phone: payload.phone,
+        company: payload.company,
+        docUrl: payload.doc,
+      });
       if (!ok) {
         alert('认证信息提交失败，请检查网络后重试。');
         return;
@@ -1647,24 +1659,18 @@ const App: React.FC = () => {
     );
   }
 
-  // Header 红点：材料商 = pending 小样 + pending 询价 + tag_added；设计师 = 未读小样/询价 + story_featured
-  const pendingSampleBadge = user
-    ? sampleRequests.filter((s) => s.supplierId === user.id && s.status === 'PENDING').length
-    : 0;
-  const pendingInquiryBadge = user
-    ? inquiries.filter((inq) => inq.supplierId === user.id && inq.status === 'PENDING').length
-    : 0;
+  // Header 红点：只计 notifications 表未读；材料商不再把「待处理询价/小样」当成头像数字
   const totalNotifications = !user
     ? 0
     : isSupabaseConfigured()
       ? user.role === 'SUPPLIER'
-        ? pendingSampleBadge + pendingInquiryBadge + dbUnreadCounts.tag_added
+        ? dbUnreadCounts.inquiry + dbUnreadCounts.sample_request + dbUnreadCounts.tag_added
         : user.role === 'DESIGNER'
           ? designerUnreadRequests + dbUnreadCounts.story_featured
           : dbUnreadTotal
       : user.role === 'DESIGNER'
         ? designerUnreadRequests
-        : pendingSampleBadge + pendingInquiryBadge;
+        : 0;
 
   const handleAvatarClick = () => {
     if (!user) {

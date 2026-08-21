@@ -30,15 +30,21 @@ function clientFor(portal?: AppPortal) {
   return portal ? getSupabaseForPortal(portal) : getSupabase();
 }
 
-/** 统计当前用户未读通知（按 type 分组） */
+/** 统计当前用户未读通知（按 type 分组，必须限定 receiver_id） */
 export async function fetchUnreadNotificationCounts(
   portal?: AppPortal
 ): Promise<UnreadNotificationCounts> {
   if (!isSupabaseConfigured()) return { ...EMPTY_UNREAD_COUNTS };
 
-  const { data, error } = await clientFor(portal)
+  const client = clientFor(portal);
+  const { data: authData } = await client.auth.getUser();
+  const receiverId = authData.user?.id;
+  if (!receiverId) return { ...EMPTY_UNREAD_COUNTS };
+
+  const { data, error } = await client
     .from('notifications')
     .select('type')
+    .eq('receiver_id', receiverId)
     .eq('is_read', false);
 
   if (error) {

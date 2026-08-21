@@ -43,7 +43,7 @@ interface SupplierDashboardProps {
   onQuote: (inquiryId: string, price: string, notes: string) => void | Promise<void>;
   sampleRequests: SampleRequest[];
   onShipSample: (requestId: string) => void | Promise<void>;
-  onRequestVerification: (phone: string, doc: string) => void;
+  onRequestVerification: (payload: { phone?: string; doc: string; company?: string }) => void;
   onViewMaterialDetail: (material: Material) => void;
   /** notifications 表未读分类（真实红点） */
   unreadCounts?: UnreadNotificationCounts;
@@ -115,7 +115,12 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
   const [showQuoteForm, setShowQuoteForm] = useState<Inquiry | null>(null);
   const [quotePrice, setQuotePrice] = useState('');
   const [quoteNotes, setQuoteNotes] = useState('');
-  const [verificationForm, setVerificationForm] = useState({ phone: '', doc: '' });
+  const [verificationForm, setVerificationForm] = useState({
+    company: user.company || '',
+    phone: user.registeredPhone || '',
+    doc: '',
+    preview: '',
+  });
   /** 材料商产品单一数据源：仅云端 fetchSupplierMaterials，禁止与 LocalStorage 合并 */
   const [cloudPublished, setCloudPublished] = useState<Material[]>([]);
   const [cloudPending, setCloudPending] = useState<PendingMaterial[]>([]);
@@ -164,38 +169,50 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
 
   const handleVerificationSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!verificationForm.phone || !verificationForm.doc) {
-      alert('请填写手机号并上传证件');
+    if (!verificationForm.company.trim() || !verificationForm.doc) {
+      alert('请填写供应商账号名并上传营业执照');
       return;
     }
-    onRequestVerification(verificationForm.phone, verificationForm.doc);
+    onRequestVerification({
+      company: verificationForm.company.trim(),
+      phone: verificationForm.phone.trim(),
+      doc: verificationForm.doc,
+    });
   };
 
   if (!user.isVerified) {
-    const isAccountPending = user.accountStatus === 'pending';
-    const isWaiting = isAccountPending || !!user.registeredPhone;
+    const awaitingReview = Boolean(user.verificationDoc);
 
     return (
       <div className="max-w-2xl mx-auto py-20">
         <div className="bg-white p-12 rounded-[50px] shadow-2xl border border-gray-100 text-center">
-          <div className="text-6xl mb-8">{isWaiting ? '⏳' : '🛡️'}</div>
+          <div className="text-6xl mb-8">{awaitingReview ? '⏳' : '🛡️'}</div>
           <h2 className="text-3xl font-black mb-4 tracking-tighter">
-            {isAccountPending ? '账号审核中' : isWaiting ? '认证审核中' : '供应商入驻认证'}
+            {awaitingReview ? '账号审核中' : '供应商入驻认证'}
           </h2>
           <p className="text-gray-500 mb-10 leading-relaxed">
-            {isAccountPending
-              ? '您的材料商账号正在平台审核中，审核通过后方可进入材料商后台、发布材料与管理订单。'
-              : isWaiting 
-              ? '感谢您的申请！我们的工作人员正在核实您的资料，请耐心等待。认证通过后，您将收到系统通知并解锁完整功能。'
-              : '为了维护物见平台的专业性与材料真实性，新入驻供应商需完成身份认证。认证通过后，您即可发布材料并接收设计师询价。'}
+            {awaitingReview
+              ? '您的材料商入驻资料已提交，平台审核通过后方可进入材料商后台、发布材料与管理订单。'
+              : '为了维护物见平台的专业性与材料真实性，新入驻供应商需提交账号名、注册邮箱对应资料及营业执照。认证通过后，您即可发布材料并接收设计师询价。'}
           </p>
           
-          {!isWaiting ? (
+          {!awaitingReview ? (
             <form onSubmit={handleVerificationSubmit} autoComplete="off" className="space-y-6 text-left">
               <div>
-                <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">联系手机号</label>
+                <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">供应商账号名</label>
                 <input 
                   required
+                  type="text"
+                  autoComplete="organization"
+                  value={verificationForm.company}
+                  onChange={e => setVerificationForm({...verificationForm, company: e.target.value})}
+                  placeholder="请输入公司或品牌名称"
+                  className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">联系手机号（选填）</label>
+                <input 
                   type="tel"
                   autoComplete="off"
                   value={verificationForm.phone}
@@ -205,14 +222,14 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                 />
               </div>
               <div>
-                <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">营业执照 / 身份证明</label>
+                <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">营业执照</label>
                 <div className="relative aspect-video bg-gray-50 rounded-2xl border-2 border-dashed border-gray-200 flex flex-col items-center justify-center cursor-pointer hover:bg-gray-100 transition-colors overflow-hidden">
-                  {verificationForm.doc ? (
-                    <img src={verificationForm.doc} className="w-full h-full object-cover" alt="doc" />
+                  {verificationForm.preview ? (
+                    <img src={verificationForm.preview} className="w-full h-full object-cover" alt="doc" />
                   ) : (
                     <>
                       <span className="text-3xl mb-2">📄</span>
-                      <span className="text-xs text-gray-400 font-bold">点击上传证件照片</span>
+                      <span className="text-xs text-gray-400 font-bold">点击上传营业执照照片</span>
                     </>
                   )}
                   <input 
@@ -223,8 +240,12 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                       const file = e.target.files?.[0];
                       if (file) {
                         try {
-                          const { url } = await uploadImage(file, 'verification');
-                          setVerificationForm({...verificationForm, doc: url});
+                          const { url, objectKey } = await uploadImage(file, 'verification');
+                          setVerificationForm({
+                            ...verificationForm,
+                            doc: objectKey || url,
+                            preview: url,
+                          });
                         } catch (err) {
                           console.error('Doc compression error:', err);
                           alert('证件处理失败，请重试');
@@ -245,7 +266,7 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
           ) : (
             <div className="pt-4">
               <div className="inline-block px-8 py-4 bg-gray-50 rounded-2xl text-gray-400 font-bold text-sm">
-                申请已于 {new Date().toLocaleDateString()} 提交
+                申请已提交，请等待平台审核
               </div>
             </div>
           )}
@@ -649,9 +670,6 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                 <div className={`absolute top-4 left-4 z-10 text-black text-[10px] font-black px-3 py-1 rounded-full shadow-lg ${product.status === MaterialStatus.REJECTED ? 'bg-red-400' : 'bg-yellow-400'}`}>
                   {product.status}
                 </div>
-                {product.isAcknowledged === false && (
-                  <div className="absolute top-4 right-4 w-3 h-3 bg-red-500 rounded-full border-2 border-white z-20"></div>
-                )}
                 <img src={product.image} className={`w-full aspect-video object-cover rounded-2xl mb-4 ${product.status === MaterialStatus.REJECTED ? '' : 'grayscale-[50%]'}`} />
                 <h4 className="font-bold mb-1">{pickLocale(product.name)}</h4>
                 <div className="flex justify-between items-center">
@@ -696,9 +714,6 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                 }}
                 className="bg-gray-50 rounded-3xl p-4 border border-gray-100 group relative cursor-pointer hover:border-black/20 hover:shadow-md transition-all"
               >
-                {product.isAcknowledged === false && (
-                  <div className="absolute top-4 right-4 w-3 h-3 bg-red-500 rounded-full border-2 border-white z-20"></div>
-                )}
                 <img src={product.image} className="w-full aspect-video object-cover rounded-2xl mb-4" />
                 <h4 className="font-bold mb-1">{pickLocale(product.name)}</h4>
                 <div className="flex justify-between items-center">

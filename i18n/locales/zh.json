@@ -66,7 +66,13 @@
     "configMissing": "生产环境配置缺失，禁止访问",
     "roleHintLogin": "同一邮箱只能拥有一个身份；如需使用{{role}}身份，请更换邮箱重新注册。",
     "roleHintRegister": "请更换其他邮箱后再创建{{role}}账号。",
-    "emailTaken": "请更换其他邮箱后再试。"
+    "emailTaken": "请更换其他邮箱后再试。",
+    "companyName": "供应商账号名",
+    "companyNamePlaceholder": "请输入公司或品牌名称",
+    "businessLicense": "营业执照",
+    "licenseHint": "点击上传营业执照照片",
+    "companyRequired": "请填写供应商账号名",
+    "licenseRequired": "请上传营业执照"
   },
   "resetPassword": {
     "subtitle": "设置新密码",

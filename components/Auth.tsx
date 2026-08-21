@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { UserRole } from '../types';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 import { requestPasswordReset, signIn, signUp, isRegisteredRoleError } from '../services/authService';
+import { updateVerificationRequest } from '../services/profileService';
+import { uploadImage } from '../services/uploadService';
 import { portalFromUserRole, setPortalOverride } from '../utils/appPortal';
 import AuthShell from './AuthShell';
 
@@ -54,6 +56,9 @@ const Auth: React.FC<AuthProps> = ({
   const [role, setRole] = useState<UserRole>(adminPortal ? 'ADMIN' : 'DESIGNER');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [companyName, setCompanyName] = useState('');
+  const [licenseFile, setLicenseFile] = useState<File | null>(null);
+  const [licensePreview, setLicensePreview] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
@@ -85,6 +90,8 @@ const Auth: React.FC<AuthProps> = ({
     setMode(next);
     setError('');
     setInfo('');
+    setLicenseFile(null);
+    setLicensePreview('');
   };
 
   const showForgotLink = mode === 'login';
@@ -150,6 +157,46 @@ const Auth: React.FC<AuthProps> = ({
 
       if (role === 'ADMIN') {
         setError(t('auth.adminNoSelfRegister'));
+        return;
+      }
+
+      if (role === 'SUPPLIER') {
+        const company = companyName.trim();
+        if (!company) {
+          setError(t('auth.companyRequired'));
+          return;
+        }
+        if (!licenseFile) {
+          setError(t('auth.licenseRequired'));
+          return;
+        }
+        const result = await signUp(trimmedEmail, trimmedPassword, role, { company });
+        if (result.ok === false) {
+          setError(result.error);
+          return;
+        }
+        try {
+          const uploaded = await uploadImage(licenseFile, 'verification');
+          const doc = uploaded.objectKey || uploaded.url;
+          const saved = await updateVerificationRequest(result.user.id, {
+            company,
+            docUrl: doc,
+          });
+          onAuthSuccess({
+            ...result.user,
+            company,
+            verificationDoc: saved ? doc : result.user.verificationDoc,
+            isVerified: false,
+            accountStatus: 'pending',
+          });
+        } catch {
+          onAuthSuccess({
+            ...result.user,
+            company,
+            isVerified: false,
+            accountStatus: 'pending',
+          });
+        }
         return;
       }
 
@@ -277,6 +324,22 @@ const Auth: React.FC<AuthProps> = ({
       )}
 
       <form onSubmit={handleSubmit} className="space-y-4">
+        {mode === 'register' && role === 'SUPPLIER' && (
+          <div>
+            <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">
+              {t('auth.companyName')}
+            </label>
+            <input
+              required
+              type="text"
+              value={companyName}
+              onChange={(e) => setCompanyName(e.target.value)}
+              placeholder={t('auth.companyNamePlaceholder')}
+              autoComplete="organization"
+              className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all"
+            />
+          </div>
+        )}
         <div>
           <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">
             {t('auth.email')}
@@ -316,6 +379,36 @@ const Auth: React.FC<AuthProps> = ({
             className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all"
           />
         </div>
+
+        {mode === 'register' && role === 'SUPPLIER' && (
+          <div>
+            <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">
+              {t('auth.businessLicense')}
+            </label>
+            <div className="relative aspect-video bg-gray-50 rounded-2xl border-2 border-dashed border-gray-200 flex flex-col items-center justify-center overflow-hidden">
+              {licensePreview ? (
+                <img src={licensePreview} className="w-full h-full object-cover" alt="" />
+              ) : (
+                <>
+                  <span className="text-3xl mb-2">📄</span>
+                  <span className="text-xs text-gray-400 font-bold">{t('auth.licenseHint')}</span>
+                </>
+              )}
+              <input
+                required
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  const file = e.target.files?.[0] ?? null;
+                  if (licensePreview) URL.revokeObjectURL(licensePreview);
+                  setLicenseFile(file);
+                  setLicensePreview(file ? URL.createObjectURL(file) : '');
+                }}
+                className="absolute inset-0 opacity-0 cursor-pointer"
+              />
+            </div>
+          </div>
+        )}
 
         {error && (
           <div

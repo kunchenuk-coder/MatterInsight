@@ -28,7 +28,7 @@ export type DesignerProfileUpdate = {
 };
 
 const PROFILE_COLUMNS =
-  'id, email, role, username, avatar, bio, company, registered_phone, verification_doc_url, status, is_verified, points, current_points';
+  'id, email, role, username, avatar, bio, company, registered_phone, verification_doc_url, status, is_verified, points, current_points, created_at';
 
 export function userRoleToDbRole(role: UserRole): DbRole {
   return role.toLowerCase() as DbRole;
@@ -95,20 +95,24 @@ export async function fetchProfileByEmail(email: string): Promise<ProfileRow | n
 export async function insertProfileOnSignup(
   userId: string,
   email: string,
-  role: UserRole
+  role: UserRole,
+  extras?: { company?: string }
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!isSupabaseConfigured()) {
     return { ok: false, error: '服务未配置' };
   }
 
+  const dbRole = userRoleToDbRole(role);
+  const company = extras?.company?.trim();
   const { error } = await getSupabase()
     .from('profiles')
     .upsert(
       {
         id: userId,
         email,
-        role: userRoleToDbRole(role),
+        role: dbRole,
         username: email.split('@')[0] || 'user',
+        ...(company ? { company } : {}),
       },
       { onConflict: 'id' }
     );
@@ -119,22 +123,27 @@ export async function insertProfileOnSignup(
   return { ok: false, error: '注册失败，请稍后重试' };
 }
 
-/** 更新供应商认证信息（扩展字段未配置时静默跳过） */
+/** 更新供应商认证资料（账号名 / 电话 / 营业执照 object key）。不含 status / is_verified。 */
 export async function updateVerificationRequest(
   userId: string,
-  phone: string,
-  docUrl: string
+  payload: { phone?: string; company?: string; docUrl?: string }
 ): Promise<boolean> {
   if (!isSupabaseConfigured()) return false;
 
+  const row: Record<string, unknown> = {};
+  if (payload.phone !== undefined) row.registered_phone = payload.phone.trim() || null;
+  if (payload.company !== undefined) row.company = payload.company.trim() || null;
+  if (payload.docUrl !== undefined) row.verification_doc_url = payload.docUrl.trim() || null;
+  if (Object.keys(row).length === 0) return true;
+
   const { error } = await getSupabase()
     .from('profiles')
-    .update({
-      registered_phone: phone,
-      verification_doc_url: docUrl,
-    })
+    .update(row)
     .eq('id', userId);
 
+  if (error) {
+    console.error('[profileService] updateVerificationRequest:', error.message);
+  }
   return !error;
 }
 
@@ -154,13 +163,18 @@ export async function approveSupplier(userId: string): Promise<boolean> {
 export function profileRowToVerificationUser(row: ProfileRow): User {
   const dbRole = normalizeDbRole(row.role) ?? 'supplier';
   const status = (row.status as User['accountStatus']) ?? 'pending';
+  const accountName =
+    row.company?.trim() ||
+    row.username?.trim() ||
+    row.email.split('@')[0];
   return {
     id: row.id,
     email: row.email,
-    name: row.email.split('@')[0],
+    name: accountName,
     role: 'SUPPLIER',
     dbRole,
     points: 0,
+    company: row.company?.trim() || accountName,
     isVerified: row.is_verified === true,
     accountStatus: status,
     registeredPhone: row.registered_phone ?? undefined,
@@ -217,7 +231,7 @@ export async function updateDesignerProfile(
   return { ok: true };
 }
 
-/** 待审核供应商：已提交证件且尚未通过认证（排除 is_verified / status=approved） */
+/** 待审核供应商：未通过认证即进入运营队列（证件可后补，不能因为缺文件而消失） */
 export async function fetchVerificationRequestsForAdmin(): Promise<User[]> {
   if (!isSupabaseConfigured()) return [];
 
@@ -225,9 +239,8 @@ export async function fetchVerificationRequestsForAdmin(): Promise<User[]> {
     .from('profiles')
     .select(PROFILE_COLUMNS)
     .eq('role', 'supplier')
-    .eq('is_verified', false)
-    .not('verification_doc_url', 'is', null)
-    .order('email', { ascending: true });
+    .or('is_verified.eq.false,is_verified.is.null')
+    .order('created_at', { ascending: false });
 
   if (error) {
     console.error('[profileService] fetchVerificationRequestsForAdmin:', error.message);
@@ -235,7 +248,7 @@ export async function fetchVerificationRequestsForAdmin(): Promise<User[]> {
   }
 
   return (data ?? [])
-    .filter((row) => row.is_verified !== true && row.status !== 'approved')
+    .filter((row) => row.is_verified !== true)
     .map((row) => profileRowToVerificationUser(row as ProfileRow));
 }
 

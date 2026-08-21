@@ -66,7 +66,13 @@
     "configMissing": "Production config missing — access denied",
     "roleHintLogin": "Each email can only have one role. To use the {{role}} role, register with a different email.",
     "roleHintRegister": "Please use another email to create a {{role}} account.",
-    "emailTaken": "Please try a different email."
+    "emailTaken": "Please try a different email.",
+    "companyName": "Supplier account name",
+    "companyNamePlaceholder": "Company or brand name",
+    "businessLicense": "Business license",
+    "licenseHint": "Click to upload your business license",
+    "companyRequired": "Please enter a supplier account name",
+    "licenseRequired": "Please upload a business license"
   },
   "resetPassword": {
     "subtitle": "Set new password",

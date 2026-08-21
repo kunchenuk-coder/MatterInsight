@@ -141,7 +141,8 @@ async function discardPortalSession(portal: AppPortal): Promise<void> {
 export async function signUp(
   email: string,
   password: string,
-  role: UserRole
+  role: UserRole,
+  extras?: { company?: string }
 ): Promise<AuthResult> {
   if (role === 'ADMIN') {
     return { ok: false, error: '管理员账号请联系平台开通' };
@@ -177,7 +178,9 @@ export async function signUp(
     return { ok: false, error: '注册成功，请查收邮箱验证链接后再登录' };
   }
 
-  const profileResult = await insertProfileOnSignup(data.user.id, email, role);
+  const profileResult = await insertProfileOnSignup(data.user.id, email, role, {
+    company: extras?.company,
+  });
   if (profileResult.ok === false) {
     await discardPortalSession(portal);
     return { ok: false, error: profileResult.error };
