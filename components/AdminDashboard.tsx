@@ -2,8 +2,24 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { User, Material, Category, PendingMaterial, SampleRequest, MaterialStatus } from '../types';
+import type {
+  InspirationStory,
+  MaterialApplicationCase,
+  MaterialEvaluations,
+  MaterialHumanDna,
+  MaterialMoodTag,
+} from '../types/materialDetail';
 import { fetchReadUrlsForObjectKeys, resolveUrlFromMap } from '../services/assetReadUrlService';
 import { enrichMaterialsWithFreshImages } from '../services/materialImageService';
+import {
+  readHumanDnaFromMaterial,
+  updatePublishedMaterialForAdmin,
+} from '../services/materialService';
+import {
+  adminSyncMaterialInspirationStories,
+  fetchMaterialInspirationStories,
+} from '../services/inspirationStoryService';
+import { uploadImage } from '../services/uploadService';
 import { parseOssObjectKey } from '../utils/parseOssObjectKey';
 import { pickLocale } from '../utils/localizedText';
 import {
@@ -112,6 +128,45 @@ type AdminSubTab =
   | 'TOPICS'
   | 'PROJECT_ADOPTIONS';
 
+const ADMIN_EVAL_KEYS: Array<{ key: keyof MaterialEvaluations; label: string }> = [
+  { key: 'aesthetics', label: '美学' },
+  { key: 'durability', label: '耐用' },
+  { key: 'service', label: '服务' },
+  { key: 'cleanliness', label: '清洁' },
+  { key: 'recommendation', label: '推荐' },
+];
+
+const MAX_ADMIN_APPLICATION_CASES = 10;
+
+function buildAdminEditDna(material: Material): MaterialHumanDna {
+  const embedded = readHumanDnaFromMaterial(material);
+  const fromPhotos: MaterialApplicationCase[] = (material.projectPhotos ?? [])
+    .filter(Boolean)
+    .map((url, i) => ({
+      id: `project_photo_${i}`,
+      url,
+      is_for_training: false,
+    }));
+  return {
+    ai_trained_status: Boolean(embedded?.ai_trained_status),
+    application_cases:
+      embedded?.application_cases && embedded.application_cases.length > 0
+        ? embedded.application_cases
+        : fromPhotos,
+    evaluations: {
+      durability: embedded?.evaluations?.durability ?? material.ratings?.durable ?? 4,
+      service: embedded?.evaluations?.service ?? material.ratings?.service ?? 4,
+      aesthetics: embedded?.evaluations?.aesthetics ?? material.ratings?.aesthetic ?? 4,
+      cleanliness: embedded?.evaluations?.cleanliness ?? material.ratings?.cleanliness ?? 4,
+      recommendation:
+        embedded?.evaluations?.recommendation ?? material.ratings?.recommendation ?? 4,
+    },
+    mood_tags: embedded?.mood_tags ?? [],
+    inspiration_stories: embedded?.inspiration_stories ?? [],
+    evaluation_vote_count: embedded?.evaluation_vote_count ?? 0,
+  };
+}
+
 const AdminDashboard: React.FC<AdminDashboardProps> = ({ 
   user, library, setLibrary, pendingList, onApprove, onReject, sampleRequests, onShipSample,
   verificationRequests, onVerifySupplier
@@ -120,6 +175,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [subTab, setSubTab] = useState<AdminSubTab>('DESIGNERS');
   const [selectedCategory, setSelectedCategory] = useState<Category | 'ALL'>('ALL');
   const [editingMaterial, setEditingMaterial] = useState<Material | null>(null);
+  const [editingDna, setEditingDna] = useState<MaterialHumanDna | null>(null);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [isUploadingCase, setIsUploadingCase] = useState(false);
+  const previousStoryIdsRef = React.useRef<string[]>([]);
   const [viewingSupplierProducts, setViewingSupplierProducts] = useState<string | null>(null);
   const [viewingPendingMaterial, setViewingPendingMaterial] = useState<PendingMaterial | null>(null);
   const [viewingVerificationDoc, setViewingVerificationDoc] = useState<User | null>(null);
@@ -407,12 +466,88 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       ? m.quoteCount
       : 0;
 
-  const handleUpdateMaterial = (e: React.FormEvent) => {
+  const closeEditModal = () => {
+    setEditingMaterial(null);
+    setEditingDna(null);
+    previousStoryIdsRef.current = [];
+  };
+
+  const openEditMaterial = (m: Material) => {
+    const dna = buildAdminEditDna(m);
+    setEditingMaterial(m);
+    setEditingDna(dna);
+    previousStoryIdsRef.current = dna.inspiration_stories.map((s) => s.id);
+  };
+
+  useEffect(() => {
+    if (!editingMaterial) return;
+    const materialId = editingMaterial.id;
+    let cancelled = false;
+    void fetchMaterialInspirationStories(materialId, 'admin').then((rows) => {
+      if (cancelled || rows.length === 0) return;
+      setEditingDna((prev) => (prev ? { ...prev, inspiration_stories: rows } : prev));
+      previousStoryIdsRef.current = rows.map((s) => s.id);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [editingMaterial?.id]);
+
+  const handleUpdateMaterial = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (editingMaterial) {
-      setLibrary(prev => prev.map(m => m.id === editingMaterial.id ? editingMaterial : m));
-      setEditingMaterial(null);
+    if (!editingMaterial || !editingDna || isSavingEdit) return;
+    setIsSavingEdit(true);
+    try {
+      const syncedStories = await adminSyncMaterialInspirationStories({
+        materialId: editingMaterial.id,
+        adminUserId: user.id,
+        stories: editingDna.inspiration_stories,
+        previousIds: previousStoryIdsRef.current,
+      });
+      const nextDna: MaterialHumanDna = {
+        ...editingDna,
+        inspiration_stories: syncedStories,
+        mood_tags: editingDna.mood_tags.filter((tag) => pickLocale(tag.tag, 'zh').trim()),
+      };
+      const caseUrls = nextDna.application_cases.map((c) => c.url).filter(Boolean);
+      const nextMaterial: Material = {
+        ...editingMaterial,
+        projectPhotos: caseUrls,
+        catalogPdfUrl: editingMaterial.catalogPdfUrl || undefined,
+        catalogPdfObjectKey: editingMaterial.catalogPdfObjectKey || undefined,
+        catalogPdfName: editingMaterial.catalogPdfName || undefined,
+        sampleNote: editingMaterial.sampleNote?.trim() || undefined,
+        pointsNeeded: {
+          sample: editingMaterial.pointsNeeded?.sample ?? 10,
+          board: editingMaterial.pointsNeeded?.board ?? 20,
+          export: editingMaterial.pointsNeeded?.export ?? 20,
+        },
+        ratings: {
+          aesthetic: nextDna.evaluations.aesthetics,
+          durable: nextDna.evaluations.durability,
+          service: nextDna.evaluations.service,
+          cleanliness: nextDna.evaluations.cleanliness,
+          recommendation: nextDna.evaluations.recommendation,
+        },
+      };
+      const result = await updatePublishedMaterialForAdmin(
+        nextMaterial.id,
+        nextMaterial,
+        nextDna
+      );
+      if (!result.ok) {
+        alert(`保存失败：${result.error || '请稍后重试'}`);
+        return;
+      }
+      setLibrary((prev) =>
+        prev.map((m) => (m.id === nextMaterial.id ? { ...nextMaterial, humanDna: nextDna } as Material : m))
+      );
+      closeEditModal();
       alert('材料信息已更新');
+    } catch (err) {
+      alert(`保存失败：${err instanceof Error ? err.message : '请稍后重试'}`);
+    } finally {
+      setIsSavingEdit(false);
     }
   };
 
@@ -608,7 +743,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                      <td className="p-6 font-black text-purple-500">{materialQuoteCount(m)}</td>
                      <td className="p-6 text-right space-x-4">
                        <button 
-                         onClick={() => setEditingMaterial(m)}
+                         onClick={() => openEditMaterial(m)}
                          className="text-xs font-bold text-blue-600 hover:underline"
                        >
                          编辑信息
@@ -1330,12 +1465,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       )}
 
       {/* Edit Material Modal */}
-      {editingMaterial && (
+      {editingMaterial && editingDna && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-[150] flex items-center justify-center p-6">
-          <div className="bg-white w-full max-w-2xl p-10 rounded-[40px] shadow-2xl overflow-y-auto max-h-[90vh]">
+          <div className="bg-white w-full max-w-4xl p-10 rounded-[40px] shadow-2xl overflow-y-auto max-h-[90vh]">
             <div className="flex justify-between items-center mb-8">
               <h3 className="text-2xl font-black">编辑材料信息</h3>
-              <button onClick={() => setEditingMaterial(null)} className="text-gray-400 hover:text-black text-xl">✕</button>
+              <button type="button" onClick={closeEditModal} className="text-gray-400 hover:text-black text-xl">✕</button>
             </div>
             <form onSubmit={handleUpdateMaterial} className="space-y-6">
               <div className="grid grid-cols-2 gap-6">
@@ -1415,9 +1550,390 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   className="w-full p-4 bg-gray-50 rounded-2xl border-none outline-none focus:ring-2 focus:ring-black h-24 resize-none"
                 ></textarea>
               </div>
+
+              <div>
+                <label className="block text-[10px] font-black uppercase text-gray-400 mb-2">
+                  应用案例 ({editingDna.application_cases.length}/{MAX_ADMIN_APPLICATION_CASES})
+                </label>
+                <div className="grid grid-cols-4 gap-2">
+                  {editingDna.application_cases.map((item, i) => (
+                    <div key={item.id} className="aspect-square rounded-xl bg-gray-100 overflow-hidden relative group">
+                      <img src={item.url} className="w-full h-full object-cover" alt="" />
+                      <label className="absolute bottom-1 left-1 bg-black/60 text-white text-[9px] font-bold px-1.5 py-0.5 rounded cursor-pointer">
+                        替换
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          disabled={isUploadingCase}
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = '';
+                            if (!file) return;
+                            setIsUploadingCase(true);
+                            try {
+                              const uploaded = await uploadImage(file, 'project-photos');
+                              setEditingDna((prev) => {
+                                if (!prev) return prev;
+                                const next = [...prev.application_cases];
+                                next[i] = { ...next[i], url: uploaded.url };
+                                return { ...prev, application_cases: next };
+                              });
+                            } catch {
+                              alert('图片上传失败');
+                            } finally {
+                              setIsUploadingCase(false);
+                            }
+                          }}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingDna((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  application_cases: prev.application_cases.filter((_, idx) => idx !== i),
+                                }
+                              : prev
+                          )
+                        }
+                        className="absolute top-1 right-1 bg-black/50 text-white w-5 h-5 rounded-full text-[10px]"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                  {editingDna.application_cases.length < MAX_ADMIN_APPLICATION_CASES && (
+                    <label className="relative aspect-square rounded-xl border-2 border-dashed border-gray-200 flex flex-col items-center justify-center cursor-pointer hover:bg-gray-100 text-xs font-bold text-gray-400">
+                      {isUploadingCase ? '上传中' : '+'}
+                      <input
+                        type="file"
+                        multiple
+                        accept="image/*"
+                        className="absolute inset-0 opacity-0 cursor-pointer"
+                        disabled={isUploadingCase}
+                        onChange={async (e) => {
+                          const files = e.target.files;
+                          e.target.value = '';
+                          if (!files?.length) return;
+                          const remaining = MAX_ADMIN_APPLICATION_CASES - editingDna.application_cases.length;
+                          const toUpload = Array.from(files).slice(0, remaining);
+                          setIsUploadingCase(true);
+                          try {
+                            const uploaded: MaterialApplicationCase[] = [];
+                            for (const file of toUpload) {
+                              const result = await uploadImage(file, 'project-photos');
+                              uploaded.push({
+                                id: `case_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                                url: result.url,
+                                is_for_training: false,
+                              });
+                            }
+                            setEditingDna((prev) =>
+                              prev
+                                ? { ...prev, application_cases: [...prev.application_cases, ...uploaded] }
+                                : prev
+                            );
+                          } catch {
+                            alert('图片上传失败');
+                          } finally {
+                            setIsUploadingCase(false);
+                          }
+                        }}
+                      />
+                    </label>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <div className="flex justify-between items-center mb-2">
+                  <label className="block text-[10px] font-black uppercase text-gray-400">灵感故事</label>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setEditingDna((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              inspiration_stories: [
+                                ...prev.inspiration_stories,
+                                {
+                                  id: `story_admin_${Date.now()}`,
+                                  author_id: user.id,
+                                  text: '',
+                                  status: 'approved',
+                                } satisfies InspirationStory,
+                              ],
+                            }
+                          : prev
+                      )
+                    }
+                    className="text-[10px] font-bold text-blue-600"
+                  >
+                    + 新增
+                  </button>
+                </div>
+                <div className="space-y-3">
+                  {editingDna.inspiration_stories.length === 0 && (
+                    <p className="text-xs text-gray-400">暂无灵感故事</p>
+                  )}
+                  {editingDna.inspiration_stories.map((story, i) => (
+                    <div key={story.id} className="relative">
+                      <textarea
+                        value={story.text}
+                        onChange={(e) =>
+                          setEditingDna((prev) => {
+                            if (!prev) return prev;
+                            const next = [...prev.inspiration_stories];
+                            next[i] = { ...next[i], text: e.target.value };
+                            return { ...prev, inspiration_stories: next };
+                          })
+                        }
+                        className="w-full p-4 bg-gray-50 rounded-2xl border-none outline-none focus:ring-2 focus:ring-black h-24 resize-none pr-10"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingDna((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  inspiration_stories: prev.inspiration_stories.filter((_, idx) => idx !== i),
+                                }
+                              : prev
+                          )
+                        }
+                        className="absolute top-2 right-2 text-gray-400 hover:text-red-500 text-sm"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-black uppercase text-gray-400 mb-3">综合评估</label>
+                <div className="space-y-3">
+                  {ADMIN_EVAL_KEYS.map(({ key, label }) => (
+                    <div key={key} className="flex items-center gap-3">
+                      <span className="w-12 text-xs font-bold text-gray-500 shrink-0">{label}</span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={5}
+                        step={0.1}
+                        value={editingDna.evaluations[key]}
+                        onChange={(e) =>
+                          setEditingDna((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  evaluations: {
+                                    ...prev.evaluations,
+                                    [key]: Number(e.target.value),
+                                  },
+                                }
+                              : prev
+                          )
+                        }
+                        className="flex-1"
+                      />
+                      <span className="w-8 text-xs font-black tabular-nums">
+                        {editingDna.evaluations[key].toFixed(1)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <div className="flex justify-between items-center mb-2">
+                  <label className="block text-[10px] font-black uppercase text-gray-400">情绪标签</label>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setEditingDna((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              mood_tags: [
+                                ...prev.mood_tags,
+                                { tag: '', count: 0, is_brand_official: false } satisfies MaterialMoodTag,
+                              ],
+                            }
+                          : prev
+                      )
+                    }
+                    className="text-[10px] font-bold text-blue-600"
+                  >
+                    + 新增
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  {editingDna.mood_tags.map((tag, i) => (
+                    <div key={`${pickLocale(tag.tag, 'zh')}-${i}`} className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={pickLocale(tag.tag, 'zh')}
+                        onChange={(e) =>
+                          setEditingDna((prev) => {
+                            if (!prev) return prev;
+                            const next = [...prev.mood_tags];
+                            next[i] = { ...next[i], tag: e.target.value };
+                            return { ...prev, mood_tags: next };
+                          })
+                        }
+                        className="flex-1 p-3 bg-gray-50 rounded-xl border-none outline-none focus:ring-2 focus:ring-black text-sm"
+                        placeholder="标签"
+                      />
+                      <input
+                        type="number"
+                        min={0}
+                        value={tag.count}
+                        onChange={(e) =>
+                          setEditingDna((prev) => {
+                            if (!prev) return prev;
+                            const next = [...prev.mood_tags];
+                            next[i] = { ...next[i], count: Number(e.target.value) || 0 };
+                            return { ...prev, mood_tags: next };
+                          })
+                        }
+                        className="w-20 p-3 bg-gray-50 rounded-xl border-none outline-none focus:ring-2 focus:ring-black text-sm"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingDna((prev) =>
+                            prev
+                              ? { ...prev, mood_tags: prev.mood_tags.filter((_, idx) => idx !== i) }
+                              : prev
+                          )
+                        }
+                        className="text-gray-400 hover:text-red-500"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-black uppercase text-gray-400 mb-2">色板圆点颜色</label>
+                {editingMaterial.variants.length === 0 ? (
+                  <p className="text-xs text-gray-400">暂无花色</p>
+                ) : (
+                  <div className="flex flex-wrap gap-3">
+                    {editingMaterial.variants.map((v, i) => (
+                      <div key={v.id} className="flex items-center gap-2 bg-gray-50 rounded-xl px-3 py-2">
+                        <input
+                          type="color"
+                          value={v.colorCode || '#cccccc'}
+                          onChange={(e) => {
+                            const next = [...editingMaterial.variants];
+                            next[i] = { ...next[i], colorCode: e.target.value };
+                            setEditingMaterial({ ...editingMaterial, variants: next });
+                          }}
+                          className="w-8 h-8 rounded-full border-0 cursor-pointer bg-transparent"
+                        />
+                        <span className="text-[10px] font-bold text-gray-500">
+                          {pickLocale(v.name, 'zh') || v.colorCode}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-black uppercase text-gray-400 mb-2">下载小样</label>
+                <div className="space-y-3">
+                  <label className="flex items-center gap-2 text-sm font-bold text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={editingMaterial.sampleAvailable !== false}
+                      onChange={(e) =>
+                        setEditingMaterial({ ...editingMaterial, sampleAvailable: e.target.checked })
+                      }
+                    />
+                    开放申领小样
+                  </label>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[10px] font-black uppercase text-gray-400 mb-2">所需积分</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={editingMaterial.pointsNeeded?.sample ?? 10}
+                        onChange={(e) =>
+                          setEditingMaterial({
+                            ...editingMaterial,
+                            pointsNeeded: {
+                              ...editingMaterial.pointsNeeded,
+                              sample: Number(e.target.value) || 0,
+                            },
+                          })
+                        }
+                        className="w-full p-4 bg-gray-50 rounded-2xl border-none outline-none focus:ring-2 focus:ring-black"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black uppercase text-gray-400 mb-2">按钮 / 说明文案</label>
+                      <input
+                        type="text"
+                        value={editingMaterial.sampleNote ?? ''}
+                        onChange={(e) =>
+                          setEditingMaterial({ ...editingMaterial, sampleNote: e.target.value })
+                        }
+                        placeholder="留空则使用默认「申领小样」"
+                        className="w-full p-4 bg-gray-50 rounded-2xl border-none outline-none focus:ring-2 focus:ring-black"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-black uppercase text-gray-400 mb-2">产品画册（PDF）</label>
+                {editingMaterial.catalogPdfUrl ? (
+                  <div className="flex items-center gap-3 bg-gray-50 rounded-2xl p-4">
+                    <a
+                      href={editingMaterial.catalogPdfUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex-1 text-sm font-bold text-blue-600 truncate"
+                    >
+                      {editingMaterial.catalogPdfName || '产品画册.pdf'}
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEditingMaterial({
+                          ...editingMaterial,
+                          catalogPdfUrl: '',
+                          catalogPdfObjectKey: '',
+                          catalogPdfName: '',
+                        })
+                      }
+                      className="text-xs font-bold text-red-500"
+                    >
+                      删除画册
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-xs text-gray-400">未上传产品画册</p>
+                )}
+              </div>
+
               <div className="flex gap-4 pt-4">
-                <button type="button" onClick={() => setEditingMaterial(null)} className="flex-1 py-4 bg-gray-100 rounded-2xl font-bold">取消</button>
-                <button type="submit" className="flex-1 py-4 bg-black text-white rounded-2xl font-bold">保存更改</button>
+                <button type="button" onClick={closeEditModal} className="flex-1 py-4 bg-gray-100 rounded-2xl font-bold">取消</button>
+                <button type="submit" disabled={isSavingEdit || isUploadingCase} className="flex-1 py-4 bg-black text-white rounded-2xl font-bold disabled:opacity-50">
+                  {isSavingEdit ? '保存中…' : '保存更改'}
+                </button>
               </div>
             </form>
           </div>

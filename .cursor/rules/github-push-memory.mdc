@@ -17,3 +17,18 @@ alwaysApply: true
 4. **Git 推送成功 ≠ Admin 线上已更新**：`matterinsightadmin.vercel.app` 是手动 alias，需额外执行  
    `vercel alias set matterinsight.vercel.app matterinsightadmin.vercel.app`
 5. 细节与历史踩坑见 `BUG_SUMMARY.md` →「Git / GitHub 推送」与 `PROJECT_MEMORY.md`。
+
+## Git 提交与部署强制规范（2026-09-14 起 · 每次必执行）
+
+完整条文：`BUG_SUMMARY.md` →「Git 提交与部署强制规范」；`PROJECT_MEMORY.md` §9。
+
+每次 commit / push 顺序不得跳过：
+
+1. `git add .`（必须包含新建组件 / service / 工具函数；不要入库 `.env*`、`supabase/.temp/`、登录页无关改动、无关草稿）
+2. `git status`：本次功能文件须全部在 `Changes to be committed`；Untracked 新文件 = 遗漏，必须重新 add
+3. `npm run build`：失败则禁止 commit / push
+4. `git commit -m "简明中文说明"`（禁止 HEREDOC）→ `git log --oneline -5`
+5. `git push -u origin HEAD` → `git status` / `git log -1` 确认与 `origin/main` 一致
+6. 确认 Vercel Production **Ready** 后：`npx vercel alias set matterinsight.vercel.app matterinsightadmin.vercel.app`
+
+禁止只提交部分功能文件（2026-09-14 漏交 `projectAdoptionService` 三文件导致线上构建失败）。

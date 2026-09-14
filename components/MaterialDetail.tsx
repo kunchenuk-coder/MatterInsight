@@ -811,6 +811,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
 
             {!supplierViewer && (
               <div className="flex flex-col sm:flex-row gap-3 sm:gap-4">
+                {material.sampleAvailable !== false && (
                 <button 
                   onClick={() => {
                     if (isPublicView) {
@@ -821,8 +822,11 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
                   }}
                   className="flex-1 bg-black text-white py-4 rounded-2xl font-bold hover:bg-gray-800 transition-colors shadow-lg shadow-black/10"
                 >
-                  {t('materialDetail.requestSample', { points: material.pointsNeeded.sample })}
+                  {material.sampleNote?.trim()
+                    ? material.sampleNote
+                    : t('materialDetail.requestSample', { points: material.pointsNeeded.sample })}
                 </button>
+                )}
                 <button 
                   onClick={() => {
                     if (isPublicView) {

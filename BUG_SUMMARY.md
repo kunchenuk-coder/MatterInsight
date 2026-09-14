@@ -136,6 +136,91 @@ PowerShell 不用 HEREDOC → 先 status/log 确认 push → Admin 域名再 ali
 
 ---
 
+## Git 提交与部署强制规范（2026-09-14 起 · 每次 push 必执行）
+
+> Agent / 开发者每次 `git commit` / `git push` **必须按下列顺序执行**。跳过任一步视为违规。  
+> Windows PowerShell：**禁止** bash HEREDOC（`git commit -m "$(cat <<'EOF' ...)"`），改用 `git commit -m "简明中文说明"`。
+
+### 一、提交前必做流程
+
+**第 1 步：暂存本次功能的全部改动（含新建文件）**
+
+```powershell
+git add .
+```
+
+必须确保所有新创建的文件（新组件、新 service、新工具函数、新 i18n、新 migration 等）都进入暂存区。  
+例外（不得入库）：`.env*`、密钥、`supabase/.temp/`、登录/注册页无关改动、明确无关的本地草稿。
+
+**第 2 步：检查暂存区状态**
+
+```powershell
+git status
+```
+
+必须确认本次功能涉及的文件都在 `Changes to be committed` 下。若新文件仍在 `Untracked files` 或 `Changes not staged for commit`，说明 `git add` 遗漏，必须重新执行第 1 步。
+
+**第 3 步：本地构建验证（commit 之前）**
+
+```powershell
+npm run build
+```
+
+本地 `build` 失败则 **禁止** commit 和 push。
+
+**第 4 步：提交并核对 commit 内容**
+
+```powershell
+git commit -m "简明中文说明"
+git status
+git log --oneline -5
+```
+
+确认最新 commit 包含本次所有改动文件，没有遗漏。
+
+**第 5 步：推送并核对远端**
+
+```powershell
+git push -u origin HEAD
+git status
+git log -1
+```
+
+期望：`main` 与 `origin/main` 一致。
+
+### 二、禁止行为
+
+- 禁止跳过 `git add .`（或等价的完整暂存）直接 `git commit`
+- 禁止跳过 `git status` 检查直接提交
+- 禁止在本地 `npm run build` 失败时强行 push
+- 禁止只提交部分功能文件（例如只提交修改过的文件，遗漏新创建的组件 / service）
+
+### 三、Admin 后台域名同步
+
+每次向 `main` 推送并触发 Vercel 部署后，必须确认两个域名都指向**最新成功的 Production 部署**：
+
+| 站点 | 地址 | 更新方式 |
+|------|------|----------|
+| 主站 | https://matterinsight.vercel.app | Vercel 跟 `main` 自动部署（须 **Ready**，Error 不算上线） |
+| Admin | https://matterinsightadmin.vercel.app | **手动 alias**，推送不会自动改 |
+
+若 Admin 仍是旧版，执行：
+
+```powershell
+npx vercel alias set matterinsight.vercel.app matterinsightadmin.vercel.app
+```
+
+口诀：`git add 含新文件 → status 核对暂存 → npm run build → commit/push → 确认 Vercel Ready → alias Admin`
+
+### 四、历史踩坑记录（2026-09-14）
+
+`MaterialDetail.tsx` 引用了 `projectAdoptionService` 相关的 3 个新文件，但 commit 时未把新建文件加入暂存，导致这 3 个文件未进仓库。本地能跑（文件在硬盘上），Vercel 拉取后找不到文件，**生产构建失败**，线上继续服务 24 天前的旧包。
+
+- **根因：** 跳过了完整 `git add` 与 `git status` 检查。
+- **解决：** 补交 `d3c1812`，重新部署成功，并同步 Admin alias。
+
+---
+
 ## 线上图片裂图 / 白块消失（2026-08-05）
 
 | # | 现象 | 原因 | 修复 |

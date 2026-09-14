@@ -396,3 +396,37 @@ export async function republishMaterial(
   }
   return { ok: true };
 }
+
+/** 管理员更新已上架材料（含 humanDna），不改审核状态 */
+export async function updatePublishedMaterialForAdmin(
+  materialId: string,
+  material: Material,
+  humanDna: MaterialHumanDna
+): Promise<MaterialPersistResult> {
+  const payload = buildMaterialDataPayload(material, humanDna);
+
+  if (!isSupabaseConfigured()) {
+    console.info('[materialService] updatePublishedMaterialForAdmin (local mock)', {
+      material_id: materialId,
+      data: payload,
+    });
+    return { ok: true };
+  }
+
+  const { error } = await getSupabaseForPortal('admin')
+    .from('materials')
+    .update({
+      data: payload,
+      official_mood_tags: extractOfficialMoodTags(humanDna),
+      official_mood_tags_i18n: extractOfficialMoodTagsI18n(humanDna),
+      updated_at: new Date().toISOString(),
+      oss_object_key: material.ossObjectKey ?? parseOssObjectKey(material.image),
+    })
+    .eq('id', materialId);
+
+  if (error) {
+    console.error('[materialService] updatePublishedMaterialForAdmin:', error.message);
+    return { ok: false, error: error.message };
+  }
+  return { ok: true };
+}

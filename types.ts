@@ -129,6 +129,10 @@ export interface Material {
     board: number;
     export: number;
   };
+  /** 是否开放申领小样；缺省为 true */
+  sampleAvailable?: boolean;
+  /** 运营配置的小样说明 / 按钮文案 */
+  sampleNote?: string;
   // Analytics（对应 materials.view_count / favorite_count / quote_count）
   clicks: number;
   saves: number;

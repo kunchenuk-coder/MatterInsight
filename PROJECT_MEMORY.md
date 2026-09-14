@@ -397,6 +397,28 @@ vercel alias set matterinsight.vercel.app matterinsightadmin.vercel.app
 
 口诀：`PowerShell 不用 HEREDOC → status/log 确认 push → Admin 再 alias 一次`。
 
+### Git 提交与部署强制规范（2026-09-14 起 · 每次 push 必执行）
+
+完整条文与踩坑见 `BUG_SUMMARY.md` →「Git 提交与部署强制规范」。**不得跳过。**
+
+```powershell
+git add .
+git status
+npm run build
+git commit -m "简明中文说明"
+git log --oneline -5
+git push -u origin HEAD
+git status
+git log -1
+npx vercel alias set matterinsight.vercel.app matterinsightadmin.vercel.app
+```
+
+- `git add .` 必须把**本次功能新建文件**（组件 / service / 工具函数）全部暂存；再用 `git status` 确认没有留在 Untracked。
+- 例外不得入库：`.env*`、`supabase/.temp/`、登录/注册页无关改动、明确无关草稿。
+- `npm run build` 失败则禁止 commit / push。
+- 禁止只提交修改过的文件、漏掉新建文件（2026-09-14：`projectAdoptionService` 三文件未 add → Vercel 构建失败，补交 `d3c1812`）。
+- 主站 `https://matterinsight.vercel.app` 跟 `main` 自动部署（须 Ready）；Admin `https://matterinsightadmin.vercel.app` 每次 push 后必须手动 alias。
+
 ---
 
 *本文是会话记忆摘要，细节以迁移文件与服务层代码为准。有冲突时：以已 apply 的远程 DB + `main` 最新提交为准。*

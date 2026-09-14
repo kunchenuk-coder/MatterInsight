@@ -10,6 +10,9 @@ import { toMaterialDetail } from '../data/materialDetailMock';
 import type { AppPortal } from '../utils/appPortal';
 import i18n from '../i18n';
 
+const STORY_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export interface SubmitInspirationStoryPayload {
   material_id: string;
   story_text: string;
@@ -210,6 +213,82 @@ export async function submitInspirationStory(
     text: payload.story_text,
     status,
   };
+}
+
+/** Admin: sync inspiration story texts / deletes / inserts for a material. */
+export async function adminSyncMaterialInspirationStories(options: {
+  materialId: string;
+  adminUserId: string;
+  stories: InspirationStory[];
+  previousIds: string[];
+}): Promise<InspirationStory[]> {
+  const { materialId, adminUserId, stories, previousIds } = options;
+  if (!isSupabaseConfigured()) return stories;
+
+  const client = getSupabaseForPortal('admin');
+  const keepIds = new Set(stories.map((s) => s.id));
+
+  for (const id of previousIds) {
+    if (keepIds.has(id) || !STORY_UUID_RE.test(id)) continue;
+    const { error } = await client.from('inspiration_stories').delete().eq('id', id);
+    if (error) {
+      console.error('[inspirationStoryService] admin delete story:', error.message);
+    }
+  }
+
+  const next: InspirationStory[] = [];
+  for (const story of stories) {
+    const text = story.text.trim();
+    if (!text) continue;
+
+    if (STORY_UUID_RE.test(story.id)) {
+      const { error } = await client
+        .from('inspiration_stories')
+        .update({ content: text, updated_at: new Date().toISOString() })
+        .eq('id', story.id);
+      if (error) {
+        console.error('[inspirationStoryService] admin update story:', error.message);
+      }
+      next.push({ ...story, text });
+      continue;
+    }
+
+    const { data, error } = await client
+      .from('inspiration_stories')
+      .insert({
+        material_id: materialId,
+        designer_id: adminUserId || story.author_id,
+        content: text,
+        status: 'published',
+      })
+      .select('id, designer_id, content, status, title, review_notes, created_at')
+      .maybeSingle();
+
+    if (error || !data) {
+      console.error(
+        '[inspirationStoryService] admin insert story:',
+        error?.message ?? 'no row'
+      );
+      next.push({ ...story, text });
+      continue;
+    }
+
+    next.push(
+      rowToInspirationStory(
+        data as {
+          id: string;
+          designer_id: string;
+          content: string;
+          status: string;
+          title?: string | null;
+          review_notes?: string | null;
+          created_at?: string | null;
+        }
+      )
+    );
+  }
+
+  return next;
 }
 
 /** Resolve display label for story author (mock until profiles join). */

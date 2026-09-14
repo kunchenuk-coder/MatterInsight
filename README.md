@@ -39,3 +39,20 @@ View in AI Studio: https://ai.studio/apps/518c9e55-123c-4135-80e5-678f818ff401
 3. Run: `npm run dev`
 
 更多防呆与推送规范见 `PROJECT_MEMORY.md`、`BUG_SUMMARY.md`。
+
+---
+
+## Git 提交与部署强制规范（每次 push 必执行）
+
+完整条文与 2026-09-14 踩坑见 `BUG_SUMMARY.md` →「Git 提交与部署强制规范」。摘要：
+
+1. `git add .`（含新建组件 / service；不要入库 `.env*`、`supabase/.temp/`、登录页无关改动）
+2. `git status`：本次文件必须都在 `Changes to be committed`，禁止遗漏 Untracked 新文件
+3. **`npm run build` 通过后才能 commit / push**
+4. `git commit -m "简明中文说明"`（PowerShell 禁止 bash HEREDOC）→ `git log --oneline -5` 核对
+5. `git push -u origin HEAD`，确认 `main` 与 `origin/main` 一致
+6. 确认 Vercel Production 为 **Ready** 后，同步 Admin：  
+   `npx vercel alias set matterinsight.vercel.app matterinsightadmin.vercel.app`
+
+禁止：跳过 add/status、build 失败仍 push、只提交改动文件却漏掉新建文件。  
+主站 https://matterinsight.vercel.app ≠ Admin https://matterinsightadmin.vercel.app（后者须手动 alias）。
