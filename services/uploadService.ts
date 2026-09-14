@@ -3,7 +3,7 @@ import {
   fallbackLocalDataUrl,
   uploadViaPresignedUrl,
 } from './presignedUploadService';
-import type { AssetReviewStatus, UploadFolder } from '../types';
+import type { AssetReviewStatus, AssetType, UploadFolder } from '../types';
 
 export type { UploadFolder };
 
@@ -27,13 +27,55 @@ export async function uploadImage(
   file: File,
   folder: UploadFolder = 'materials'
 ): Promise<UploadResult> {
+  return uploadAsset(file, folder, 'image');
+}
+
+const PDF_MAX_BYTES = 50 * 1024 * 1024;
+const VIDEO_MAX_BYTES = 100 * 1024 * 1024;
+
+export function validateCatalogPdf(file: File): string | null {
+  const isPdf =
+    file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+  if (!isPdf) return '仅支持 PDF 文件';
+  if (file.size > PDF_MAX_BYTES) return 'PDF 不能超过 50MB';
+  return null;
+}
+
+export function validateInstallationFile(
+  file: File
+): { ok: true; assetType: 'image' | 'video' } | { ok: false; error: string } {
+  if (file.type.startsWith('image/')) {
+    return { ok: true, assetType: 'image' };
+  }
+  const isVideo =
+    file.type.startsWith('video/') ||
+    /\.(mp4|webm|mov|m4v)$/i.test(file.name);
+  if (isVideo) {
+    if (file.size > VIDEO_MAX_BYTES) return { ok: false, error: '视频不能超过 100MB' };
+    return { ok: true, assetType: 'video' };
+  }
+  return { ok: false, error: '仅支持图片或视频' };
+}
+
+/**
+ * 上传任意允许的资产类型到 OSS（PDF / 视频不走图片压缩）。
+ */
+export async function uploadAsset(
+  file: File,
+  folder: UploadFolder = 'materials',
+  assetType: AssetType = 'image'
+): Promise<UploadResult> {
   if (!isSupabaseConfigured()) {
-    const dataUrl = await fallbackLocalDataUrl(file);
+    if (assetType === 'image') {
+      const dataUrl = await fallbackLocalDataUrl(file);
+      return { url: dataUrl, isRemote: false };
+    }
+    const dataUrl = URL.createObjectURL(file);
     return { url: dataUrl, isRemote: false };
   }
 
   try {
-    const result = await uploadViaPresignedUrl(file, folder, 'image');
+    const result = await uploadViaPresignedUrl(file, folder, assetType);
     return {
       url: result.url,
       isRemote: result.isRemote,
@@ -41,9 +83,12 @@ export async function uploadImage(
       reviewStatus: result.reviewStatus,
     };
   } catch (err) {
-    console.warn('[uploadService] presigned upload failed, falling back to base64:', err);
-    const dataUrl = await fallbackLocalDataUrl(file);
-    return { url: dataUrl, isRemote: false };
+    console.warn('[uploadService] presigned upload failed, falling back:', err);
+    if (assetType === 'image') {
+      const dataUrl = await fallbackLocalDataUrl(file);
+      return { url: dataUrl, isRemote: false };
+    }
+    throw err;
   }
 }
 

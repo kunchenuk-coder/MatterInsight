@@ -66,8 +66,10 @@ export async function recordPointsConsume(options: {
     return { ok: false, error: error.message };
   }
 
-  const balanceAfter = Number(
-    (data as { balance_after?: number } | null)?.balance_after ?? 0
-  );
+  const payload = data as { balance_after?: number } | null;
+  const balanceAfter = Number(payload?.balance_after);
+  if (!Number.isFinite(balanceAfter)) {
+    return { ok: false, error: 'invalid balance_after' };
+  }
   return { ok: true, balanceAfter };
 }

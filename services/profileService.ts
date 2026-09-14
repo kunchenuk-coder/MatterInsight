@@ -1,4 +1,5 @@
 import type { User, UserRole, DbRole } from '../types';
+import { PLATFORM_BUYER_EMAIL, UNLIMITED_POINTS_BALANCE } from '../types';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 import { resolveDesignerDisplayName } from '../utils/profileDisplayName';
 
@@ -18,6 +19,7 @@ export interface ProfileRow {
   is_verified?: boolean | null;
   points?: number | null;
   current_points?: number | null;
+  is_unlimited_points?: boolean | null;
 }
 
 export type DesignerProfileUpdate = {
@@ -28,7 +30,7 @@ export type DesignerProfileUpdate = {
 };
 
 const PROFILE_COLUMNS =
-  'id, email, role, username, avatar, bio, company, registered_phone, verification_doc_url, status, is_verified, points, current_points, created_at';
+  'id, email, role, username, avatar, bio, company, registered_phone, verification_doc_url, status, is_verified, points, current_points, is_unlimited_points, created_at';
 
 export function userRoleToDbRole(role: UserRole): DbRole {
   return role.toLowerCase() as DbRole;
@@ -49,6 +51,17 @@ export function dbRoleToUserRole(role: string): UserRole {
   if (dbRole === 'supplier') return 'SUPPLIER';
   if (dbRole === 'admin') return 'ADMIN';
   throw new Error(`未知角色: ${role}`);
+}
+
+export function profileHasUnlimitedPoints(profile: Pick<ProfileRow, 'email' | 'is_unlimited_points'>): boolean {
+  if (profile.is_unlimited_points === true) return true;
+  return (profile.email ?? '').trim().toLowerCase() === PLATFORM_BUYER_EMAIL.toLowerCase();
+}
+
+export function resolveProfilePoints(profile: ProfileRow, fallbackPoints: number): number {
+  if (profileHasUnlimitedPoints(profile)) return UNLIMITED_POINTS_BALANCE;
+  const dbPoints = Number(profile.current_points ?? profile.points);
+  return Number.isFinite(dbPoints) ? dbPoints : fallbackPoints;
 }
 
 /** 按 auth uid 读取 profiles（id = auth.users.id） */
@@ -85,11 +98,20 @@ export async function fetchProfileByEmail(email: string): Promise<ProfileRow | n
   return data as ProfileRow | null;
 }
 
+/** 新用户注册时写入 profiles 的初始积分（Supabase 真实余额，非 UI fallback） */
+export function initialPointsForDbRole(dbRole: DbRole): number {
+  if (dbRole === 'designer') return 1000;
+  if (dbRole === 'supplier') return 100;
+  return 0;
+}
+
 /**
  * 注册成功后写入身份行。
  *
  * 使用 upsert(onConflict: id)：若数据库触发器 handle_new_user 已自动插入
  * 一条默认 designer 行，这里用用户实际选择的 role 覆盖它，确保身份正确。
+ * 同时写入角色对应的初始积分（Designer 1000 / Supplier 100），因为触发器与
+ * 列默认值目前均为 0，否则前端会读到真实余额 0。
  * 该行 id = 当前刚注册的 auth.uid，RLS 的 insert/update own 策略均允许。
  */
 export async function insertProfileOnSignup(
@@ -104,6 +126,7 @@ export async function insertProfileOnSignup(
 
   const dbRole = userRoleToDbRole(role);
   const company = extras?.company?.trim();
+  const initialPoints = initialPointsForDbRole(dbRole);
   const { error } = await getSupabase()
     .from('profiles')
     .upsert(
@@ -112,6 +135,8 @@ export async function insertProfileOnSignup(
         email,
         role: dbRole,
         username: email.split('@')[0] || 'user',
+        points: initialPoints,
+        current_points: initialPoints,
         ...(company ? { company } : {}),
       },
       { onConflict: 'id' }

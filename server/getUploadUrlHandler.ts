@@ -13,6 +13,8 @@ const ALLOWED_CATEGORIES = new Set([
   'local-materials',
   'avatars',
   'topics',
+  'catalogs',
+  'installation',
   'general',
 ]);
 
@@ -73,7 +75,14 @@ function parseParams(
     url.searchParams.get('assetType') ??
     'image';
 
-  const assetType: AssetType = assetTypeRaw === 'model_3d' ? 'model_3d' : 'image';
+  const assetType: AssetType =
+    assetTypeRaw === 'model_3d'
+      ? 'model_3d'
+      : assetTypeRaw === 'document'
+        ? 'document'
+        : assetTypeRaw === 'video'
+          ? 'video'
+          : 'image';
 
   if (!fileName.trim()) return null;
   return { fileName, contentType, category, assetType };

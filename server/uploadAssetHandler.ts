@@ -10,7 +10,7 @@ import { verifySupabaseToken } from './verifySupabaseToken.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 30 * 1024 * 1024 },
+  limits: { fileSize: 100 * 1024 * 1024 },
 });
 
 type MulterRequest = IncomingMessage & {
@@ -25,6 +25,8 @@ const ALLOWED_CATEGORIES = new Set([
   'local-materials',
   'avatars',
   'topics',
+  'catalogs',
+  'installation',
   'general',
 ]);
 
@@ -41,8 +43,15 @@ function resolveParams(req: IncomingMessage): {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const categoryRaw = url.searchParams.get('category') ?? 'general';
   const category = ALLOWED_CATEGORIES.has(categoryRaw) ? categoryRaw : 'general';
+  const assetTypeRaw = url.searchParams.get('assetType');
   const assetType: AssetType =
-    url.searchParams.get('assetType') === 'model_3d' ? 'model_3d' : 'image';
+    assetTypeRaw === 'model_3d'
+      ? 'model_3d'
+      : assetTypeRaw === 'document'
+        ? 'document'
+        : assetTypeRaw === 'video'
+          ? 'video'
+          : 'image';
   return { category, assetType };
 }
 

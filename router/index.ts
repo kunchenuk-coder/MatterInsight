@@ -53,6 +53,7 @@ export type AppPageRoute =
   | { type: 'dashboard' }
   | { type: 'my-page' }
   | { type: 'designer'; id: string }
+  | { type: 'supplier'; id: string }
   | { type: 'material'; id: string }
   | { type: 'topic'; id: string }
   | { type: 'supplier-topic-editor'; articleId: string | null }
@@ -82,11 +83,17 @@ export function getDesignerPublicPath(id: string): string {
   return `/designer/${id}`;
 }
 
+export function getSupplierPublicPath(id: string): string {
+  return `/supplier/${id}`;
+}
+
 export function parseAppPageRoute(pathname = window.location.pathname): AppPageRoute {
   const normalized = pathname.toLowerCase().replace(/\/+$/, '') || '/';
   if (normalized === MY_PAGE_PATH) return { type: 'my-page' };
   const designerMatch = normalized.match(/\/designer\/([0-9a-f-]{36})$/i);
   if (designerMatch) return { type: 'designer', id: designerMatch[1] };
+  const supplierMatch = normalized.match(/^\/supplier\/([0-9a-f-]{36})$/i);
+  if (supplierMatch) return { type: 'supplier', id: supplierMatch[1] };
   const materialId = parseMaterialId(pathname);
   if (materialId) return { type: 'material', id: materialId };
   const topicId = parseTopicId(pathname);
@@ -205,6 +212,7 @@ export function guardDashboardRoute(userDbRole: string | null | undefined): bool
   if (
     pageRoute.type === 'my-page' ||
     pageRoute.type === 'designer' ||
+    pageRoute.type === 'supplier' ||
     pageRoute.type === 'material' ||
     pageRoute.type === 'topic'
   ) {

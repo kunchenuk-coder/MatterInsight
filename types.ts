@@ -11,6 +11,10 @@ export interface PointTransaction {
   description: string;
 }
 
+/** 平台材料买手账号：固定展示余额，扣点 RPC 不减余额 */
+export const PLATFORM_BUYER_EMAIL = '13701344071@163.com';
+export const UNLIMITED_POINTS_BALANCE = 9999;
+
 export interface User {
   id: string;
   email: string;
@@ -18,6 +22,8 @@ export interface User {
   /** 数据库 profiles.role（designer / supplier / admin），登录跳转以此为准 */
   dbRole: DbRole;
   points: number;
+  /** true 时前端保持 UNLIMITED_POINTS_BALANCE，扣点不降余额 */
+  isUnlimitedPoints?: boolean;
   name: string;
   company?: string;
   transactions?: PointTransaction[];
@@ -79,6 +85,13 @@ export interface MaterialVariant {
   name: LocalizedText;
 }
 
+/** 发布页「安装方式」：图片或视频，OSS URL / object key */
+export interface InstallationMediaItem {
+  kind: 'image' | 'video';
+  url: string;
+  objectKey?: string;
+}
+
 export interface Material {
   id: string;
   /** string (legacy) or { zh, en } */
@@ -96,6 +109,12 @@ export interface Material {
   projectPhotos: string[];
   supplierId: string;
   supplierNotes?: LocalizedText;
+  /** 材料商产品画册 PDF（OSS 可读 URL） */
+  catalogPdfUrl?: string;
+  catalogPdfObjectKey?: string;
+  catalogPdfName?: string;
+  /** 安装方式：多图或视频 */
+  installationMedia?: InstallationMediaItem[];
   status: MaterialStatus;
   auditLog: AuditLog[];
   ratings: {
@@ -140,6 +159,10 @@ export interface PendingMaterial {
   projectPhotos: string[];
   supplierId: string;
   supplierNotes?: LocalizedText;
+  catalogPdfUrl?: string;
+  catalogPdfObjectKey?: string;
+  catalogPdfName?: string;
+  installationMedia?: InstallationMediaItem[];
   submitterId: string;
   submitDate: string;
   status: MaterialStatus;
@@ -307,13 +330,15 @@ export type UploadFolder =
   | 'verification'
   | 'local-materials'
   | 'avatars'
-  | 'topics';
+  | 'topics'
+  | 'catalogs'
+  | 'installation';
 
 /** 资产 AI 审核状态 */
 export type AssetReviewStatus = 'pending_review' | 'approved' | 'rejected';
 
 /** 资产类型：图片 / 3D 模型 */
-export type AssetType = 'image' | 'model_3d';
+export type AssetType = 'image' | 'model_3d' | 'document' | 'video';
 export interface UserAsset {
   id: string;
   userId: string;
@@ -358,4 +383,13 @@ export interface DesignerMoodboardSummary {
   coverImage: string | null;
   materialCount: number;
   publishedAt?: string;
+}
+
+/** 材料商公开主页 */
+export interface SupplierProfile {
+  id: string;
+  avatar: string | null;
+  username: string;
+  company: string | null;
+  bio: string | null;
 }

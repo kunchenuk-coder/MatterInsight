@@ -14,8 +14,14 @@ function materialImageSources(m: Material | PendingMaterial): {
     m.image,
     ...(m.variants ?? []).map((v) => v.imageUrl),
     ...(m.projectPhotos ?? []),
+    m.catalogPdfUrl ?? '',
+    ...(m.installationMedia ?? []).map((item) => item.url),
+  ].filter(Boolean);
+  const keys = [
+    m.ossObjectKey ?? null,
+    m.catalogPdfObjectKey ?? null,
+    ...(m.installationMedia ?? []).map((item) => item.objectKey ?? null),
   ];
-  const keys = [m.ossObjectKey ?? null];
   return { urls, keys };
 }
 
@@ -41,6 +47,22 @@ function applyUrlMapToMaterial<T extends Material | PendingMaterial>(
     projectPhotos: (material.projectPhotos ?? []).map((p) =>
       resolveUrlFromMap(p, parseOssObjectKey(p), urlMap)
     ),
+    catalogPdfUrl: material.catalogPdfUrl
+      ? resolveUrlFromMap(
+          material.catalogPdfUrl,
+          parseOssObjectKey(material.catalogPdfObjectKey) ??
+            parseOssObjectKey(material.catalogPdfUrl),
+          urlMap
+        )
+      : material.catalogPdfUrl,
+    installationMedia: (material.installationMedia ?? []).map((item) => ({
+      ...item,
+      url: resolveUrlFromMap(
+        item.url,
+        parseOssObjectKey(item.objectKey) ?? parseOssObjectKey(item.url),
+        urlMap
+      ),
+    })),
   };
 }
 

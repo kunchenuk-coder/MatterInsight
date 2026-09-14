@@ -1,12 +1,12 @@
 
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { User, Category, PendingMaterial, Material, Inquiry, SampleRequest, MaterialStatus, AuditLog, MaterialVariant } from '../types';
+import { User, Category, PendingMaterial, Material, Inquiry, SampleRequest, MaterialStatus, AuditLog, MaterialVariant, type InstallationMediaItem } from '../types';
 import { CATEGORIES } from '../constants';
 import MaterialVoiceFillButton from './MaterialVoiceFillButton';
 import PublishMaterialMobilePanel from './PublishMaterialMobilePanel';
 import AiBilingualFillButton, { type PublishFormState } from './AiBilingualFillButton';
-import { uploadImage } from '../services/uploadService';
+import { uploadAsset, uploadImage, validateCatalogPdf, validateInstallationFile } from '../services/uploadService';
 import {
   EMPTY_UNREAD_COUNTS,
   markNotificationsRead,
@@ -67,6 +67,10 @@ const EMPTY_PUBLISH_FORM = (brand: string): PublishFormState => ({
   image: '',
   variants: [],
   projectPhotos: [],
+  catalogPdfUrl: '',
+  catalogPdfObjectKey: '',
+  catalogPdfName: '',
+  installationMedia: [],
 });
 
 const UPLOAD_FOLDER: Record<'image' | 'projectPhotos' | 'variants', 'materials' | 'project-photos' | 'variants'> = {
@@ -303,6 +307,10 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
         return { ...v, name: vn.zh, nameEn: vn.en };
       }),
       projectPhotos: material.projectPhotos || [],
+      catalogPdfUrl: material.catalogPdfUrl || '',
+      catalogPdfObjectKey: material.catalogPdfObjectKey || '',
+      catalogPdfName: material.catalogPdfName || '',
+      installationMedia: material.installationMedia || [],
     });
     // Remove the old rejected entry
     setPendingMaterials((prev) => prev.filter((p) => p.id !== material.id));
@@ -329,7 +337,10 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
     });
   }, [user.id, sampleRequests]);
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>, field: 'image' | 'projectPhotos' | 'variants') => {
+  const handleFileChange = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+    field: 'image' | 'projectPhotos' | 'variants' | 'catalogPdf' | 'installation'
+  ) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
@@ -339,12 +350,43 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
     const fileArray = Array.from(files) as File[];
     const totalFiles = fileArray.length;
     const results: string[] = [];
+    const mediaItems: InstallationMediaItem[] = [];
+    let catalogUrl = '';
+    let catalogKey = '';
+    let catalogName = '';
 
     for (let i = 0; i < totalFiles; i++) {
       const file = fileArray[i];
       try {
-        const { url } = await uploadImage(file, UPLOAD_FOLDER[field]);
-        results.push(url);
+        if (field === 'catalogPdf') {
+          const err = validateCatalogPdf(file);
+          if (err) {
+            alert(err);
+            continue;
+          }
+          const uploaded = await uploadAsset(file, 'catalogs', 'document');
+          catalogUrl = uploaded.url;
+          catalogKey = uploaded.objectKey || uploaded.url;
+          catalogName = file.name;
+        } else if (field === 'installation') {
+          const checked = validateInstallationFile(file);
+          if (checked.ok === false) {
+            alert(checked.error);
+            continue;
+          }
+          const uploaded =
+            checked.assetType === 'image'
+              ? await uploadImage(file, 'installation')
+              : await uploadAsset(file, 'installation', 'video');
+          mediaItems.push({
+            kind: checked.assetType,
+            url: uploaded.url,
+            objectKey: uploaded.objectKey,
+          });
+        } else {
+          const { url } = await uploadImage(file, UPLOAD_FOLDER[field]);
+          results.push(url);
+        }
       } catch (err) {
         console.error('File compression error:', err);
         alert(`文件 "${file.name}" 处理失败`);
@@ -372,10 +414,23 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
         name: `花色 ${formData.variants.length + idx + 1}`
       }));
       setFormData(prev => ({ ...prev, variants: [...prev.variants, ...newVariants] }));
+    } else if (field === 'catalogPdf' && catalogUrl) {
+      setFormData(prev => ({
+        ...prev,
+        catalogPdfUrl: catalogUrl,
+        catalogPdfObjectKey: catalogKey,
+        catalogPdfName: catalogName,
+      }));
+    } else if (field === 'installation' && mediaItems.length > 0) {
+      setFormData(prev => ({
+        ...prev,
+        installationMedia: [...prev.installationMedia, ...mediaItems].slice(0, 8),
+      }));
     }
 
     setIsProcessing(false);
     setUploadProgress(0);
+    e.target.value = '';
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -421,6 +476,10 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
         };
       }),
       projectPhotos: formData.projectPhotos,
+      catalogPdfUrl: formData.catalogPdfUrl || undefined,
+      catalogPdfObjectKey: formData.catalogPdfObjectKey || undefined,
+      catalogPdfName: formData.catalogPdfName || undefined,
+      installationMedia: formData.installationMedia.length > 0 ? formData.installationMedia : undefined,
       id: generateId(),
       image: formData.image || (formData.variants && formData.variants.length > 0 ? formData.variants[0].imageUrl : ''),
       submitterId: user.id,
@@ -987,6 +1046,48 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                     className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all h-24 resize-none" 
                     placeholder="例如: 该材料为天然石材，纹理具有唯一性..."
                   ></textarea>
+                  <div className="mt-3">
+                    <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">产品画册 PDF</label>
+                    {formData.catalogPdfUrl ? (
+                      <div className="flex items-center justify-between gap-3 bg-gray-50 rounded-2xl p-3">
+                        <a
+                          href={formData.catalogPdfUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-sm font-bold text-black truncate hover:underline"
+                        >
+                          {formData.catalogPdfName || '产品画册.pdf'}
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setFormData((p) => ({
+                              ...p,
+                              catalogPdfUrl: '',
+                              catalogPdfObjectKey: '',
+                              catalogPdfName: '',
+                            }))
+                          }
+                          className="text-[10px] font-black text-gray-400 hover:text-black"
+                        >
+                          移除
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="relative">
+                        <div className="w-full p-4 bg-gray-50 border-2 border-dashed border-gray-200 rounded-2xl text-center text-xs text-gray-400 font-bold">
+                          点击上传 PDF 画册（≤50MB）
+                        </div>
+                        <input
+                          type="file"
+                          accept="application/pdf,.pdf"
+                          onChange={(e) => handleFileChange(e, 'catalogPdf')}
+                          className="absolute inset-0 opacity-0 cursor-pointer"
+                          disabled={isProcessing}
+                        />
+                      </div>
+                    )}
+                  </div>
                 </div>
                 {(formData.supplierNotesEn || formData.supplierNotes) && (
                   <div>
@@ -1069,6 +1170,46 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                     )}
                   </div>
                   <p className="text-[10px] text-gray-400 mt-2 font-medium">提示: 真实的高质量项目照片能获得更高的审核评分和推荐位</p>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">安装方式</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {formData.installationMedia.map((item, i) => (
+                      <div key={`${item.url}-${i}`} className="aspect-square rounded-xl bg-gray-100 overflow-hidden relative group">
+                        {item.kind === 'video' ? (
+                          <video src={item.url} className="w-full h-full object-cover" muted />
+                        ) : (
+                          <img src={item.url} className="w-full h-full object-cover" alt="install" />
+                        )}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setFormData((p) => ({
+                              ...p,
+                              installationMedia: p.installationMedia.filter((_, idx) => idx !== i),
+                            }))
+                          }
+                          className="absolute top-1 right-1 bg-black/50 text-white w-5 h-5 rounded-full text-[10px] opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                    {formData.installationMedia.length < 8 && (
+                      <div className="relative aspect-square rounded-xl border-2 border-dashed border-gray-200 flex flex-col items-center justify-center cursor-pointer hover:bg-gray-100">
+                        <span className="text-xl">+</span>
+                        <input
+                          type="file"
+                          multiple
+                          accept="image/*,video/mp4,video/webm,video/quicktime"
+                          onChange={(e) => handleFileChange(e, 'installation')}
+                          className="absolute inset-0 opacity-0 cursor-pointer"
+                          disabled={isProcessing}
+                        />
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 

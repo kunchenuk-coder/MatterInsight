@@ -27,7 +27,9 @@ import {
   type AdminSupplierEvaluation,
 } from '../services/adminAnalyticsService';
 import AdminTopicReviewPanel from './topics/AdminTopicReviewPanel';
+import AdminProjectAdoptionReviewPanel from './AdminProjectAdoptionReviewPanel';
 import { fetchPendingTopicReviews } from '../services/topicArticleAdminService';
+import { fetchPendingProjectAdoptionsForAdmin } from '../services/projectAdoptionService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 
 const VerificationDocCell: React.FC<{
@@ -107,7 +109,8 @@ type AdminSubTab =
   | 'VERIFICATIONS'
   | 'STORIES'
   | 'MOOD_TAGS'
-  | 'TOPICS';
+  | 'TOPICS'
+  | 'PROJECT_ADOPTIONS';
 
 const AdminDashboard: React.FC<AdminDashboardProps> = ({ 
   user, library, setLibrary, pendingList, onApprove, onReject, sampleRequests, onShipSample,
@@ -139,6 +142,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [supplierEvals, setSupplierEvals] = useState<AdminSupplierEvaluation[]>([]);
   const [suppliersLoading, setSuppliersLoading] = useState(false);
   const [pendingTopicsCount, setPendingTopicsCount] = useState(0);
+  const [pendingAdoptionsCount, setPendingAdoptionsCount] = useState(0);
   const materialImageRefreshKeyRef = React.useRef('');
 
   /** 后台材料缩略图：localStorage 可能残留空 image（刷新失败曾被清空），进监管页时强制重签 OSS */
@@ -231,6 +235,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   useEffect(() => {
     void loadPendingStories();
     void fetchPendingTopicReviews().then((rows) => setPendingTopicsCount(rows.length));
+    void fetchPendingProjectAdoptionsForAdmin().then((rows) =>
+      setPendingAdoptionsCount(rows.length)
+    );
   }, [loadPendingStories]);
 
   const handleApproveStory = async (id: string) => {
@@ -475,6 +482,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </button>
         <button type="button" onClick={() => setSubTab('TOPICS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'TOPICS' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}>
           {t('admin.tabTopics')} {pendingTopicsCount > 0 && <span className="ml-1 bg-violet-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{pendingTopicsCount}</span>}
+        </button>
+        <button type="button" onClick={() => setSubTab('PROJECT_ADOPTIONS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'PROJECT_ADOPTIONS' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}>
+          {t('admin.tabProjectAdoptions')} {pendingAdoptionsCount > 0 && <span className="ml-1 bg-teal-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{pendingAdoptionsCount}</span>}
         </button>
         <button type="button" onClick={() => setSubTab('MOOD_TAGS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'MOOD_TAGS' ? 'bg-white shadow-md text-black' : 'text-gray-400'}`}>
           {t('admin.tabMoodTags')}
@@ -1146,6 +1156,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
         {subTab === 'TOPICS' && <AdminTopicReviewPanel onPendingCountChange={setPendingTopicsCount} />}
 
+        {subTab === 'PROJECT_ADOPTIONS' && (
+          <AdminProjectAdoptionReviewPanel onPendingCountChange={setPendingAdoptionsCount} />
+        )}
+
         {subTab === 'MOOD_TAGS' && (
           <div>
             <div className="px-8 pt-8 pb-2 flex justify-between items-center gap-4">
@@ -1546,13 +1560,40 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </div>
                   </div>
                 )}
-                {viewingPendingMaterial.projectPhotos && viewingPendingMaterial.projectPhotos.length > 0 && (
+                    {viewingPendingMaterial.projectPhotos && viewingPendingMaterial.projectPhotos.length > 0 && (
                   <div>
                     <p className="text-[10px] font-black uppercase text-gray-400 mb-2">应用案例 ({viewingPendingMaterial.projectPhotos.length})</p>
                     <div className="grid grid-cols-3 gap-2">
                       {viewingPendingMaterial.projectPhotos.map((p, i) => (
                         <img key={i} src={p} className="w-full aspect-square object-cover rounded-lg border" />
                       ))}
+                    </div>
+                  </div>
+                )}
+                {viewingPendingMaterial.catalogPdfUrl && (
+                  <div>
+                    <p className="text-[10px] font-black uppercase text-gray-400 mb-2">产品画册 PDF</p>
+                    <a
+                      href={viewingPendingMaterial.catalogPdfUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-sm font-bold text-black underline"
+                    >
+                      {viewingPendingMaterial.catalogPdfName || '预览 / 下载画册'}
+                    </a>
+                  </div>
+                )}
+                {viewingPendingMaterial.installationMedia && viewingPendingMaterial.installationMedia.length > 0 && (
+                  <div>
+                    <p className="text-[10px] font-black uppercase text-gray-400 mb-2">安装方式 ({viewingPendingMaterial.installationMedia.length})</p>
+                    <div className="grid grid-cols-3 gap-2">
+                      {viewingPendingMaterial.installationMedia.map((item, i) =>
+                        item.kind === 'video' ? (
+                          <video key={i} src={item.url} className="w-full aspect-square object-cover rounded-lg border" controls />
+                        ) : (
+                          <img key={i} src={item.url} className="w-full aspect-square object-cover rounded-lg border" />
+                        )
+                      )}
                     </div>
                   </div>
                 )}

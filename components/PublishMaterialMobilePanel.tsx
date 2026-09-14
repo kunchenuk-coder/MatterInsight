@@ -14,7 +14,7 @@ interface PublishMaterialMobilePanelProps {
   onSubmit: (e: React.FormEvent) => void;
   onFileChange: (
     e: React.ChangeEvent<HTMLInputElement>,
-    field: "image" | "projectPhotos" | "variants"
+    field: "image" | "projectPhotos" | "variants" | "catalogPdf" | "installation"
   ) => void;
   points: number;
   onPointsUpdated: (balanceAfter: number) => void;
@@ -201,6 +201,48 @@ const PublishMaterialMobilePanel: React.FC<PublishMaterialMobilePanelProps> = ({
                   className={`${fieldCls} h-16 resize-none`}
                   placeholder="天然石材，纹理唯一…"
                 />
+                <div className="mt-2">
+                  <label className={labelCls}>产品画册 PDF</label>
+                  {formData.catalogPdfUrl ? (
+                    <div className="flex items-center justify-between gap-2 bg-gray-50 rounded-xl p-2">
+                      <a
+                        href={formData.catalogPdfUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[11px] font-bold truncate"
+                      >
+                        {formData.catalogPdfName || "产品画册.pdf"}
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setFormData((p) => ({
+                            ...p,
+                            catalogPdfUrl: "",
+                            catalogPdfObjectKey: "",
+                            catalogPdfName: "",
+                          }))
+                        }
+                        className="text-[10px] font-black text-gray-400"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ) : (
+                    <label className="relative block">
+                      <div className={`${fieldCls} text-center text-[11px] text-gray-400 font-bold`}>
+                        上传 PDF（≤50MB）
+                      </div>
+                      <input
+                        type="file"
+                        accept="application/pdf,.pdf"
+                        onChange={(e) => onFileChange(e, "catalogPdf")}
+                        className="absolute inset-0 opacity-0"
+                        disabled={isProcessing}
+                      />
+                    </label>
+                  )}
+                </div>
               </div>
               {(formData.supplierNotesEn || formData.supplierNotes) && (
                 <div>
@@ -319,6 +361,48 @@ const PublishMaterialMobilePanel: React.FC<PublishMaterialMobilePanelProps> = ({
                         multiple
                         accept="image/*"
                         onChange={(e) => onFileChange(e, "projectPhotos")}
+                        className="absolute inset-0 opacity-0"
+                        disabled={isProcessing}
+                      />
+                    </label>
+                  )}
+                </div>
+              </div>
+              <div>
+                <label className={labelCls}>安装方式 ({formData.installationMedia.length}/8)</label>
+                <div className="flex gap-2 overflow-x-auto pb-1">
+                  {formData.installationMedia.map((item, i) => (
+                    <div
+                      key={`${item.url}-${i}`}
+                      className="relative w-14 h-14 shrink-0 rounded-lg overflow-hidden bg-gray-100"
+                    >
+                      {item.kind === "video" ? (
+                        <video src={item.url} className="w-full h-full object-cover" muted />
+                      ) : (
+                        <img src={item.url} className="w-full h-full object-cover" alt="" />
+                      )}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setFormData((p) => ({
+                            ...p,
+                            installationMedia: p.installationMedia.filter((_, idx) => idx !== i),
+                          }))
+                        }
+                        className="absolute top-0.5 right-0.5 bg-black/60 text-white w-4 h-4 rounded-full text-[8px]"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                  {formData.installationMedia.length < 8 && (
+                    <label className="relative w-14 h-14 shrink-0 rounded-lg border border-dashed border-gray-200 flex items-center justify-center text-lg cursor-pointer">
+                      +
+                      <input
+                        type="file"
+                        multiple
+                        accept="image/*,video/mp4,video/webm,video/quicktime"
+                        onChange={(e) => onFileChange(e, "installation")}
                         className="absolute inset-0 opacity-0"
                         disabled={isProcessing}
                       />

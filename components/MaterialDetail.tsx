@@ -1,7 +1,7 @@
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Material, User, Inquiry, SampleRequest, MaterialStatus, InquiryFormPayload } from '../types';
+import { Material, User, Inquiry, SampleRequest, MaterialStatus, InquiryFormPayload, UNLIMITED_POINTS_BALANCE } from '../types';
 import { toMaterialDetail, buildHumanDnaSnapshot } from '../data/materialDetailMock';
 import {
   buildMaterialDataPayload,
@@ -15,19 +15,28 @@ import MaterialMoodTagsSection from './MaterialMoodTagsSection';
 import MaterialInspirationStoriesSection from './MaterialInspirationStoriesSection';
 import MaterialEvaluationsSection from './MaterialEvaluationsSection';
 import MaterialManageActionBar from './MaterialManageActionBar';
-import type { MaterialHumanDna, MaterialEvaluations, InspirationStory } from '../types/materialDetail';
+import type { MaterialHumanDna, MaterialEvaluations, InspirationStory, MaterialApplicationCase } from '../types/materialDetail';
 import {
   hasUserRatedMaterial,
   submitMaterialEvaluation,
 } from '../services/materialEvaluationService';
 import { fetchMaterialInspirationStories } from '../services/inspirationStoryService';
 import { fetchMaterialMoodTags } from '../services/moodTagService';
+import {
+  fetchMyProjectAdoptionForMaterial,
+  type ProjectAdoptionRow,
+} from '../services/projectAdoptionService';
+import ProjectAdoptionModal from './ProjectAdoptionModal';
 import useMaterialEventLog from '../hooks/useMaterialEventLog';
 import useMaterialViewCount from '../hooks/useMaterialViewCount';
 import useMarkNotificationsRead from '../hooks/useMarkNotificationsRead';
 import { portalFromUserRole } from '../utils/appPortal';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 import { pickLocale } from '../utils/localizedText';
+import { recordPointsConsume } from '../services/adminAnalyticsService';
+import { getSupplierProfile } from '../services/supplierProfileService';
+import SupplierAuthorLink from './SupplierAuthorLink';
+import type { SupplierProfile } from '../types';
 interface MaterialDetailProps {
   material: Material;
   user: User | null;
@@ -51,12 +60,28 @@ interface MaterialDetailProps {
   inquiries: Inquiry[];
   sampleRequests: SampleRequest[];
   onMaterialUpdated?: (material: Material) => void;
+  onPointsBalance?: (balance: number) => void;
+}
+
+const CATALOG_DOWNLOAD_POINTS = 10;
+
+function resolveApplicationCases(
+  material: Material,
+  cases: MaterialApplicationCase[]
+): MaterialApplicationCase[] {
+  if (cases.length > 0) return cases;
+  return (material.projectPhotos ?? []).filter(Boolean).map((url, i) => ({
+    id: `project_photo_${i}`,
+    url,
+    is_for_training: false,
+  }));
 }
 
 const MaterialDetail: React.FC<MaterialDetailProps> = ({ 
   material, user, onBack, onDeductPoints, onSampleRequest, onInquiry,
   inquiries, sampleRequests, isPublicView = false, backLabel,
   editMode = false, fromSupplierDashboard = false, onMaterialUpdated,
+  onPointsBalance,
 }) => {
   const { t } = useTranslation();
   const [selectedVariant, setSelectedVariant] = useState((material.variants && material.variants[0]) || { id: 'default', colorCode: '#FFFFFF', imageUrl: material.image, name: '默认' });
@@ -68,9 +93,18 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
   const [isSavingDraft, setIsSavingDraft] = useState(false);
   const [isRepublishing, setIsRepublishing] = useState(false);
   const [toast, setToast] = useState<{ message: string; tone: 'success' | 'error' } | null>(null);
+  const [showAdoptionModal, setShowAdoptionModal] = useState(false);
+  const [myAdoption, setMyAdoption] = useState<ProjectAdoptionRow | null>(null);
+  const [myAdoptionLoading, setMyAdoptionLoading] = useState(false);
+  const [supplierProfile, setSupplierProfile] = useState<SupplierProfile | null>(null);
+  const [installPreviewIndex, setInstallPreviewIndex] = useState<number | null>(null);
+  const [catalogDownloading, setCatalogDownloading] = useState(false);
+  const variantStripRef = useRef<HTMLDivElement>(null);
 
   const materialDetail = useMemo(() => toMaterialDetail(material), [material]);
-  const [applicationCases, setApplicationCases] = useState(materialDetail.application_cases);
+  const [applicationCases, setApplicationCases] = useState(() =>
+    resolveApplicationCases(material, materialDetail.application_cases)
+  );
   const [moodTags, setMoodTags] = useState(materialDetail.mood_tags);
   const [inspirationStories, setInspirationStories] = useState<InspirationStory[]>(
     materialDetail.inspiration_stories
@@ -114,6 +148,20 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
     if (viewCount === (material.clicks || 0)) return;
     onMaterialUpdated?.({ ...material, clicks: viewCount });
   }, [viewCount]); // eslint-disable-line react-hooks/exhaustive-deps -- sync library once per count change
+
+  useEffect(() => {
+    if (!material.supplierId) {
+      setSupplierProfile(null);
+      return;
+    }
+    let cancelled = false;
+    void getSupplierProfile(material.supplierId).then((p) => {
+      if (!cancelled) setSupplierProfile(p);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [material.supplierId]);
 
   /** 材料商进入详情 → 将该材料的 tag_added 未读清零 */
   useMarkNotificationsRead({
@@ -202,11 +250,12 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
   };
 
   useEffect(() => {
-    setApplicationCases(materialDetail.application_cases);
+    setApplicationCases(resolveApplicationCases(material, materialDetail.application_cases));
     setEvaluations(materialDetail.evaluations);
     setEvaluationVoteCount(materialDetail.evaluation_vote_count ?? 0);
   }, [
     material.id,
+    material.projectPhotos,
     materialDetail.application_cases,
     materialDetail.evaluations,
     materialDetail.evaluation_vote_count,
@@ -270,6 +319,30 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
     }
   }, [user?.id, user?.role, material.id]);
 
+  useEffect(() => {
+    if (
+      isPublicView ||
+      !isSupabaseConfigured() ||
+      user?.role !== 'DESIGNER' ||
+      !user?.id
+    ) {
+      setMyAdoption(null);
+      setMyAdoptionLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setMyAdoptionLoading(true);
+    void fetchMyProjectAdoptionForMaterial(material.id, user.id).then((row) => {
+      if (!cancelled) {
+        setMyAdoption(row);
+        setMyAdoptionLoading(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isPublicView, material.id, user?.id, user?.role]);
+
   // Generate Matter-ID
   const getCategoryAbbr = (cat: string) => {
     const map: Record<string, string> = {
@@ -279,13 +352,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
   };
   const matterId = `MAT-${getCategoryAbbr(material.category)}-${material.id.slice(-4).toUpperCase()}`;
 
-  // Check if brand should be obfuscated
-  const hasRequestedSample = user ? sampleRequests.some(req => req.materialId === material.id && req.designerId === user.id) : false;
-  const hasInquired = user ? inquiries.some(inq => inq.materialId === material.id && inq.designerId === user.id) : false;
-  const brandText = material.brand ?? '';
-  const displayBrand = (isPublicView || hasRequestedSample || hasInquired || (user && (user.role === 'ADMIN' || user.company === brandText)))
-    ? brandText
-    : brandText.split('').map((c, i) => (i === 0 || i === brandText.length - 1 ? c : '*')).join('');
+  const displayBrand = material.brand ?? '';
 
   // Check if rating is allowed — designers may rate directly from detail page (one-time submit).
   const handleSubmitEvaluation = async (submission: MaterialEvaluations) => {
@@ -331,6 +398,104 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
       );
     }
   };
+
+  const installationList = material.installationMedia ?? [];
+
+  useEffect(() => {
+    if (installPreviewIndex === null) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setInstallPreviewIndex(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [installPreviewIndex]);
+
+  const applyBalanceAfter = (balanceAfter: number) => {
+    if (!Number.isFinite(balanceAfter)) return;
+    const next = user?.isUnlimitedPoints ? UNLIMITED_POINTS_BALANCE : balanceAfter;
+    onPointsBalance?.(next);
+  };
+
+  const handleDownloadCatalog = async () => {
+    const url = material.catalogPdfUrl;
+    if (!url || catalogDownloading) return;
+    if (isPublicView || !user) {
+      alert(t('materialDetail.loginForPoints'));
+      return;
+    }
+
+    const designerPays = user.role === 'DESIGNER' && !user.isUnlimitedPoints;
+    if (designerPays) {
+      if (user.points < CATALOG_DOWNLOAD_POINTS) {
+        alert(
+          t('materialDetail.catalogNeedPoints', {
+            cost: CATALOG_DOWNLOAD_POINTS,
+            points: user.points,
+          })
+        );
+        return;
+      }
+      if (!window.confirm(t('materialDetail.catalogConfirm', { cost: CATALOG_DOWNLOAD_POINTS }))) {
+        return;
+      }
+    }
+
+    setCatalogDownloading(true);
+    try {
+      if (user.role === 'DESIGNER' && isSupabaseConfigured()) {
+        const charged = await recordPointsConsume({
+          amount: CATALOG_DOWNLOAD_POINTS,
+          description: '下载产品画册',
+          supplierId: material.supplierId || null,
+          materialId: material.id,
+          portal: 'designer',
+        });
+        if (charged.ok === false) {
+          alert(charged.error || t('materialDetail.catalogDownloadFail'));
+          return;
+        }
+        applyBalanceAfter(charged.balanceAfter);
+      }
+
+      const fileName = material.catalogPdfName || 'catalog.pdf';
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('fetch failed');
+        const blob = await res.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = objectUrl;
+        a.download = fileName;
+        a.click();
+        URL.revokeObjectURL(objectUrl);
+      } catch {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        a.target = '_blank';
+        a.rel = 'noreferrer';
+        a.click();
+      }
+    } catch {
+      alert(t('materialDetail.catalogDownloadFail'));
+    } finally {
+      setCatalogDownloading(false);
+    }
+  };
+
+  const catalogDownloadButton = material.catalogPdfUrl ? (
+    <button
+      type="button"
+      disabled={catalogDownloading}
+      onClick={() => void handleDownloadCatalog()}
+      className="inline-flex items-center gap-2 text-xs font-bold px-3 py-1.5 rounded-full bg-white border border-yellow-200 text-yellow-800 hover:bg-yellow-100 disabled:opacity-60"
+    >
+      {catalogDownloading && (
+        <span className="w-3 h-3 border-2 border-yellow-700/30 border-t-yellow-800 rounded-full animate-spin" />
+      )}
+      {catalogDownloading ? t('materialDetail.downloadingPdf') : t('materialDetail.downloadPdf')}
+    </button>
+  ) : null;
 
   const handleShare = () => {
     const shareUrl = `${window.location.origin}${window.location.pathname}#/share/${material.id}`;
@@ -473,19 +638,121 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
           onApplicationCasesChange={isManageMode ? setApplicationCases : undefined}
           canUploadApplicationCases={permissions.canUploadApplicationCases}
           variantPicker={
-            <div className="absolute bottom-4 left-4 right-4 flex flex-wrap gap-2 bg-black/20 backdrop-blur-md p-3 rounded-2xl">
-              {material.variants?.map(v => (
+            material.variants && material.variants.length > 0 ? (
+              <div className="absolute bottom-4 left-4 right-4 flex items-center gap-1 bg-black/20 backdrop-blur-md px-1.5 py-2 rounded-2xl">
                 <button
-                  key={v.id}
-                  onClick={() => setSelectedVariant(v)}
-                  title={pickLocale(v.name)}
-                  className={`w-8 h-8 rounded-full border-2 transition-all hover:scale-110 ${selectedVariant.id === v.id ? 'scale-110 border-white ring-2 ring-black' : 'border-white/50'}`}
-                  style={{ backgroundColor: v.colorCode }}
-                />
-              ))}
-            </div>
+                  type="button"
+                  onClick={() => {
+                    const el = variantStripRef.current;
+                    if (!el) return;
+                    el.scrollBy({ left: -el.clientWidth * 0.7, behavior: 'smooth' });
+                  }}
+                  className="shrink-0 w-7 h-7 rounded-full bg-black/40 text-white text-sm font-bold hover:bg-black/60"
+                  aria-label="上一组花色"
+                >
+                  ‹
+                </button>
+                <div
+                  ref={variantStripRef}
+                  className="flex-1 min-w-0 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                >
+                  <div className="flex flex-col flex-wrap content-start gap-2 h-[4.5rem]">
+                    {material.variants.map((v) => (
+                      <button
+                        key={v.id}
+                        type="button"
+                        onClick={() => setSelectedVariant(v)}
+                        title={pickLocale(v.name)}
+                        className={`w-8 h-8 rounded-full border-2 transition-all hover:scale-110 ${selectedVariant.id === v.id ? 'scale-110 border-white ring-2 ring-black' : 'border-white/50'}`}
+                        style={{ backgroundColor: v.colorCode }}
+                      />
+                    ))}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const el = variantStripRef.current;
+                    if (!el) return;
+                    el.scrollBy({ left: el.clientWidth * 0.7, behavior: 'smooth' });
+                  }}
+                  className="shrink-0 w-7 h-7 rounded-full bg-black/40 text-white text-sm font-bold hover:bg-black/60"
+                  aria-label="下一组花色"
+                >
+                  ›
+                </button>
+              </div>
+            ) : null
           }
         />
+
+        {(installationList.length > 0) && (
+          <div className="mt-5">
+            <p className="text-[10px] font-black uppercase text-gray-400 tracking-widest mb-3">
+              {t('materialDetail.installation')}
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {installationList.map((item, i) => (
+                <button
+                  key={`${item.url}-${i}`}
+                  type="button"
+                  onClick={() => setInstallPreviewIndex(i)}
+                  className="aspect-video rounded-2xl overflow-hidden bg-gray-100 relative group text-left"
+                >
+                  {item.kind === 'video' ? (
+                    <video src={item.url} className="w-full h-full object-cover pointer-events-none" muted playsInline />
+                  ) : (
+                    <img src={item.url} alt="" className="w-full h-full object-cover" />
+                  )}
+                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-end p-3">
+                    <span className="text-white text-[10px] font-bold opacity-0 group-hover:opacity-100">
+                      {item.kind === 'video' ? t('materialDetail.installation') : t('cases.viewLarge')}
+                    </span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {installPreviewIndex !== null && installationList[installPreviewIndex] && (
+          <div
+            className="fixed inset-0 z-[200] flex items-center justify-center p-4 sm:p-8"
+            onClick={() => setInstallPreviewIndex(null)}
+          >
+            <div className="absolute inset-0 bg-black/40 backdrop-blur-xl" aria-hidden />
+            <div
+              className="relative z-10 w-full max-w-5xl flex flex-col items-center"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={() => setInstallPreviewIndex(null)}
+                className="absolute -top-2 right-0 sm:-top-4 sm:right-0 z-20 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 text-white backdrop-blur-sm border border-white/20 transition-colors"
+                aria-label={t('materialDetail.installationClose')}
+              >
+                ✕
+              </button>
+              <div className="rounded-2xl overflow-hidden shadow-2xl bg-black/20 border border-white/10 max-h-[80vh] w-full flex justify-center">
+                {installationList[installPreviewIndex].kind === 'video' ? (
+                  <video
+                    src={installationList[installPreviewIndex].url}
+                    className="max-w-full max-h-[80vh]"
+                    controls
+                    autoPlay
+                    playsInline
+                  />
+                ) : (
+                  <img
+                    src={installationList[installPreviewIndex].url}
+                    alt=""
+                    className="max-w-full max-h-[80vh] object-contain"
+                  />
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 lg:gap-8">
         {/* 1–2. Material information */}
@@ -499,12 +766,22 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
                 </span>
               </div>
               <p className="text-gray-500 font-medium">
-                <span className={!isPublicView && !hasRequestedSample && !hasInquired && (!user || (user.role !== 'ADMIN' && user.company !== material.brand)) ? 'blur-[4px] select-none' : ''}>
+                {supplierProfile && (
+                  <span className="inline-flex align-middle mr-2">
+                    <SupplierAuthorLink
+                      supplierId={material.supplierId}
+                      displayName={
+                        supplierProfile.company?.trim() ||
+                        displayBrand ||
+                        supplierProfile.username
+                      }
+                      avatarUrl={supplierProfile.avatar}
+                    />
+                  </span>
+                )}
+                <span>
                   {displayBrand}
                 </span>
-                {!isPublicView && !hasRequestedSample && !hasInquired && user?.role === 'DESIGNER' && (
-                  <span className="ml-2 text-[10px] bg-gray-100 text-gray-400 px-2 py-0.5 rounded-full font-bold">{t('materialDetail.brandAfterApply')}</span>
-                )}
                 {isPublicView && (
                   <span className="ml-2 text-[10px] bg-black text-white px-2 py-0.5 rounded-full font-bold">{t('materialDetail.publicPreview')}</span>
                 )}
@@ -561,10 +838,53 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
               </div>
             )}
 
+            {!isPublicView && user?.role === 'DESIGNER' && isSupabaseConfigured() && (
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  disabled={myAdoptionLoading || myAdoption?.status === 'pending_review'}
+                  title={
+                    myAdoption?.status === 'pending_review'
+                      ? t('materialDetail.adoptionPendingHint')
+                      : undefined
+                  }
+                  onClick={() => setShowAdoptionModal(true)}
+                  className="w-full border border-gray-300 py-3 rounded-2xl font-bold text-sm text-gray-800 hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {t('materialDetail.adoptionCta')}
+                </button>
+                {myAdoption?.status === 'pending_review' && (
+                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2">
+                    {t('materialDetail.adoptionStatusPending')}
+                  </p>
+                )}
+                {myAdoption?.status === 'approved' && (
+                  <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-xl px-3 py-2">
+                    {t('materialDetail.adoptionStatusApproved')}
+                  </p>
+                )}
+                {myAdoption?.status === 'rejected' && (
+                  <p className="text-xs text-red-700 bg-red-50 border border-red-100 rounded-xl px-3 py-2">
+                    {t('materialDetail.adoptionStatusRejected')}
+                    {myAdoption.reject_reason
+                      ? `：${myAdoption.reject_reason}`
+                      : ''}
+                  </p>
+                )}
+              </div>
+            )}
+
             {displayNotes && (
               <div className="bg-yellow-50 p-4 rounded-2xl border border-yellow-100">
                 <span className="text-[10px] text-yellow-600 font-black uppercase block mb-1">{t('materialDetail.supplierNotes')}</span>
                 <p className="text-sm text-yellow-800 italic">{displayNotes}</p>
+                {catalogDownloadButton && <div className="mt-3">{catalogDownloadButton}</div>}
+              </div>
+            )}
+            {!displayNotes && catalogDownloadButton && (
+              <div className="bg-yellow-50 p-4 rounded-2xl border border-yellow-100">
+                <span className="text-[10px] text-yellow-600 font-black uppercase block mb-2">{t('materialDetail.catalogPdf')}</span>
+                {catalogDownloadButton}
               </div>
             )}
             {displayDescription && (
@@ -727,6 +1047,16 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
             </form>
           </div>
         </div>
+      )}
+
+      {showAdoptionModal && user?.role === 'DESIGNER' && (
+        <ProjectAdoptionModal
+          open={showAdoptionModal}
+          materialId={material.id}
+          designerId={user.id}
+          onClose={() => setShowAdoptionModal(false)}
+          onSubmitted={(row) => setMyAdoption(row)}
+        />
       )}
     </div>
   );

@@ -7,7 +7,7 @@ import {
 import { recordPointsConsume } from '../services/adminAnalyticsService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 import { pickLocale } from '../utils/localizedText';
-import type { MaterialVariant } from '../types';
+import type { InstallationMediaItem, MaterialVariant } from '../types';
 
 export type PublishFormState = {
   name: string;
@@ -26,6 +26,10 @@ export type PublishFormState = {
   image: string;
   variants: Array<MaterialVariant & { nameEn?: string }>;
   projectPhotos: string[];
+  catalogPdfUrl: string;
+  catalogPdfObjectKey: string;
+  catalogPdfName: string;
+  installationMedia: InstallationMediaItem[];
 };
 
 type Props = {

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, Component } from 'react';
 import { useTranslation } from 'react-i18next';
 import i18n from './i18n';
-import { User, UserRole, Material, Category, MoodBoard, PointTransaction, PendingMaterial, Inquiry, SampleRequest, MaterialStatus, AuditLog, Notification, InquiryFormPayload } from './types';
+import { User, UserRole, Material, Category, MoodBoard, PointTransaction, PendingMaterial, Inquiry, SampleRequest, MaterialStatus, AuditLog, Notification, InquiryFormPayload, UNLIMITED_POINTS_BALANCE } from './types';
 import { MOCK_MATERIALS } from './constants';
 import Navbar from './components/Navbar';
 import Auth from './components/Auth';
@@ -12,6 +12,7 @@ import MaterialDetail from './components/MaterialDetail';
 import MoodBoardDesigner from './components/MoodBoardDesigner';
 import MoodBoardViewer from './components/MoodBoardViewer';
 import DesignerPage from './components/DesignerPage';
+import SupplierPage from './components/SupplierPage';
 import SupplierDashboard from './components/SupplierDashboard';
 import DesignerDashboard from './components/DesignerDashboard';
 import AdminDashboard from './components/AdminDashboard';
@@ -82,6 +83,7 @@ import {
   DESIGNER_DASHBOARD_PATH,
   SUPPLIER_DASHBOARD_PATH,
   getDesignerPublicPath,
+  getSupplierPublicPath,
   getMaterialPath,
   parseMaterialId,
   parseMaterialEditMode,
@@ -357,7 +359,10 @@ const App: React.FC = () => {
   const savedIdsRef = useRef<string[]>([]);
   const prevPathnameRef = useRef(pathname);
   const pageRoute = parseAppPageRoute(pathname);
-  const onProfilePage = pageRoute.type === 'my-page' || pageRoute.type === 'designer';
+  const onProfilePage =
+    pageRoute.type === 'my-page' ||
+    pageRoute.type === 'designer' ||
+    pageRoute.type === 'supplier';
 
   const goToExploreLibrary = () => {
     // 探索库首页是 `/`，不是 /login（保护先逛后登录）
@@ -587,6 +592,10 @@ const App: React.FC = () => {
       setCurrentView('DASHBOARD');
       return true;
     }
+    if (landingRoute.type === 'supplier') {
+      setCurrentView('HOME');
+      return true;
+    }
 
     if (!redirectAfterAuth(userData.dbRole, true)) {
       // 权限/入口不符：卸下 UI，禁止 signOut
@@ -739,18 +748,33 @@ const App: React.FC = () => {
       }
     } else if (wasMaterial) {
       setSelectedMaterial(null);
-      const returnTo = materialReturnToRef.current;
-      if (returnTo === 'moodboard') {
-        setCurrentView('MOODBOARD_VIEW');
-      } else if (returnTo === 'dashboard' || isDashboardPath(pathname)) {
-        setCurrentView('DASHBOARD');
-      } else {
+      const nextRoute = parseAppPageRoute(pathname);
+      if (
+        nextRoute.type === 'supplier' ||
+        nextRoute.type === 'designer' ||
+        nextRoute.type === 'my-page'
+      ) {
         setCurrentView('HOME');
+      } else {
+        const returnTo = materialReturnToRef.current;
+        if (returnTo === 'moodboard') {
+          setCurrentView('MOODBOARD_VIEW');
+        } else if (returnTo === 'dashboard' || isDashboardPath(pathname)) {
+          setCurrentView('DASHBOARD');
+        } else {
+          setCurrentView('HOME');
+        }
       }
     }
 
     prevPathnameRef.current = pathname;
   }, [pathname, library, user?.id]);
+
+  useEffect(() => {
+    if (pageRoute.type === 'supplier' && currentView !== 'HOME' && currentView !== 'DETAILS') {
+      setCurrentView('HOME');
+    }
+  }, [pageRoute.type, currentView]);
 
   /** 已登录用户的路由守卫：role/path 不匹配只 redirect，禁止 signOut */
   useEffect(() => {
@@ -1002,7 +1026,7 @@ const App: React.FC = () => {
       window.location.replace(LOGIN_PATH);
       return;
     }
-    if (route.type === 'designer' || route.type === 'material') {
+    if (route.type === 'designer' || route.type === 'material' || route.type === 'supplier') {
       navigateTo('/', true);
       setCurrentView('HOME');
       setSelectedMaterial(null);
@@ -1297,7 +1321,11 @@ const App: React.FC = () => {
   };
 
   const handlePointChange = (amount: number, desc: string) => {
-    setPoints(p => p + amount);
+    if (user?.isUnlimitedPoints && amount < 0) {
+      setPoints(UNLIMITED_POINTS_BALANCE);
+      return;
+    }
+    setPoints(p => (user?.isUnlimitedPoints ? UNLIMITED_POINTS_BALANCE : p + amount));
     if (user) {
       const newTransaction: PointTransaction = {
         id: Math.random().toString(),
@@ -1684,6 +1712,13 @@ const App: React.FC = () => {
       setCurrentView('HOME');
       return;
     }
+    if (user.role === 'SUPPLIER') {
+      navigateTo(getSupplierPublicPath(user.id));
+      setSelectedMaterial(null);
+      setSelectedMoodboard(null);
+      setCurrentView('HOME');
+      return;
+    }
     redirectToRoleDashboard(user.dbRole);
     setCurrentView('DASHBOARD');
   };
@@ -1791,6 +1826,32 @@ const App: React.FC = () => {
               ownedMoodboards={[]}
               onSelectMoodboard={openMoodboardFromFeed}
               onBack={leaveProfilePages}
+            />
+          )}
+
+          {user && onProfilePage && pageRoute.type === 'supplier' && currentView === 'HOME' && (
+            <SupplierPage
+              mode={user.id === pageRoute.id ? 'owner' : 'public'}
+              supplierId={pageRoute.id}
+              viewerId={user.id}
+              materials={library}
+              onSelectMaterial={(m) => openMaterialDetail(m, 'home')}
+              onBack={leaveProfilePages}
+              onProfileUpdated={({ company, avatar }) => {
+                setUser((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        company: company !== undefined ? company ?? undefined : prev.company,
+                        name:
+                          company !== undefined
+                            ? resolveUserDisplayName({ company, email: prev.email })
+                            : prev.name,
+                        avatar: avatar !== undefined ? avatar : prev.avatar,
+                      }
+                    : prev
+                );
+              }}
             />
           )}
 
@@ -1948,7 +2009,12 @@ const App: React.FC = () => {
                     // 暂定：1 积分 ≈ ¥0.5 记入供应商 GMV（后续可改为真实计价）
                     amountCny: amt * 0.5,
                   }).then((r) => {
-                    if (r.ok) setPoints(r.balanceAfter);
+                    if (r.ok !== true || !Number.isFinite(r.balanceAfter)) return;
+                    const next = user.isUnlimitedPoints
+                      ? UNLIMITED_POINTS_BALANCE
+                      : r.balanceAfter;
+                    setPoints(next);
+                    setUser((prev) => (prev ? { ...prev, points: next } : prev));
                   });
                 }
               }}
@@ -1956,6 +2022,12 @@ const App: React.FC = () => {
               onInquiry={handleInquiry}
               inquiries={inquiries}
               sampleRequests={sampleRequests}
+              onPointsBalance={(balance) => {
+                if (!Number.isFinite(balance)) return;
+                const next = user.isUnlimitedPoints ? UNLIMITED_POINTS_BALANCE : balance;
+                setPoints(next);
+                setUser((prev) => (prev ? { ...prev, points: next } : prev));
+              }}
             />
           )}
 
@@ -2022,8 +2094,11 @@ const App: React.FC = () => {
                     user={user}
                     points={points}
                     onPointsUpdated={(balance) => {
-                      setPoints(balance);
-                      setUser((prev) => (prev ? { ...prev, points: balance } : prev));
+                      const next = user.isUnlimitedPoints
+                        ? UNLIMITED_POINTS_BALANCE
+                        : balance;
+                      setPoints(next);
+                      setUser((prev) => (prev ? { ...prev, points: next } : prev));
                     }}
                     library={library}
                     setLibrary={setLibrary}

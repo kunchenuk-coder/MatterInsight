@@ -14,8 +14,9 @@ const IMAGE_EXT: Record<string, string> = {
 };
 
 const MODEL_3D_EXT = new Set(['.glb', '.gltf', '.usdz', '.fbx', '.obj']);
+const VIDEO_EXT = new Set(['.mp4', '.webm', '.mov', '.m4v']);
 
-export type AssetType = 'image' | 'model_3d';
+export type AssetType = 'image' | 'model_3d' | 'document' | 'video';
 
 function getOssClient(): OSS {
   const region = process.env.ALIYUN_OSS_REGION ?? 'oss-cn-hongkong';
@@ -46,6 +47,15 @@ function resolveExtension(
   if (assetType === 'model_3d') {
     if (fromName && MODEL_3D_EXT.has(fromName)) return fromName;
     return '.glb';
+  }
+  if (assetType === 'document') {
+    return fromName === '.pdf' ? fromName : '.pdf';
+  }
+  if (assetType === 'video') {
+    if (fromName && VIDEO_EXT.has(fromName)) return fromName;
+    if (contentType.includes('webm')) return '.webm';
+    if (contentType.includes('quicktime')) return '.mov';
+    return '.mp4';
   }
   return fromName || IMAGE_EXT[contentType] || '.jpg';
 }
@@ -87,7 +97,15 @@ export function createPresignedUploadUrls(
     contentType,
     assetType
   );
-  const mime = contentType || (assetType === 'model_3d' ? 'model/gltf-binary' : 'image/jpeg');
+  const mime =
+    contentType ||
+    (assetType === 'model_3d'
+      ? 'model/gltf-binary'
+      : assetType === 'document'
+        ? 'application/pdf'
+        : assetType === 'video'
+          ? 'video/mp4'
+          : 'image/jpeg');
 
   const uploadUrl = client.signatureUrl(objectKey, {
     method: 'PUT',
@@ -135,7 +153,14 @@ export async function putUserAssetToOss(
     assetType
   );
   const mime =
-    contentType || (assetType === 'model_3d' ? 'model/gltf-binary' : 'image/jpeg');
+    contentType ||
+    (assetType === 'model_3d'
+      ? 'model/gltf-binary'
+      : assetType === 'document'
+        ? 'application/pdf'
+        : assetType === 'video'
+          ? 'video/mp4'
+          : 'image/jpeg');
 
   await client.put(objectKey, buffer, { headers: { 'Content-Type': mime } });
 
