@@ -9,8 +9,10 @@ import AiBilingualFillButton, { type PublishFormState } from './AiBilingualFillB
 import { uploadAsset, uploadImage, validateCatalogPdf, validateInstallationFile } from '../services/uploadService';
 import {
   EMPTY_UNREAD_COUNTS,
+  fetchUnreadNotificationRows,
   markNotificationsRead,
   type UnreadNotificationCounts,
+  type UnreadNotificationRow,
 } from '../services/notificationService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 import { fetchSupplierMaterials } from '../services/materialService';
@@ -90,6 +92,31 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
   const [uploadProgress, setUploadProgress] = useState(0);
   const [activeTab, setActiveTab] = useState<'ORDERS' | 'PRODUCTS' | 'SAMPLES'>('ORDERS');
   const [showOrderDetails, setShowOrderDetails] = useState<Inquiry | null>(null);
+  const [productUnreadRows, setProductUnreadRows] = useState<UnreadNotificationRow[]>([]);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured()) {
+      setProductUnreadRows([]);
+      return;
+    }
+    let cancelled = false;
+    void fetchUnreadNotificationRows('supplier').then((rows) => {
+      if (!cancelled) setProductUnreadRows(rows);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [unreadCounts]);
+
+  const productsUnreadCount =
+    unreadCounts.tag_added + unreadCounts.evaluation_added + unreadCounts.story_pending_review;
+
+  const productUnreadBadge = (materialId: string) =>
+    productUnreadRows.filter(
+      (r) =>
+        r.targetId === materialId &&
+        (r.type === 'evaluation_added' || r.type === 'tag_added')
+    ).length;
 
   // 进入对应 Tab 时标记该类型通知已读（真实消消乐）
   React.useEffect(() => {
@@ -556,9 +583,9 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
           onClick={() => setActiveTab('PRODUCTS')}
           className={`relative p-6 rounded-3xl border text-center shadow-sm cursor-pointer transition-all ${activeTab === 'PRODUCTS' ? 'bg-black text-white border-black scale-105' : 'bg-white hover:bg-gray-50'}`}
         >
-          {unreadCounts.tag_added > 0 && (
+          {productsUnreadCount > 0 && (
             <span className="absolute -top-2 -right-2 min-w-[22px] h-[22px] px-1.5 rounded-full bg-red-500 text-white text-[11px] font-black flex items-center justify-center border-2 border-white">
-              {unreadCounts.tag_added}
+              {productsUnreadCount}
             </span>
           )}
           <p className={`${activeTab === 'PRODUCTS' ? 'text-gray-400' : 'text-gray-400'} text-[10px] font-bold uppercase mb-1`}>{t('supplier.statProducts')}</p>
@@ -606,9 +633,9 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
         <button onClick={() => setActiveTab('SAMPLES')} className={`pb-4 text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'SAMPLES' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>{t('supplier.tabSamples')}</button>
         <button onClick={() => setActiveTab('PRODUCTS')} className={`relative pb-4 text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'PRODUCTS' ? 'border-b-4 border-black text-black' : 'text-gray-300'}`}>
           {t('supplier.tabProducts')}
-          {unreadCounts.tag_added > 0 && (
+          {productsUnreadCount > 0 && (
             <span className="ml-2 inline-flex min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-black items-center justify-center align-middle">
-              {unreadCounts.tag_added}
+              {productsUnreadCount}
             </span>
           )}
         </button>
@@ -773,6 +800,11 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                 }}
                 className="bg-gray-50 rounded-3xl p-4 border border-gray-100 group relative cursor-pointer hover:border-black/20 hover:shadow-md transition-all"
               >
+                {productUnreadBadge(product.id) > 0 && (
+                  <span className="absolute top-3 left-3 z-10 min-w-[22px] h-[22px] px-1.5 rounded-full bg-red-500 text-white text-[11px] font-black flex items-center justify-center border-2 border-white">
+                    {productUnreadBadge(product.id)}
+                  </span>
+                )}
                 <img src={product.image} className="w-full aspect-video object-cover rounded-2xl mb-4" />
                 <h4 className="font-bold mb-1">{pickLocale(product.name)}</h4>
                 <div className="flex justify-between items-center">

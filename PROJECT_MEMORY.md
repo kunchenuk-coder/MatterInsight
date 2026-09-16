@@ -1,6 +1,7 @@
 # MatterInsight 项目记忆库（防呆手册）
 
 > **用法：** 每次在 Cursor 新开对话处理本项目时，先 `@PROJECT_MEMORY.md` 或粘贴本文要点。  
+> **最近追加：** 2026-09-16 材料评分 / 复议（见下方 §1.0）  
 > **硬规则：** 用户只要提到 **推送 GitHub / git push / 发到远端**，Agent **必须先读本文**（尤其 §9），再执行 commit/push。详见 `.cursor/rules/github-push-memory.mdc`。  
 > **更新日期：** 2026-08-21  
 > **仓库：** https://github.com/kunchenuk-coder/MatterInsight.git  
@@ -70,6 +71,27 @@ React + Vite 前端，按 **portal（designer / supplier / admin）** 拆分 Aut
 ---
 
 ## 1. 今日已修 Bug（必须记住）
+
+### 1.0 材料评分与复议（2026-09-16）
+
+> 沿用 **`material_designer_evaluations`**，禁止另建 `material_ratings`。综合分由 RPC `recompute_material_evaluation_aggregate` 按非 `revoked` 行重算写入 `materials.data.humanDna`。
+
+| 角色 | 行为 |
+|------|------|
+| 设计师 | 确认承诺后 `submit_material_evaluation`；已评可 `update_material_evaluation`。项目名：询价 `project_name` 或项目采纳，否则材料名。 |
+| 材料商 | 上架单品红点含 `evaluation_added`；详情「已评」看最新一条；「复议」→ `dispute_material_evaluation`。 |
+| Admin | 材料库监管「评分综合评分」；超低分/复议红点；列表 RPC 仅 Admin 可见设计师邮箱与材料商 `registered_phone`。 |
+
+**通知类型（新增）：** `evaluation_added`（材料商）、`evaluation_disputed`（Admin，`target_id` = 评价 id）。
+
+**迁移（远程 SQL Editor 必跑，git push 不会改库）：**  
+`20260916084321_material_evaluation_project_and_dispute.sql`、`20260916125507_fix_evaluation_rpc_id_and_uuid.sql`
+
+**类型坑：** 远程 `materials.id` / 评价表 `material_id` 为 **uuid**。INSERT 用 `p_material_id::uuid`；比较两侧统一 `::text` 或 `::uuid`。`list_material_evaluations` 须 `#variable_conflict use_column`。`material_display_name` 需同时有 `(text)` 与 `(uuid)` 重载。前端用已有 `normalizeMaterialIdForEventLog` 传 UUID 字符串。
+
+**前端：** `materialEvaluationService.ts`、`MaterialEvaluationsSection.tsx`、`MaterialDetail.tsx`、`AdminDashboard.tsx`、`SupplierDashboard.tsx`、`notificationService.ts`。评分**禁止** LocalStorage 作为已评真相。
+
+同日其它修复：Gemini 503 当限流 + OSS PUT HTTPS；情绪板上传按钮避让 +/-；设计师头像/名字进设计师主页，返回探索库。
 
 ### 1.1 小样申请 ID / 读写错位
 

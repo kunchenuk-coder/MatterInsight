@@ -389,17 +389,29 @@
   },
   "eval": {
     "title": "材料综合评估",
-    "aggregate": "已评/统计综合得分 · {{score}}",
-    "submitted": "已提交评分",
+    "aggregate": "综合 {{score}}",
+    "submitted": "已评",
     "submitting": "提交中…",
     "submit": "提交评分",
     "rate": "我要评分",
+    "resubmit": "更新评分",
     "readOnlyHint": "以上分数来自设计师社区反馈的综合统计，材料商不可修改。",
     "aesthetics": "美观",
     "durability": "耐用",
     "service": "服务",
     "cleanliness": "易洁",
-    "recommendation": "推荐"
+    "recommendation": "推荐",
+    "confirmTitle": "确认提交评分",
+    "confirmBody": "您正在为项目「{{project}}」提交材料评分。提交即视为您对该材料在该项目中的真实使用评价。",
+    "confirmCheck": "我确认以上评分为真实项目使用反馈，并愿意为此负责。",
+    "confirmSubmit": "确认提交",
+    "defaultProject": "当前项目",
+    "latestRating": "已评",
+    "latestTitle": "最新一条评分",
+    "latestBody": "{{designer}} 设计师在 {{project}} 项目上为您的材料评分。",
+    "dispute": "复议该评价",
+    "alreadyDisputed": "已提交复议，等待平台处理",
+    "disputeOk": "复议已提交，平台将联系您跟进"
   },
   "mood": {
     "title": "情绪标签 MOOD",
@@ -487,7 +499,10 @@
     "agentDeepseekSubtitle": "DeepSeek · 性价比高",
     "badgeRecommended": "推荐",
     "badgeSavePoints": "省点",
-    "close": "关闭"
+    "close": "关闭",
+    "errorBusy": "识别服务正忙（高峰限流）。已尝试切换备用模型，仍失败。请稍后再试，或改选其他识别 Agent。",
+    "errorNetwork": "图片上传或网络请求失败。请检查网络后重试。",
+    "errorGeneric": "AI 材质识别失败。效果图已放到画布，可手动标注。请稍后重试。"
   },
   "topics": {
     "mineTitle": "我的专题",

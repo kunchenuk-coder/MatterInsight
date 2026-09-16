@@ -10,6 +10,7 @@ import {
   getDeepSeekVisionModelName,
   getGeminiApiKey,
   getQwenApiKey,
+  shouldFallbackToQwen,
 } from './aiMaterialAnalysis';
 
 export type VisionAgentId = 'gemini' | 'qwen' | 'deepseek';
@@ -112,7 +113,7 @@ export function getMaterialCountForDepth(depth: RecognitionDepth): number {
   return depth === 'deep' ? 10 : 3;
 }
 
-/** 按用户选择的 Agent 调用（不自动降级到其他模型） */
+/** 按用户选择的 Agent 调用；仅 Gemini 503/限流/网络不可用时降级到已配置的备用模型 */
 export async function analyzeWithVisionAgent(
   agentId: VisionAgentId,
   depth: RecognitionDepth,
@@ -136,7 +137,28 @@ export async function analyzeWithVisionAgent(
     case 'gemini': {
       const key = getGeminiApiKey();
       if (!key) throw new Error('Gemini 未配置');
-      return analyzeWithGemini(key, userPrompt, base64Part, mimeType, opts);
+      try {
+        return await analyzeWithGemini(key, userPrompt, base64Part, mimeType, opts);
+      } catch (gemErr) {
+        if (!shouldFallbackToQwen(gemErr)) throw gemErr;
+        const qwenPrompt = await buildQwenMaterialUserPrompt(imageDataUrl, prompt, opts?.sampleAnchor);
+        const dsKey = getDeepSeekApiKey();
+        const dsModel = getDeepSeekVisionModelName();
+        const qwenKey = getQwenApiKey();
+        if (dsKey && dsModel) {
+          try {
+            console.warn('[AI] Gemini 限流/不可用，尝试 DeepSeek:', gemErr);
+            return await analyzeWithDeepSeekVision(dsKey, imageDataUrl, qwenPrompt, opts);
+          } catch (dsErr) {
+            console.warn('[AI] DeepSeek 失败，切换千问:', dsErr);
+          }
+        }
+        if (qwenKey) {
+          console.warn('[AI] Gemini 限流/不可用，已切换千问:', gemErr);
+          return await analyzeWithQwen(qwenKey, imageDataUrl, qwenPrompt, opts);
+        }
+        throw gemErr;
+      }
     }
     case 'qwen': {
       const key = getQwenApiKey();

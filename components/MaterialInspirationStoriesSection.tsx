@@ -23,6 +23,7 @@ interface MaterialInspirationStoriesSectionProps {
   /** Sync brand stories to published material row for designer explore feed. */
   persistBrandStories?: boolean;
   isLoading?: boolean;
+  unreadCount?: number;
 }
 
 /**
@@ -57,6 +58,7 @@ export const MaterialInspirationStoriesSection: React.FC<
   material,
   persistBrandStories = false,
   isLoading = false,
+  unreadCount = 0,
 }) => {
   const { t } = useTranslation();
   const [localStories, setLocalStories] = useState(stories);
@@ -173,7 +175,14 @@ export const MaterialInspirationStoriesSection: React.FC<
           <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-1">
             Human DNA
           </p>
-          <h2 className="text-lg sm:text-xl font-bold">{t('story.title')}</h2>
+          <h2 className="text-lg sm:text-xl font-bold">
+            {t('story.title')}
+            {unreadCount > 0 && (
+              <span className="ml-2 inline-flex min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-black items-center justify-center align-middle">
+                {unreadCount}
+              </span>
+            )}
+          </h2>
         </div>
 
         {canWriteStory && !showEditor && (

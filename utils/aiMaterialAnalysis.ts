@@ -200,11 +200,13 @@ const GEMINI_RETRY_DELAYS_MS = [1200, 2800, 5200, 9000];
 const QWEN_RETRY_DELAYS_MS = [900, 2200, 4000];
 const DEEPSEEK_RETRY_DELAYS_MS = [900, 2200, 4000];
 
-/** 429 / 配额 / 限流 */
+/** 429 / 503 高峰 / 配额 / 限流（Gemini high demand 按限流重试） */
 export function isVisionRateLimitError(err: unknown): boolean {
   const m = err instanceof Error ? err.message : String(err);
   const s = m.toLowerCase();
   if (/\b429\b/.test(m)) return true;
+  if (/\b503\b/.test(m)) return true;
+  if (s.includes("high demand") || s.includes("try again later")) return true;
   if (s.includes("resource exhausted") || s.includes("resource_exhausted")) return true;
   if (s.includes("rate limit") || s.includes("ratelimit") || s.includes("too many requests")) return true;
   if (s.includes("quota") || s.includes("exceeded your current quota")) return true;

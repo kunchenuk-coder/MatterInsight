@@ -7,6 +7,8 @@ interface DesignerAuthorLinkProps {
   displayName: string;
   avatarUrl?: string | null;
   className?: string;
+  /** 跳转前清理当前页状态（如关闭情绪板详情），保证设计师主页能渲染 */
+  onBeforeNavigate?: () => void;
 }
 
 const DesignerAuthorLink: React.FC<DesignerAuthorLinkProps> = ({
@@ -14,13 +16,17 @@ const DesignerAuthorLink: React.FC<DesignerAuthorLinkProps> = ({
   displayName,
   avatarUrl,
   className = '',
+  onBeforeNavigate,
 }) => {
   const avatarSrc = avatarUrl?.trim() || defaultDesignerAvatarUrl(designerId);
 
   return (
     <button
       type="button"
-      onClick={() => navigateTo(getDesignerPublicPath(designerId))}
+      onClick={() => {
+        onBeforeNavigate?.();
+        navigateTo(getDesignerPublicPath(designerId));
+      }}
       className={`inline-flex items-center gap-2 text-left group/designer ${className}`}
     >
       <img

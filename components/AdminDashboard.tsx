@@ -46,6 +46,13 @@ import AdminTopicReviewPanel from './topics/AdminTopicReviewPanel';
 import AdminProjectAdoptionReviewPanel from './AdminProjectAdoptionReviewPanel';
 import { fetchPendingTopicReviews } from '../services/topicArticleAdminService';
 import { fetchPendingProjectAdoptionsForAdmin } from '../services/projectAdoptionService';
+import {
+  evaluationAverage,
+  fetchMaterialEvaluations,
+  isLowEvaluation,
+  type MaterialEvaluationRow,
+} from '../services/materialEvaluationService';
+import { markNotificationsRead } from '../services/notificationService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 
 const VerificationDocCell: React.FC<{
@@ -167,6 +174,14 @@ function buildAdminEditDna(material: Material): MaterialHumanDna {
   };
 }
 
+function materialScoreSummary(material: Material): { average: number; voteCount: number } {
+  const dna = buildAdminEditDna(material);
+  return {
+    average: evaluationAverage(dna.evaluations),
+    voteCount: dna.evaluation_vote_count ?? 0,
+  };
+}
+
 const AdminDashboard: React.FC<AdminDashboardProps> = ({ 
   user, library, setLibrary, pendingList, onApprove, onReject, sampleRequests, onShipSample,
   verificationRequests, onVerifySupplier
@@ -202,6 +217,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [suppliersLoading, setSuppliersLoading] = useState(false);
   const [pendingTopicsCount, setPendingTopicsCount] = useState(0);
   const [pendingAdoptionsCount, setPendingAdoptionsCount] = useState(0);
+  const [materialEvalRows, setMaterialEvalRows] = useState<MaterialEvaluationRow[]>([]);
+  const [evalModalMaterialId, setEvalModalMaterialId] = useState<string | null>(null);
   const materialImageRefreshKeyRef = React.useRef('');
 
   /** 后台材料缩略图：localStorage 可能残留空 image（刷新失败曾被清空），进监管页时强制重签 OSS */
@@ -277,12 +294,21 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   }, []);
 
+  const loadMaterialEvaluations = useCallback(async () => {
+    if (!isSupabaseConfigured()) {
+      setMaterialEvalRows([]);
+      return;
+    }
+    setMaterialEvalRows(await fetchMaterialEvaluations(null, 'admin'));
+  }, []);
+
   useEffect(() => {
     if (subTab === 'DESIGNERS') void loadDesigners();
     if (subTab === 'SUPPLIERS') void loadSupplierEvals();
     if (subTab === 'STORIES') void loadPendingStories();
     if (subTab === 'MOOD_TAGS') void loadMoodTags();
-  }, [subTab, loadDesigners, loadSupplierEvals, loadPendingStories, loadMoodTags]);
+    if (subTab === 'MATERIALS') void loadMaterialEvaluations();
+  }, [subTab, loadDesigners, loadSupplierEvals, loadPendingStories, loadMoodTags, loadMaterialEvaluations]);
 
   useEffect(() => {
     if (subTab === 'SAMPLES') {
@@ -297,7 +323,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     void fetchPendingProjectAdoptionsForAdmin().then((rows) =>
       setPendingAdoptionsCount(rows.length)
     );
-  }, [loadPendingStories]);
+    void loadMaterialEvaluations();
+  }, [loadPendingStories, loadMaterialEvaluations]);
 
   const handleApproveStory = async (id: string) => {
     setStoryActionBusy(id);
@@ -466,6 +493,35 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       ? m.quoteCount
       : 0;
 
+  const evalsForMaterial = (id: string) =>
+    materialEvalRows.filter((r) => r.materialId === id && r.status !== 'revoked');
+
+  const materialEvalNeedsAttention = (id: string) =>
+    evalsForMaterial(id).some((r) => r.status === 'disputed' || isLowEvaluation(r.evaluations));
+
+  const attentionEvalCount = materialEvalRows.filter(
+    (r) => r.status === 'disputed' || isLowEvaluation(r.evaluations)
+  ).length;
+
+  const evalModalRows = evalModalMaterialId ? evalsForMaterial(evalModalMaterialId) : [];
+  const evalModalMaterial = evalModalMaterialId
+    ? library.find((m) => m.id === evalModalMaterialId) ?? null
+    : null;
+
+  const openEvalModal = (materialId: string) => {
+    setEvalModalMaterialId(materialId);
+    const rows = evalsForMaterial(materialId).filter((r) => r.status === 'disputed');
+    void Promise.all(
+      rows.map((row) =>
+        markNotificationsRead({
+          types: ['evaluation_disputed'],
+          targetId: row.id,
+          portal: 'admin',
+        })
+      )
+    );
+  };
+
   const closeEditModal = () => {
     setEditingMaterial(null);
     setEditingDna(null);
@@ -601,7 +657,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       <div className="flex flex-wrap gap-1 bg-gray-100 p-1.5 rounded-[24px] max-w-full">
         <button type="button" onClick={() => setSubTab('DESIGNERS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'DESIGNERS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>{t('admin.tabDesigners')}</button>
-        <button type="button" onClick={() => setSubTab('MATERIALS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'MATERIALS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>{t('admin.tabMaterials')}</button>
+        <button type="button" onClick={() => setSubTab('MATERIALS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'MATERIALS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
+          {t('admin.tabMaterials')}
+          {attentionEvalCount > 0 && (
+            <span className="ml-1 bg-red-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{attentionEvalCount}</span>
+          )}
+        </button>
         <button type="button" onClick={() => setSubTab('SUPPLIERS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'SUPPLIERS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>{t('admin.tabSuppliers')}</button>
         <button type="button" onClick={() => setSubTab('SAMPLES')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'SAMPLES' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
           {t('admin.tabSamples')} {sampleRequests.filter(s => s.status === 'PENDING').length > 0 && <span className="ml-1 bg-orange-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{sampleRequests.filter(s => s.status === 'PENDING').length}</span>}
@@ -724,6 +785,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                    <th className="p-6">浏览次数</th>
                    <th className="p-6">收藏次数</th>
                    <th className="p-6">报价次数</th>
+                   <th className="p-6">评分综合评分</th>
                    <th className="p-6 text-right">管理操作</th>
                  </tr>
                </thead>
@@ -741,6 +803,30 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                      <td className="p-6 font-black text-blue-500">{m.clicks || 0}</td>
                      <td className="p-6 font-black text-green-500">{m.saves || 0}</td>
                      <td className="p-6 font-black text-purple-500">{materialQuoteCount(m)}</td>
+                     <td className="p-6">
+                       {(() => {
+                         const summary = materialScoreSummary(m);
+                         const rows = evalsForMaterial(m.id);
+                         const needsAttention = materialEvalNeedsAttention(m.id);
+                         return (
+                           <button
+                             type="button"
+                             onClick={() => openEvalModal(m.id)}
+                             className="relative inline-flex items-center gap-2 text-left"
+                           >
+                             <span className={`font-black ${summary.voteCount > 0 ? 'text-black' : 'text-gray-300'}`}>
+                               {summary.voteCount > 0 ? summary.average.toFixed(1) : '暂无'}
+                             </span>
+                             {rows.length > 0 && (
+                               <span className="text-[10px] font-bold text-gray-400">{rows.length}条</span>
+                             )}
+                             {needsAttention && (
+                               <span className="absolute -top-1 -right-2 w-2.5 h-2.5 rounded-full bg-red-500" />
+                             )}
+                           </button>
+                         );
+                       })()}
+                     </td>
                      <td className="p-6 text-right space-x-4">
                        <button 
                          onClick={() => openEditMaterial(m)}
@@ -772,6 +858,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                      '浏览次数': m.clicks || 0,
                      '收藏次数': m.saves || 0,
                      '报价次数': materialQuoteCount(m),
+                     '综合评分': materialScoreSummary(m).average,
                    }));
                    exportCSV(exportData, `materials_report_${selectedCategory}.csv`);
                  }} 
@@ -780,6 +867,85 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                  导出 Excel 详细表
                </button>
              </div>
+             {evalModalMaterialId && (
+               <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 p-4">
+                 <div className="bg-white rounded-[32px] max-w-2xl w-full max-h-[85vh] overflow-y-auto p-8 shadow-2xl">
+                   <div className="flex justify-between items-start mb-6">
+                     <div>
+                       <p className="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">评分管理</p>
+                       <h3 className="text-xl font-black">
+                         {evalModalMaterial ? pickLocale(evalModalMaterial.name) : '材料评分'}
+                       </h3>
+                     </div>
+                     <button
+                       type="button"
+                       onClick={() => setEvalModalMaterialId(null)}
+                       className="text-gray-400 hover:text-black text-xl"
+                     >
+                       ✕
+                     </button>
+                   </div>
+                   {evalModalRows.length === 0 ? (
+                     <p className="text-sm text-gray-400 py-10 text-center">暂无设计师评分</p>
+                   ) : (
+                     <div className="space-y-4">
+                       {evalModalRows.map((row) => {
+                         const avg = evaluationAverage(row.evaluations);
+                         const low = isLowEvaluation(row.evaluations);
+                         return (
+                           <div
+                             key={row.id}
+                             className={`rounded-2xl border p-5 ${
+                               row.status === 'disputed'
+                                 ? 'border-amber-300 bg-amber-50'
+                                 : low
+                                   ? 'border-red-200 bg-red-50'
+                                   : 'border-gray-100 bg-gray-50'
+                             }`}
+                           >
+                             <div className="flex justify-between gap-3 mb-3">
+                               <div>
+                                 <p className="font-black">{row.designerName}</p>
+                                 <p className="text-[11px] text-gray-500 font-bold">
+                                   {row.designerEmail || row.designerUsername || '无账号邮箱'}
+                                 </p>
+                                 <p className="text-[11px] text-gray-400 mt-1">
+                                   项目：{row.projectName || '未填写'}
+                                 </p>
+                               </div>
+                               <div className="text-right">
+                                 <p className={`text-2xl font-black ${low ? 'text-red-600' : 'text-black'}`}>
+                                   {avg.toFixed(1)}
+                                 </p>
+                                 {row.status === 'disputed' && (
+                                   <p className="text-[10px] font-black text-amber-700">材料商已复议</p>
+                                 )}
+                                 {low && row.status !== 'disputed' && (
+                                   <p className="text-[10px] font-black text-red-500">超低评分</p>
+                                 )}
+                               </div>
+                             </div>
+                             <div className="grid grid-cols-5 gap-2 text-center text-[10px] font-bold mb-3">
+                               {ADMIN_EVAL_KEYS.map((item) => (
+                                 <div key={item.key} className="bg-white rounded-xl py-2">
+                                   <p className="text-gray-400">{item.label}</p>
+                                   <p>{row.evaluations[item.key]}</p>
+                                 </div>
+                               ))}
+                             </div>
+                             {row.status === 'disputed' && (
+                               <p className="text-[11px] text-gray-600">
+                                 材料商注册手机：{row.supplierPhone || '未填写'}
+                               </p>
+                             )}
+                           </div>
+                         );
+                       })}
+                     </div>
+                   )}
+                 </div>
+               </div>
+             )}
           </div>
         )}
 

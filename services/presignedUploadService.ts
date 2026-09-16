@@ -90,7 +90,7 @@ async function uploadViaServerProxy(
   }
 
   return {
-    readUrl: json.url,
+    readUrl: forceHttpsUrl(json.url),
     objectKey: json.objectKey,
     contentType: json.contentType ?? (file as File).type ?? 'image/jpeg',
   };
@@ -105,7 +105,7 @@ async function uploadViaDirectPut(
 ): Promise<UploadedObject> {
   const presigned = await requestPresignedUrl(token, file, category, assetType);
 
-  const putRes = await fetch(presigned.uploadUrl, {
+  const putRes = await fetch(forceHttpsUrl(presigned.uploadUrl), {
     method: 'PUT',
     headers: { 'Content-Type': presigned.contentType },
     body: file,
@@ -116,10 +116,14 @@ async function uploadViaDirectPut(
   }
 
   return {
-    readUrl: presigned.readUrl,
+    readUrl: forceHttpsUrl(presigned.readUrl),
     objectKey: presigned.objectKey,
     contentType: presigned.contentType,
   };
+}
+
+function forceHttpsUrl(url: string): string {
+  return url.replace(/^http:\/\//i, 'https://');
 }
 
 /**
@@ -144,16 +148,24 @@ export async function uploadViaPresignedUrl(
   try {
     uploaded = await uploadViaDirectPut(token, compressed as File, category, assetType);
   } catch (directErr) {
-    // 典型为浏览器 → OSS 跨域被拦截（TypeError: Failed to fetch）。
-    // 回退到服务端代理上传，避免依赖 OSS 桶的 CORS 配置。
+    // 典型为浏览器 → OSS 跨域被拦截，或 HTTPS 页请求 http 预签名地址被 Mixed Content 拦截。
     console.warn('[presignedUpload] 直传失败，改用服务端代理上传:', directErr);
-    uploaded = await uploadViaServerProxy(
-      token,
-      compressed,
-      fileName,
-      category,
-      assetType
-    );
+    try {
+      uploaded = await uploadViaServerProxy(
+        token,
+        compressed,
+        fileName,
+        category,
+        assetType
+      );
+    } catch (proxyErr) {
+      console.error('[presignedUpload] 服务端代理上传失败:', proxyErr);
+      throw new Error(
+        proxyErr instanceof Error
+          ? `图片上传失败：${proxyErr.message}`
+          : '图片上传失败，请稍后重试'
+      );
+    }
   }
 
   const userId = await getCurrentUserId();

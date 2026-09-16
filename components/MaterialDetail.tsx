@@ -17,9 +17,16 @@ import MaterialEvaluationsSection from './MaterialEvaluationsSection';
 import MaterialManageActionBar from './MaterialManageActionBar';
 import type { MaterialHumanDna, MaterialEvaluations, InspirationStory, MaterialApplicationCase } from '../types/materialDetail';
 import {
-  hasUserRatedMaterial,
+  disputeMaterialEvaluation,
+  fetchMaterialEvaluations,
+  fetchMyMaterialEvaluation,
   submitMaterialEvaluation,
+  type MaterialEvaluationRow,
 } from '../services/materialEvaluationService';
+import {
+  fetchUnreadNotificationRows,
+  markNotificationsRead,
+} from '../services/notificationService';
 import { fetchMaterialInspirationStories } from '../services/inspirationStoryService';
 import { fetchMaterialMoodTags } from '../services/moodTagService';
 import {
@@ -29,7 +36,6 @@ import {
 import ProjectAdoptionModal from './ProjectAdoptionModal';
 import useMaterialEventLog from '../hooks/useMaterialEventLog';
 import useMaterialViewCount from '../hooks/useMaterialViewCount';
-import useMarkNotificationsRead from '../hooks/useMarkNotificationsRead';
 import { portalFromUserRole } from '../utils/appPortal';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 import { pickLocale } from '../utils/localizedText';
@@ -100,6 +106,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
   const [installPreviewIndex, setInstallPreviewIndex] = useState<number | null>(null);
   const [catalogDownloading, setCatalogDownloading] = useState(false);
   const variantStripRef = useRef<HTMLDivElement>(null);
+  const supplierUnreadRowsRef = useRef<Awaited<ReturnType<typeof fetchUnreadNotificationRows>> | null>(null);
 
   const materialDetail = useMemo(() => toMaterialDetail(material), [material]);
   const [applicationCases, setApplicationCases] = useState(() =>
@@ -115,7 +122,13 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
     materialDetail.evaluation_vote_count ?? 0
   );
   const [hasSubmittedRating, setHasSubmittedRating] = useState(false);
+  const [myEvaluation, setMyEvaluation] = useState<MaterialEvaluationRow | null>(null);
+  const [latestEvaluation, setLatestEvaluation] = useState<MaterialEvaluationRow | null>(null);
+  const [sectionUnread, setSectionUnread] = useState({ eval: 0, mood: 0, story: 0 });
   const supplierViewer = isSupplierUser(user);
+  const isOwnSupplierMaterial = Boolean(
+    supplierViewer && user?.id && material.supplierId === user.id && !isPublicView
+  );
   const { logEventSafe } = useMaterialEventLog(user?.id);
   const permissions = useMemo(
     () =>
@@ -163,18 +176,54 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
     };
   }, [material.supplierId]);
 
-  /** 材料商进入详情 → 将该材料的 tag_added 未读清零 */
-  useMarkNotificationsRead({
-    enabled:
-      Boolean(user) &&
-      supplierViewer &&
-      !isPublicView &&
-      isSupabaseConfigured() &&
-      Boolean(material.id),
-    types: ['tag_added'],
-    targetId: material.id,
-    portal: 'supplier',
-  });
+  /** 材料商进入详情：先展示分区未读数，再按材料清零对应通知 */
+  useEffect(() => {
+    supplierUnreadRowsRef.current = null;
+  }, [material.id]);
+
+  useEffect(() => {
+    if (!isOwnSupplierMaterial || !isSupabaseConfigured() || !material.id) {
+      setSectionUnread({ eval: 0, mood: 0, story: 0 });
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      if (!supplierUnreadRowsRef.current) {
+        supplierUnreadRowsRef.current = await fetchUnreadNotificationRows('supplier');
+      }
+      const rows = supplierUnreadRowsRef.current;
+      if (cancelled) return;
+      const storyIds = new Set(inspirationStories.map((s) => s.id).filter(Boolean));
+      const evalCount = rows.filter(
+        (r) => r.type === 'evaluation_added' && r.targetId === material.id
+      ).length;
+      const moodCount = rows.filter(
+        (r) => r.type === 'tag_added' && r.targetId === material.id
+      ).length;
+      const storyCount = rows.filter(
+        (r) => r.type === 'story_pending_review' && r.targetId && storyIds.has(r.targetId)
+      ).length;
+      setSectionUnread({ eval: evalCount, mood: moodCount, story: storyCount });
+
+      await markNotificationsRead({
+        types: ['tag_added', 'evaluation_added'],
+        targetId: material.id,
+        portal: 'supplier',
+      });
+      await Promise.all(
+        [...storyIds].map((storyId) =>
+          markNotificationsRead({
+            types: ['story_pending_review'],
+            targetId: storyId,
+            portal: 'supplier',
+          })
+        )
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOwnSupplierMaterial, material.id, inspirationStories]);
 
   const humanDnaSnapshot = useCallback((): MaterialHumanDna => {
     return buildHumanDnaSnapshot({
@@ -312,12 +361,43 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
   }, [material.id, user?.id, user?.role, materialDetail.inspiration_stories]);
 
   useEffect(() => {
-    if (user?.role === 'DESIGNER') {
-      setHasSubmittedRating(hasUserRatedMaterial(user.id, material.id));
-    } else {
+    if (!isSupabaseConfigured() || !user?.id || !material.id) {
       setHasSubmittedRating(false);
+      setMyEvaluation(null);
+      setLatestEvaluation(null);
+      return;
     }
-  }, [user?.id, user?.role, material.id]);
+    let cancelled = false;
+    const portal = portalFromUserRole(user.role);
+    void (async () => {
+      if (user.role === 'DESIGNER') {
+        const mine = await fetchMyMaterialEvaluation(material.id, user.id);
+        if (cancelled) return;
+        setMyEvaluation(mine);
+        setHasSubmittedRating(Boolean(mine));
+        setLatestEvaluation(null);
+        return;
+      }
+      if (user.role === 'SUPPLIER' && user.id === material.supplierId) {
+        const rows = await fetchMaterialEvaluations(material.id, portal);
+        if (cancelled) return;
+        const latest =
+          rows
+            .filter((r) => r.status !== 'revoked')
+            .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0] ?? null;
+        setLatestEvaluation(latest);
+        setMyEvaluation(null);
+        setHasSubmittedRating(false);
+        return;
+      }
+      setHasSubmittedRating(false);
+      setMyEvaluation(null);
+      setLatestEvaluation(null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, user?.role, material.id, material.supplierId]);
 
   useEffect(() => {
     if (
@@ -354,7 +434,11 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
 
   const displayBrand = material.brand ?? '';
 
-  // Check if rating is allowed — designers may rate directly from detail page (one-time submit).
+  const ratingProjectName =
+    quoteForm.project.trim() ||
+    myEvaluation?.projectName ||
+    (myAdoption ? `${displayName} 项目案例` : displayName);
+
   const handleSubmitEvaluation = async (submission: MaterialEvaluations) => {
     if (!user || user.role !== 'DESIGNER') return;
 
@@ -365,9 +449,12 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
       submission,
       currentEvaluations: evaluations,
       voteCount: evaluationVoteCount,
+      projectName: ratingProjectName,
+      projectAdoptionId: myAdoption?.id ?? null,
+      evaluationId: myEvaluation?.id ?? null,
     });
 
-    if (!result.ok) {
+    if (result.ok === false) {
       showToast(result.error, 'error');
       return;
     }
@@ -376,7 +463,20 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
     setEvaluationVoteCount(result.voteCount);
     setHasSubmittedRating(true);
     onMaterialUpdated?.(result.material);
-    showToast('评分已提交，综合评估已更新', 'success');
+    const mine = await fetchMyMaterialEvaluation(material.id, user.id);
+    setMyEvaluation(mine);
+    showToast(myEvaluation ? '评分已更新，综合评估已重算' : '评分已提交，综合评估已更新', 'success');
+  };
+
+  const handleDisputeLatest = async () => {
+    if (!latestEvaluation) return;
+    const result = await disputeMaterialEvaluation(latestEvaluation.id, 'supplier');
+    if (result.ok === false) {
+      showToast(result.error, 'error');
+      return;
+    }
+    setLatestEvaluation({ ...latestEvaluation, status: 'disputed' });
+    showToast(t('eval.disputeOk'), 'success');
   };
 
   const handleInspirationStoriesChange = (stories: typeof inspirationStories) => {
@@ -906,6 +1006,12 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
             interactive={permissions.canUseEvaluationSliders}
             hasSubmitted={hasSubmittedRating}
             onSubmitRating={handleSubmitEvaluation}
+            projectName={ratingProjectName}
+            unreadCount={isOwnSupplierMaterial ? sectionUnread.eval : 0}
+            myEvaluations={myEvaluation?.evaluations ?? null}
+            latestEvaluation={isOwnSupplierMaterial ? latestEvaluation : null}
+            isSupplierView={isOwnSupplierMaterial}
+            onDisputeLatest={isOwnSupplierMaterial ? handleDisputeLatest : undefined}
           />
           <MaterialInspirationStoriesSection
             stories={inspirationStories}
@@ -919,6 +1025,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
             materialSupplierId={material.supplierId}
             persistBrandStories={permissions.canSubmitBrandStory && isManageMode}
             isLoading={inspirationStoriesLoading}
+            unreadCount={isOwnSupplierMaterial ? sectionUnread.story : 0}
           />
         </div>
 
@@ -955,6 +1062,7 @@ const MaterialDetail: React.FC<MaterialDetailProps> = ({
             canAddBrandMoodTags={permissions.canAddBrandMoodTags}
             onMoodTagInteract={permissions.canInteractMoodTags ? handleMoodTagInteract : undefined}
             compact
+            unreadCount={isOwnSupplierMaterial ? sectionUnread.mood : 0}
           />
         </div>
         </div>

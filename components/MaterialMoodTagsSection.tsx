@@ -30,6 +30,7 @@ interface MaterialMoodTagsSectionProps {
   canAddCustomMoodTags?: boolean;
   canAddBrandMoodTags?: boolean;
   compact?: boolean;
+  unreadCount?: number;
   /** Fired when a designer clicks a mood tag (+1 interaction). */
   onMoodTagInteract?: (tagName: string, tag: MaterialMoodTag) => void;
 }
@@ -44,6 +45,7 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
   canAddCustomMoodTags = false,
   canAddBrandMoodTags = false,
   compact = false,
+  unreadCount = 0,
   onMoodTagInteract,
 }) => {
   const { t } = useTranslation();
@@ -225,7 +227,7 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
 
   return (
     <section
-      className={`bg-gray-50 rounded-2xl border border-gray-100 ${
+      className={`relative bg-gray-50 rounded-2xl border border-gray-100 ${
         compact ? 'p-3 sm:p-4' : 'p-4 sm:p-6'
       }`}
     >
@@ -246,7 +248,14 @@ export const MaterialMoodTagsSection: React.FC<MaterialMoodTagsSectionProps> = (
           <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-0.5">
             Human DNA
           </p>
-          <h2 className={`font-bold ${compact ? 'text-base' : 'text-lg'}`}>{t('mood.title')}</h2>
+          <h2 className={`font-bold ${compact ? 'text-base' : 'text-lg'}`}>
+            {t('mood.title')}
+            {unreadCount > 0 && (
+              <span className="ml-2 inline-flex min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-black items-center justify-center align-middle">
+                {unreadCount}
+              </span>
+            )}
+          </h2>
           <p className="text-[11px] sm:text-xs text-gray-500 mt-0.5">
             {canAddBrandMoodTags
               ? t('mood.hintBrand')

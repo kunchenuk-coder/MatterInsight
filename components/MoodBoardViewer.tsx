@@ -14,6 +14,7 @@ interface MoodBoardViewerProps {
   onBack: () => void;
   onSelectMaterial: (material: Material) => void;
   onFindSimilar: (item: MoodboardFeedMaterial) => void;
+  onOpenDesigner?: () => void;
 }
 
 const MoodBoardViewer: React.FC<MoodBoardViewerProps> = ({
@@ -22,6 +23,7 @@ const MoodBoardViewer: React.FC<MoodBoardViewerProps> = ({
   onBack,
   onSelectMaterial,
   onFindSimilar,
+  onOpenDesigner,
 }) => {
   const { t } = useTranslation();
   const [highlightedItemId, setHighlightedItemId] = useState<string | null>(null);
@@ -84,6 +86,7 @@ const MoodBoardViewer: React.FC<MoodBoardViewerProps> = ({
                   designerId={board.ownerId}
                   displayName={ownerLabel}
                   avatarUrl={board.ownerAvatar}
+                  onBeforeNavigate={onOpenDesigner}
                 />
               </div>
             ) : (

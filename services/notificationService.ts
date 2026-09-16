@@ -6,7 +6,11 @@ export type NotificationType =
   | 'inquiry'
   | 'sample_request'
   | 'story_featured'
-  | 'quote_received';
+  | 'quote_received'
+  | 'project_adoption_approved'
+  | 'story_pending_review'
+  | 'evaluation_added'
+  | 'evaluation_disputed';
 
 export type UnreadNotificationCounts = {
   total: number;
@@ -15,6 +19,10 @@ export type UnreadNotificationCounts = {
   sample_request: number;
   story_featured: number;
   quote_received: number;
+  project_adoption_approved: number;
+  story_pending_review: number;
+  evaluation_added: number;
+  evaluation_disputed: number;
 };
 
 export const EMPTY_UNREAD_COUNTS: UnreadNotificationCounts = {
@@ -24,6 +32,10 @@ export const EMPTY_UNREAD_COUNTS: UnreadNotificationCounts = {
   sample_request: 0,
   story_featured: 0,
   quote_received: 0,
+  project_adoption_approved: 0,
+  story_pending_review: 0,
+  evaluation_added: 0,
+  evaluation_disputed: 0,
 };
 
 function clientFor(portal?: AppPortal) {
@@ -54,13 +66,43 @@ export async function fetchUnreadNotificationCounts(
 
   const counts: UnreadNotificationCounts = { ...EMPTY_UNREAD_COUNTS };
   for (const row of data ?? []) {
-    const t = String((row as { type?: string }).type ?? '') as NotificationType;
-    if (t in counts && t !== 'total') {
-      counts[t] += 1;
-      counts.total += 1;
-    }
+    const t = String((row as { type?: string }).type ?? '');
+    if (t === 'total' || !(t in counts)) continue;
+    counts[t as Exclude<keyof UnreadNotificationCounts, 'total'>] += 1;
+    counts.total += 1;
   }
   return counts;
+}
+
+export type UnreadNotificationRow = { type: NotificationType; targetId: string | null };
+
+/** 未读通知明细（材料商按材料展示角标） */
+export async function fetchUnreadNotificationRows(
+  portal?: AppPortal
+): Promise<UnreadNotificationRow[]> {
+  if (!isSupabaseConfigured()) return [];
+  const client = clientFor(portal);
+  const { data: authData } = await client.auth.getUser();
+  const receiverId = authData.user?.id;
+  if (!receiverId) return [];
+
+  const { data, error } = await client
+    .from('notifications')
+    .select('type, target_id')
+    .eq('receiver_id', receiverId)
+    .eq('is_read', false);
+
+  if (error) {
+    console.error('[notificationService] fetchUnreadNotificationRows:', error.message);
+    return [];
+  }
+
+  return (data ?? []).map((row) => ({
+    type: String((row as { type?: string }).type ?? '') as NotificationType,
+    targetId: (row as { target_id?: string | null }).target_id
+      ? String((row as { target_id?: string | null }).target_id)
+      : null,
+  }));
 }
 
 /** 写入一条未读通知（走 security definer RPC） */

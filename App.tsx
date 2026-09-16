@@ -396,9 +396,6 @@ const App: React.FC = () => {
   };
 
   const openMoodboardFromFeed = (board: MoodBoard) => {
-    if (pageRoute.type !== 'designer' && pageRoute.type !== 'my-page') {
-      navigateTo(DESIGNER_DASHBOARD_PATH, true);
-    }
     setSelectedMoodboard(board);
     setCurrentView('MOODBOARD_VIEW');
   };
@@ -1692,7 +1689,11 @@ const App: React.FC = () => {
     ? 0
     : isSupabaseConfigured()
       ? user.role === 'SUPPLIER'
-        ? dbUnreadCounts.inquiry + dbUnreadCounts.sample_request + dbUnreadCounts.tag_added
+        ? dbUnreadCounts.inquiry +
+          dbUnreadCounts.sample_request +
+          dbUnreadCounts.tag_added +
+          dbUnreadCounts.evaluation_added +
+          dbUnreadCounts.story_pending_review
         : user.role === 'DESIGNER'
           ? designerUnreadRequests + dbUnreadCounts.story_featured
           : dbUnreadTotal
@@ -1966,7 +1967,8 @@ const App: React.FC = () => {
             <MoodBoardViewer
               board={selectedMoodboard}
               materials={library}
-              onBack={() => {
+              onBack={goToExploreLibrary}
+              onOpenDesigner={() => {
                 setSelectedMoodboard(null);
                 setCurrentView('HOME');
               }}

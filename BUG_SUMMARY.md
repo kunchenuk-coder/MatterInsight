@@ -5,6 +5,46 @@
 
 ---
 
+## 材料评分 / 复议（2026-09-16）
+
+> **功能：** 沿用现有表 `material_designer_evaluations`（禁止另建 `material_ratings`）。设计师确认承诺后提交/更新评分；项目名来自询价 `project_name` 或「项目采纳」；材料商可复议；Admin「材料库监管」看综合分、设计师邮箱、超低分红点、复议材料商手机。  
+> **远程 schema 必须在 SQL Editor 跑迁移**，只推 Git 不会创建 RPC。
+
+### 已修 Bug
+
+| # | 现象 | 原因 | 修复 |
+|---|------|------|------|
+| 1 | 点提交显示失败，控制台 `Could not find the function public.submit_material_evaluation(...commitment...)` / `list_material_evaluations` | 前端已调新 RPC，远程仍是旧 2 参 `submit_material_evaluation(text, jsonb)` | 在 SQL Editor 跑 `20260916084321_material_evaluation_project_and_dispute.sql` |
+| 2 | 硬刷新后 `column reference "id" is ambiguous` | `list_material_evaluations` 的 `RETURNS TABLE(id uuid, ...)` 与表列 `id` 在 PL/pgSQL 里撞名 | `#variable_conflict use_column` |
+| 3 | `operator does not exist: uuid = text` / `text = uuid` | 远程 `materials.id`、`material_designer_evaluations.material_id` 为 uuid，RPC 参数/比较用了 text；列表里 `m.supplier_id = v_uid` 亦混型 | 比较两侧 `::text`；INSERT 用 `p_material_id::uuid` |
+| 4 | `function public.material_display_name(uuid) does not exist` | 只定义了 `(text)` 重载，列表传入 uuid 列 | 增加 `material_display_name(uuid)`，内部转 `::text`；调用处 `e.material_id::text` |
+| 5 | AI 识材 Gemini 503 / 上传失败 | 高需求未当限流；PUT 预签名非 HTTPS | `aiMaterialAnalysis` 把 503 当 rate-limit；OSS PUT 强制 HTTPS |
+| 6 | 情绪板「✨上传图片」与 +/- 重叠 | 绝对定位 `right` 不够 | `MoodBoardDesigner` 上传按钮 `right-20` / `md:right-24` |
+| 7 | 点设计师头像/名字未进设计师主页 | 探索库/情绪板链接未走设计师主页路由 | `DesignerAuthorLink` / `MoodBoardViewer` / `App.tsx` 情绪板返回探索库 |
+
+### 流程
+
+1. 设计师材料详情 →「我要评分」→ 勾选承诺 → `submit_material_evaluation`（更新走 `update_material_evaluation`）。  
+2. 项目名：入参 → 询价 `project_name` → 有项目采纳则为「{材料名} 项目案例」→ 否则材料名。  
+3. 材料商「我的上架单品」红点：`evaluation_added` + `tag_added` + `story_pending_review`；详情分区显示未读数后按 target 标已读。  
+4. 「已评」看最新一条；「复议该评价」→ `dispute_material_evaluation` → Admin 通知 `evaluation_disputed`（可看设计师邮箱、材料商 `registered_phone`）。  
+5. Admin 材料库监管「评分综合评分」：多人综合分；超低分/复议红点；点进去评分管理。
+
+### 关键文件 / 迁移
+
+- 前端：`services/materialEvaluationService.ts`、`MaterialEvaluationsSection.tsx`、`MaterialDetail.tsx`、`AdminDashboard.tsx`、`SupplierDashboard.tsx`、`notificationService.ts`  
+- 迁移：`20260916084321_material_evaluation_project_and_dispute.sql`、`20260916125507_fix_evaluation_rpc_id_and_uuid.sql`（须在远程 SQL Editor 跑；Git push ≠ 远程库已更新）  
+- 前端 UUID 字符串：`normalizeMaterialIdForEventLog`；INSERT 仍须 SQL `::uuid`。
+
+### 防复发
+
+- **禁止**新建 `material_ratings` 表；评分真相在 `material_designer_evaluations` + `materials.data.humanDna` 重算。  
+- **禁止**用 LocalStorage 记「已评分」。  
+- 远程 `materials.id` 是 uuid：比较用 `::text` 或 `::uuid` 对齐，禁止裸 `uuid = text`。  
+- 改 RPC 后必须在 SQL Editor 执行；只推 GitHub 线上仍会 `schema cache` 找不到函数。
+
+---
+
 ## 供应商入驻审核（2026-08-21）
 
 > **功能：** 材料商注册必须提交账号名、邮箱、密码、营业执照 → 进入 Admin「供应商认证」→ 通过后才能发布材料。  

@@ -4,6 +4,7 @@ import html2canvas from 'html2canvas';
 // 检查下面这一行，确保包含 MoodBoardProps 里面用到的所有类型
 import { User, Material, MoodBoard, MoodBoardItem, Category, type LocalTemporaryMaterial } from '../types';
 import {
+  isVisionRateLimitError,
   parseMaterialAnalysisText,
   type VisionSampleAnchor,
   type VisionTokenUsage,
@@ -3432,6 +3433,14 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
       setAiVisionAnchor(null);
     } catch (err) {
       console.error("AI Analysis failed:", err);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isVisionRateLimitError(err) || /503|high demand/i.test(msg)) {
+        alert(t('vision.errorBusy'));
+      } else if (/Failed to fetch|Mixed Content|NetworkError|图片上传失败/i.test(msg)) {
+        alert(t('vision.errorNetwork'));
+      } else {
+        alert(t('vision.errorGeneric'));
+      }
       if (aiImage) {
         placeEffectImageOnly(aiImage, "空间效果图（手动标注）");
         setVisualAnnotations(null);
@@ -4944,10 +4953,10 @@ const MoodBoardDesigner: React.FC<MoodBoardProps> = ({
     setVisualAnnotations(null);
     setMatchResults(null);
   }}
-  className={`absolute bg-black text-white rounded-full shadow-2xl flex items-center group hover:scale-105 transition-all z-[60] border border-white/20 md:bottom-8 md:right-8 md:h-14 md:px-6 md:gap-3 ${
+  className={`absolute bg-black text-white rounded-full shadow-2xl flex items-center group hover:scale-105 transition-all z-[60] border border-white/20 bottom-6 right-20 md:bottom-6 md:right-24 md:h-14 md:px-6 md:gap-3 ${
     smartMatchSucceeded
-      ? "bottom-[6.75rem] right-6 h-11 w-11 justify-center gap-0 px-0"
-      : "bottom-8 right-8 h-14 px-6 gap-3"
+      ? "h-11 w-11 justify-center gap-0 px-0"
+      : "h-14 px-6 gap-3"
   }`}
   aria-label={t('vision.uploadImage')}
 >

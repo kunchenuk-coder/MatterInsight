@@ -34,6 +34,7 @@ function getOssClient(): OSS {
     bucket,
     accessKeyId,
     accessKeySecret,
+    secure: true,
     ...(endpoint ? { endpoint } : {}),
   });
 }
@@ -107,11 +108,13 @@ export function createPresignedUploadUrls(
           ? 'video/mp4'
           : 'image/jpeg');
 
-  const uploadUrl = client.signatureUrl(objectKey, {
-    method: 'PUT',
-    expires: PRESIGN_PUT_EXPIRES_SEC,
-    'Content-Type': mime,
-  });
+  const uploadUrl = forceHttpsUrl(
+    client.signatureUrl(objectKey, {
+      method: 'PUT',
+      expires: PRESIGN_PUT_EXPIRES_SEC,
+      'Content-Type': mime,
+    })
+  );
 
   const readUrl = forceHttpsUrl(
     client.signatureUrl(objectKey, {

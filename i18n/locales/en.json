@@ -389,17 +389,29 @@
   },
   "eval": {
     "title": "Material evaluation",
-    "aggregate": "Community score · {{score}}",
-    "submitted": "Rating submitted",
+    "aggregate": "Overall {{score}}",
+    "submitted": "Rated",
     "submitting": "Submitting…",
     "submit": "Submit rating",
     "rate": "Rate this material",
+    "resubmit": "Update rating",
     "readOnlyHint": "Scores are aggregated from designer community feedback and cannot be edited by suppliers.",
     "aesthetics": "Aesthetics",
     "durability": "Durability",
     "service": "Service",
     "cleanliness": "Easy clean",
-    "recommendation": "Recommend"
+    "recommendation": "Recommend",
+    "confirmTitle": "Confirm your rating",
+    "confirmBody": "You are rating this material for project “{{project}}”. Submitting confirms this is based on real project use.",
+    "confirmCheck": "I confirm this rating is honest project feedback and I take responsibility for it.",
+    "confirmSubmit": "Confirm",
+    "defaultProject": "this project",
+    "latestRating": "Latest",
+    "latestTitle": "Latest rating",
+    "latestBody": "Designer {{designer}} rated your material on project {{project}}.",
+    "dispute": "Dispute this rating",
+    "alreadyDisputed": "Dispute submitted. The platform will follow up.",
+    "disputeOk": "Dispute submitted. The platform will contact you."
   },
   "mood": {
     "title": "Mood tags",
@@ -487,7 +499,10 @@
     "agentDeepseekSubtitle": "DeepSeek · Cost efficient",
     "badgeRecommended": "Recommended",
     "badgeSavePoints": "Save pts",
-    "close": "Close"
+    "close": "Close",
+    "errorBusy": "The recognition service is busy (rate limited). Fallback models also failed. Please try again later, or pick another agent.",
+    "errorNetwork": "Image upload or network request failed. Check your connection and retry.",
+    "errorGeneric": "AI material recognition failed. The render was placed on the canvas for manual tagging. Please try again later."
   },
   "topics": {
     "mineTitle": "My topics",
