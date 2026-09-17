@@ -145,7 +145,7 @@ export async function signUp(
   email: string,
   password: string,
   role: UserRole,
-  extras?: { company?: string }
+  extras?: { company?: string; phone?: string }
 ): Promise<AuthResult> {
   if (role === 'ADMIN') {
     return { ok: false, error: '管理员账号请联系平台开通' };
@@ -155,11 +155,19 @@ export async function signUp(
   setPortalOverride(portal);
   const client = getSupabaseForPortal(portal);
   const dbRole = userRoleToDbRole(role);
+  const company = extras?.company?.trim();
+  const phone = extras?.phone?.trim();
 
   const { data, error } = await client.auth.signUp({
     email,
     password,
-    options: { data: { role: dbRole } },
+    options: {
+      data: {
+        role: dbRole,
+        ...(company ? { company } : {}),
+        ...(phone ? { phone } : {}),
+      },
+    },
   });
 
   if (error) {
@@ -182,7 +190,8 @@ export async function signUp(
   }
 
   const profileResult = await insertProfileOnSignup(data.user.id, email, role, {
-    company: extras?.company,
+    company,
+    phone,
   });
   if (profileResult.ok === false) {
     await discardPortalSession(portal);

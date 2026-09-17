@@ -200,8 +200,8 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
 
   const handleVerificationSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!verificationForm.company.trim() || !verificationForm.doc) {
-      alert('请填写供应商账号名并上传营业执照');
+    if (!verificationForm.company.trim() || !verificationForm.phone.trim() || !verificationForm.doc) {
+      alert('请填写供应商账号名、联系手机号并上传营业执照');
       return;
     }
     onRequestVerification({
@@ -242,10 +242,11 @@ const SupplierDashboard: React.FC<SupplierDashboardProps> = ({
                 />
               </div>
               <div>
-                <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">联系手机号（选填）</label>
+                <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">联系手机号</label>
                 <input 
+                  required
                   type="tel"
-                  autoComplete="off"
+                  autoComplete="tel"
                   value={verificationForm.phone}
                   onChange={e => setVerificationForm({...verificationForm, phone: e.target.value})}
                   placeholder="请输入您的联系电话"

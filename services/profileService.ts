@@ -118,7 +118,7 @@ export async function insertProfileOnSignup(
   userId: string,
   email: string,
   role: UserRole,
-  extras?: { company?: string }
+  extras?: { company?: string; phone?: string }
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!isSupabaseConfigured()) {
     return { ok: false, error: '服务未配置' };
@@ -126,7 +126,9 @@ export async function insertProfileOnSignup(
 
   const dbRole = userRoleToDbRole(role);
   const company = extras?.company?.trim();
+  const phone = extras?.phone?.trim();
   const initialPoints = initialPointsForDbRole(dbRole);
+  const isSupplier = dbRole === 'supplier';
   const { error } = await getSupabase()
     .from('profiles')
     .upsert(
@@ -137,7 +139,10 @@ export async function insertProfileOnSignup(
         username: email.split('@')[0] || 'user',
         points: initialPoints,
         current_points: initialPoints,
+        status: isSupplier ? 'pending' : 'approved',
+        is_verified: isSupplier ? false : true,
         ...(company ? { company } : {}),
+        ...(phone ? { registered_phone: phone } : {}),
       },
       { onConflict: 'id' }
     );

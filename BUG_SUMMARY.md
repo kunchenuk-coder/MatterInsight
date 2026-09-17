@@ -1,7 +1,48 @@
 # MatterInsight Bug / 经验汇总
 
 > 与 `PROJECT_MEMORY.md` 配套。Agent 做 GitHub 推送前先读记忆库。  
-> **鉴权 / 材料列表相关修改前：必读下方 P0 与 `PROJECT_MEMORY.md` §0.5。**
+> **鉴权 / 材料列表相关修改前：必读下方 P0 与 `PROJECT_MEMORY.md` §0.5。**  
+> **2026-09-17 起：** 后续任务 **禁止**改登录页外壳（`AuthShell`）和规则文件（`NON_NEGOTIABLE_RULES.md` 等），除非用户当场手动确认。材料商**注册表单**属于入驻审核，不在此禁令内。
+
+---
+
+## 供应商审核 / 入驻补全（2026-09-17）
+
+> **功能：** 材料商申请加入必须填账号名、手机号、邮箱、密码、营业执照；账号保持 `pending` / `is_verified=false`，Admin 收到待审提示后才能通过认证。  
+> 证件只存 OSS object key；Admin 大图必须走 `openVerificationDoc` 刷新预签名 URL。  
+> 供应商评估表用真实资料；风险预警只看报价备注里的手机号/微信号，禁止假 AI 文案。
+
+### 已修 Bug
+
+| # | 现象 | 原因 | 修复 |
+|---|------|------|------|
+| 1 | 材料商只填邮箱+执照就「注册成功」，Admin 无待审提示；多数账号 `registered_phone` 为空 | 注册表无手机号；执照上传失败仍 `onAuthSuccess`；无 `supplier_pending_review` 通知 | 注册必填手机号写入 `profiles.registered_phone`；执照失败须补交；`handle_new_user` 保持 pending；新材料商 INSERT 后通知所有 admin |
+| 2 | Admin 点开低分复议弹窗后，「材料库监管」红字 1 不消失 | Tab 角标按「仍存在复议/超低分」计数，不是未读通知 | 角标改为未读 `evaluation_disputed`；点开弹窗 `markNotificationsRead` |
+| 3 | 「AI检测异常：引导线下私单」以及「对话质询 / 警告处分」 | 旧 RPC 用「上架≥3 且无流水」当 Suspicious；两按钮无真实逻辑 | 删假按钮；仅当报价备注含手机号或微信号才预警，点击展示备注原文 |
+| 4 | 供应商评估表缺执照/手机/图册/评分等列 | 表结构过简 | 名称+邮箱、手机、执照、上架单品（点进编辑）、PDF、点赞、浏览、综合星级、积分、流水、风险 |
+| 5 | 评估表能看到证件缩略图，点大图黑屏「无法加载证件图片」 | `onOpen={setViewingVerificationDoc}` 只开弹窗，未签 OSS 可读 URL | 与「供应商认证」相同，走 `openVerificationDoc` |
+
+### 流程
+
+1. 材料商注册：账号名 → **手机号** → 邮箱 → 密码 → 营业执照。  
+2. `status=pending`，`is_verified=false`；执照 object key + 手机写入 `profiles`。  
+3. Admin 头像红点 / 「供应商认证」队列；通过认证后才能发材料。  
+4. 供应商评估：点上架数字 → 点单品 → 编辑信息；点执照缩略图/「查看证件大图」刷新可读 URL。  
+5. 风险：只扫描 `inquiries.supplier_quote_note` 的手机号/微信，不是 GMV 启发式。
+
+### 关键文件 / 迁移
+
+- 前端：`Auth.tsx`（仅材料商注册字段）、`authService.ts`、`profileService.ts`、`notificationService.ts`、`SupplierDashboard.tsx`、`AdminDashboard.tsx`、`adminAnalyticsService.ts`、`App.tsx`、`i18n/locales/{zh,en}.json`  
+- 迁移（远程已 apply）：`20260917104500_supplier_signup_pending_phone_admin_notify.sql`（`supplier_pending_review` + `handle_new_user` 写手机号）  
+- Git push ≠ 远程 schema；本次远程通知类型已执行。
+
+### 防复发
+
+- **禁止**材料商注册成功后写成 `approved` / `is_verified=true`。  
+- **禁止**执照存过期预签名 URL；大图禁止只 `setViewingVerificationDoc`，必须 `openVerificationDoc`。  
+- **禁止**用上架数/GMV 伪造「引导线下私单」。  
+- **禁止**在未获用户当场确认时修改登录页外壳 `AuthShell.tsx`、登录专用 UI、以及规则文件（`NON_NEGOTIABLE_RULES.md` / `REGRESSION_CHECKLIST.md`）。若必须改：先停下，等用户手动点通过。  
+- 材料商注册表单（手机号/执照）属于入驻审核，与「登录页外壳」分开。
 
 ---
 

@@ -121,6 +121,8 @@ interface AdminDashboardProps {
   onShipSample: (id: string) => void | Promise<void>;
   verificationRequests: User[];
   onVerifySupplier: (userId: string) => void;
+  unreadDisputedCount?: number;
+  onDisputedNotificationsRead?: () => void;
 }
 
 type AdminSubTab =
@@ -184,7 +186,8 @@ function materialScoreSummary(material: Material): { average: number; voteCount:
 
 const AdminDashboard: React.FC<AdminDashboardProps> = ({ 
   user, library, setLibrary, pendingList, onApprove, onReject, sampleRequests, onShipSample,
-  verificationRequests, onVerifySupplier
+  verificationRequests, onVerifySupplier,
+  unreadDisputedCount = 0, onDisputedNotificationsRead,
 }) => {
   const { t } = useTranslation();
   const [subTab, setSubTab] = useState<AdminSubTab>('DESIGNERS');
@@ -219,6 +222,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [pendingAdoptionsCount, setPendingAdoptionsCount] = useState(0);
   const [materialEvalRows, setMaterialEvalRows] = useState<MaterialEvaluationRow[]>([]);
   const [evalModalMaterialId, setEvalModalMaterialId] = useState<string | null>(null);
+  const [riskDetail, setRiskDetail] = useState<AdminSupplierEvaluation | null>(null);
+  const [optimisticDisputedRead, setOptimisticDisputedRead] = useState(0);
   const materialImageRefreshKeyRef = React.useRef('');
 
   /** 后台材料缩略图：localStorage 可能残留空 image（刷新失败曾被清空），进监管页时强制重签 OSS */
@@ -315,6 +320,14 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       console.info('[AdminDashboard] sampleRequests from props:', sampleRequests.length, sampleRequests);
     }
   }, [subTab, sampleRequests]);
+
+  useEffect(() => {
+    if (subTab !== 'VERIFICATIONS' || !isSupabaseConfigured()) return;
+    void markNotificationsRead({
+      types: ['supplier_pending_review'],
+      portal: 'admin',
+    });
+  }, [subTab]);
 
   // Badge count for story review tab
   useEffect(() => {
@@ -472,19 +485,47 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       id: products[0]?.supplierId || `local_${idx}`,
       name: brand,
       email: '',
+      phone: '',
+      verificationDocUrl: '',
       publishedCount: products.length,
+      hasCatalogPdf: products.some((m) => Boolean(m.catalogPdfUrl || m.catalogPdfObjectKey)),
+      likeCount: products.reduce((acc, m) => acc + (m.saves || 0), 0),
+      viewCount: products.reduce((acc, m) => acc + (m.clicks || 0), 0),
+      ratingAverage: null,
+      ratingMaterialCount: 0,
       pointsConsumed: 0,
       gmvCny: 0,
       risk: 'Low' as const,
+      riskReason: '',
     };
   });
 
-  const suppliers =
+  const suppliersRaw =
     isSupabaseConfigured() && supplierEvals.length > 0
       ? supplierEvals
       : isSupabaseConfigured()
         ? supplierEvals
         : fallbackSuppliers;
+
+  const suppliers = suppliersRaw.map((s) => {
+    const products = library.filter((m) => m.supplierId === s.id);
+    const rated = products
+      .map((m) => materialScoreSummary(m))
+      .filter((row) => row.voteCount > 0);
+    const ratingAverage =
+      rated.length > 0
+        ? rated.reduce((acc, row) => acc + row.average, 0) / rated.length
+        : null;
+    return {
+      ...s,
+      publishedCount: products.length || s.publishedCount,
+      hasCatalogPdf: products.some((m) => Boolean(m.catalogPdfUrl || m.catalogPdfObjectKey)),
+      likeCount: products.reduce((acc, m) => acc + (m.saves || 0), 0),
+      viewCount: products.reduce((acc, m) => acc + (m.clicks || 0), 0),
+      ratingAverage,
+      ratingMaterialCount: rated.length,
+    };
+  });
 
   const filteredLibrary = library.filter(m => selectedCategory === 'ALL' || m.category === selectedCategory);
 
@@ -499,10 +540,6 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const materialEvalNeedsAttention = (id: string) =>
     evalsForMaterial(id).some((r) => r.status === 'disputed' || isLowEvaluation(r.evaluations));
 
-  const attentionEvalCount = materialEvalRows.filter(
-    (r) => r.status === 'disputed' || isLowEvaluation(r.evaluations)
-  ).length;
-
   const evalModalRows = evalModalMaterialId ? evalsForMaterial(evalModalMaterialId) : [];
   const evalModalMaterial = evalModalMaterialId
     ? library.find((m) => m.id === evalModalMaterialId) ?? null
@@ -511,6 +548,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const openEvalModal = (materialId: string) => {
     setEvalModalMaterialId(materialId);
     const rows = evalsForMaterial(materialId).filter((r) => r.status === 'disputed');
+    if (rows.length === 0) return;
+    setOptimisticDisputedRead((n) => n + rows.length);
     void Promise.all(
       rows.map((row) =>
         markNotificationsRead({
@@ -519,7 +558,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
           portal: 'admin',
         })
       )
-    );
+    ).then(() => {
+      onDisputedNotificationsRead?.();
+    });
   };
 
   const closeEditModal = () => {
@@ -659,8 +700,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
         <button type="button" onClick={() => setSubTab('DESIGNERS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'DESIGNERS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>{t('admin.tabDesigners')}</button>
         <button type="button" onClick={() => setSubTab('MATERIALS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'MATERIALS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>
           {t('admin.tabMaterials')}
-          {attentionEvalCount > 0 && (
-            <span className="ml-1 bg-red-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">{attentionEvalCount}</span>
+          {Math.max(0, unreadDisputedCount - optimisticDisputedRead) > 0 && (
+            <span className="ml-1 bg-red-500 text-white px-1.5 py-0.5 rounded-full text-[8px]">
+              {Math.max(0, unreadDisputedCount - optimisticDisputedRead)}
+            </span>
           )}
         </button>
         <button type="button" onClick={() => setSubTab('SUPPLIERS')} className={`px-5 md:px-8 py-3 rounded-2xl text-xs font-black uppercase transition-all ${subTab === 'SUPPLIERS' ? 'bg-white shadow-md' : 'text-gray-400'}`}>{t('admin.tabSuppliers')}</button>
@@ -954,56 +997,113 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
              {suppliersLoading ? (
                <div className="p-16 text-center text-sm font-bold text-gray-400">正在加载供应商评估数据…</div>
              ) : (
-             <table className="w-full text-left border-collapse">
+             <div className="overflow-x-auto">
+             <table className="w-full min-w-[1100px] text-left border-collapse">
                <thead>
                  <tr className="bg-gray-50 border-b text-[10px] font-black uppercase text-gray-400 tracking-widest">
-                   <th className="p-6">材料商名称</th>
-                   <th className="p-6">上架单品</th>
-                   <th className="p-6">积分消费</th>
-                   <th className="p-6">交易流水</th>
-                   <th className="p-6">风险预警</th>
-                   <th className="p-6 text-right">管理操作</th>
+                   <th className="p-4">名称</th>
+                   <th className="p-4">联络手机号</th>
+                   <th className="p-4">营业执照</th>
+                   <th className="p-4">上架单品</th>
+                   <th className="p-4">PDF图册</th>
+                   <th className="p-4">点赞量</th>
+                   <th className="p-4">浏览量</th>
+                   <th className="p-4">评分星级</th>
+                   <th className="p-4">积分消费</th>
+                   <th className="p-4">交易流水</th>
+                   <th className="p-4">风险预警</th>
                  </tr>
                </thead>
                <tbody>
                  {suppliers.map(s => (
-                    <tr key={s.id} className="border-b hover:bg-gray-50 transition-colors">
-                      <td className="p-6">
+                    <tr key={s.id} className="border-b hover:bg-gray-50 transition-colors align-top">
+                      <td className="p-4">
                         <p className="font-bold">{s.name || '（未命名）'}</p>
                         {s.email ? (
-                          <p className="text-[10px] text-gray-400 font-bold mt-0.5">{s.email}</p>
+                          <p className="text-[10px] text-gray-400 font-bold mt-0.5 break-all">{s.email}</p>
                         ) : null}
                       </td>
-                      <td className="p-6">
-                        <button 
+                      <td className="p-4 font-black">{s.phone || '—'}</td>
+                      <td className="p-4">
+                        {s.verificationDocUrl ? (
+                          <VerificationDocCell
+                            req={{
+                              id: s.id,
+                              email: s.email,
+                              name: s.name,
+                              role: 'SUPPLIER',
+                              dbRole: 'supplier',
+                              points: 0,
+                              company: s.name,
+                              isVerified: true,
+                              verificationDoc: s.verificationDocUrl,
+                              registeredPhone: s.phone || undefined,
+                            }}
+                            onOpen={openVerificationDoc}
+                          />
+                        ) : (
+                          <span className="text-xs text-gray-300">未上传</span>
+                        )}
+                      </td>
+                      <td className="p-4">
+                        <button
+                          type="button"
                           onClick={() => setViewingSupplierProducts(s.id)}
                           className="font-black text-blue-600 hover:underline"
                         >
                           {s.publishedCount}
                         </button>
                       </td>
-                      <td className="p-6 font-black">{s.pointsConsumed}</td>
-                      <td className="p-6 font-black">¥ {Number(s.gmvCny || 0).toFixed(2)}</td>
-                      <td className="p-6">
-                        <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest ${s.risk === 'Suspicious' ? 'bg-red-100 text-red-600 animate-pulse' : 'bg-green-100 text-green-600'}`}>
-                          {s.risk === 'Suspicious' ? '⚠️ AI检测异常: 引导线下私单' : '状态良好'}
-                        </span>
+                      <td className="p-4 text-xs font-bold">
+                        {s.hasCatalogPdf ? (
+                          <span className="text-green-600">已上传</span>
+                        ) : (
+                          <span className="text-gray-300">未上传</span>
+                        )}
                       </td>
-                      <td className="p-6 text-right space-x-4">
-                        <button className="text-xs font-bold text-blue-600 hover:underline">对话质询</button>
-                        <button className="text-xs font-bold text-red-500 hover:underline">警告处分</button>
+                      <td className="p-4 font-black">{s.likeCount}</td>
+                      <td className="p-4 font-black">{s.viewCount}</td>
+                      <td className="p-4">
+                        {s.ratingAverage != null ? (
+                          <span className="font-black">
+                            {s.ratingAverage.toFixed(1)} ★
+                            <span className="block text-[10px] text-gray-400 font-bold">
+                              {s.ratingMaterialCount} 件均分
+                            </span>
+                          </span>
+                        ) : (
+                          <span className="text-xs text-gray-300">暂无</span>
+                        )}
+                      </td>
+                      <td className="p-4 font-black">{s.pointsConsumed}</td>
+                      <td className="p-4 font-black">¥ {Number(s.gmvCny || 0).toFixed(2)}</td>
+                      <td className="p-4">
+                        {s.risk === 'Suspicious' ? (
+                          <button
+                            type="button"
+                            onClick={() => setRiskDetail(s)}
+                            className="px-3 py-1 rounded-full text-[10px] font-black tracking-widest bg-red-100 text-red-600 hover:bg-red-200"
+                          >
+                            报价含私联信息
+                          </button>
+                        ) : (
+                          <span className="px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest bg-green-100 text-green-600">
+                            状态良好
+                          </span>
+                        )}
                       </td>
                     </tr>
                  ))}
                  {suppliers.length === 0 && (
                    <tr>
-                     <td colSpan={6} className="p-16 text-center text-sm font-bold text-gray-400">
+                     <td colSpan={11} className="p-16 text-center text-sm font-bold text-gray-400">
                        暂无材料商数据
                      </td>
                    </tr>
                  )}
                </tbody>
              </table>
+             </div>
              )}
              <div className="p-8 bg-gray-50 border-t flex justify-between items-center">
                <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">入驻材料商: {suppliers.length} 家</p>
@@ -1014,10 +1114,17 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                        材料商ID: s.id,
                        名称: s.name,
                        邮箱: s.email,
+                       手机号: s.phone,
+                       营业执照: s.verificationDocUrl ? '已上传' : '未上传',
                        上架单品: s.publishedCount,
+                       PDF图册: s.hasCatalogPdf ? '已上传' : '未上传',
+                       点赞量: s.likeCount,
+                       浏览量: s.viewCount,
+                       评分星级: s.ratingAverage != null ? s.ratingAverage.toFixed(1) : '',
                        积分消费: s.pointsConsumed,
                        交易流水: s.gmvCny,
                        风险: s.risk,
+                       风险原因: s.riskReason,
                      })),
                      'suppliers_report.csv'
                    )
@@ -1173,7 +1280,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                      <p className="text-[10px] font-black uppercase text-gray-400 tracking-widest">管理操作</p>
                      <button
                        type="button"
-                       disabled={!req.verificationDoc}
+                       disabled={!req.verificationDoc || !req.registeredPhone}
                        onClick={() => onVerifySupplier(req.id)}
                        className="w-full py-3 bg-black text-white rounded-xl text-xs font-bold active:scale-[0.98] transition-transform disabled:opacity-40 disabled:cursor-not-allowed"
                      >
@@ -1216,7 +1323,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                      </td>
                      <td className="p-6 text-right space-x-4">
                        <button 
-                         disabled={!req.verificationDoc}
+                         disabled={!req.verificationDoc || !req.registeredPhone}
                          onClick={() => onVerifySupplier(req.id)}
                          className="text-xs font-bold bg-black text-white px-4 py-2 rounded-xl hover:scale-105 transition-transform disabled:opacity-40 disabled:hover:scale-100 disabled:cursor-not-allowed"
                        >
@@ -2126,8 +2233,16 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     m.brand === viewingSupplierProducts
                 )
                 .map((m) => (
-                <div key={m.id} className="bg-gray-50 rounded-3xl p-4 border border-gray-100">
-                  <img src={m.image} className="w-full aspect-video object-cover rounded-2xl mb-4" />
+                <button
+                  type="button"
+                  key={m.id}
+                  onClick={() => {
+                    setViewingSupplierProducts(null);
+                    openEditMaterial(m);
+                  }}
+                  className="bg-gray-50 rounded-3xl p-4 border border-gray-100 text-left hover:border-black hover:shadow-md transition-all"
+                >
+                  <img src={m.image} className="w-full aspect-video object-cover rounded-2xl mb-4" alt="" />
                   <h4 className="font-bold mb-1">{pickLocale(m.name)}</h4>
                   <div className="flex justify-between items-center">
                     <span className="text-xs text-gray-400">{m.category}</span>
@@ -2137,8 +2252,31 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <span className="text-[10px] font-bold text-purple-500">报价 {m.quoteCount || 0}</span>
                     </div>
                   </div>
-                </div>
+                  <p className="text-[10px] font-bold text-blue-600 mt-3">点击进入编辑信息</p>
+                </button>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+      {riskDetail && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-[160] flex items-center justify-center p-6">
+          <div className="bg-white w-full max-w-lg p-10 rounded-[40px] shadow-2xl">
+            <div className="flex justify-between items-start mb-6">
+              <div>
+                <h3 className="text-2xl font-black">风险预警原因</h3>
+                <p className="text-xs text-gray-400 mt-1">{riskDetail.name}</p>
+              </div>
+              <button type="button" onClick={() => setRiskDetail(null)} className="text-gray-400 hover:text-black text-xl">✕</button>
+            </div>
+            <p className="text-sm text-gray-500 leading-relaxed mb-4">
+              该材料商在回复设计师报价时，备注里出现了手机号或微信号等与报价无关的私联信息。
+            </p>
+            <div className="bg-red-50 border border-red-100 rounded-2xl p-4">
+              <p className="text-[10px] font-black uppercase text-red-400 tracking-widest mb-2">报价备注原文</p>
+              <p className="text-sm font-bold text-gray-800 whitespace-pre-wrap break-words">
+                {riskDetail.riskReason || '未记录到原文'}
+              </p>
             </div>
           </div>
         </div>

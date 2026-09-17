@@ -20,6 +20,11 @@ interface AuthProps {
 
 type AuthMode = 'login' | 'register' | 'forgot';
 
+function isValidRegisterPhone(value: string): boolean {
+  const digits = value.replace(/\D/g, '');
+  return digits.length >= 8 && digits.length <= 15;
+}
+
 const AuthSpinner: React.FC<{ label: string }> = ({ label }) => (
   <div className="absolute inset-0 z-20 bg-black/45 backdrop-blur-[2px] flex flex-col items-center justify-center gap-3 rounded-[40px]">
     <div className="w-9 h-9 border-2 border-white/25 border-t-white rounded-full animate-spin" />
@@ -57,6 +62,7 @@ const Auth: React.FC<AuthProps> = ({
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [companyName, setCompanyName] = useState('');
+  const [phone, setPhone] = useState('');
   const [licenseFile, setLicenseFile] = useState<File | null>(null);
   const [licensePreview, setLicensePreview] = useState('');
   const [loading, setLoading] = useState(false);
@@ -90,6 +96,7 @@ const Auth: React.FC<AuthProps> = ({
     setMode(next);
     setError('');
     setInfo('');
+    setPhone('');
     setLicenseFile(null);
     setLicensePreview('');
   };
@@ -162,15 +169,27 @@ const Auth: React.FC<AuthProps> = ({
 
       if (role === 'SUPPLIER') {
         const company = companyName.trim();
+        const trimmedPhone = phone.trim();
         if (!company) {
           setError(t('auth.companyRequired'));
+          return;
+        }
+        if (!trimmedPhone) {
+          setError(t('auth.phoneRequired'));
+          return;
+        }
+        if (!isValidRegisterPhone(trimmedPhone)) {
+          setError(t('auth.phoneInvalid'));
           return;
         }
         if (!licenseFile) {
           setError(t('auth.licenseRequired'));
           return;
         }
-        const result = await signUp(trimmedEmail, trimmedPassword, role, { company });
+        const result = await signUp(trimmedEmail, trimmedPassword, role, {
+          company,
+          phone: trimmedPhone,
+        });
         if (result.ok === false) {
           setError(result.error);
           return;
@@ -178,21 +197,31 @@ const Auth: React.FC<AuthProps> = ({
         try {
           const uploaded = await uploadImage(licenseFile, 'verification');
           const doc = uploaded.objectKey || uploaded.url;
+          if (!doc) {
+            throw new Error('license missing object key');
+          }
           const saved = await updateVerificationRequest(result.user.id, {
             company,
+            phone: trimmedPhone,
             docUrl: doc,
           });
+          if (!saved) {
+            throw new Error('verification save failed');
+          }
           onAuthSuccess({
             ...result.user,
             company,
-            verificationDoc: saved ? doc : result.user.verificationDoc,
+            registeredPhone: trimmedPhone,
+            verificationDoc: doc,
             isVerified: false,
             accountStatus: 'pending',
           });
         } catch {
+          setError(t('auth.licenseUploadFailed'));
           onAuthSuccess({
             ...result.user,
             company,
+            registeredPhone: trimmedPhone,
             isVerified: false,
             accountStatus: 'pending',
           });
@@ -325,20 +354,36 @@ const Auth: React.FC<AuthProps> = ({
 
       <form onSubmit={handleSubmit} className="space-y-4">
         {mode === 'register' && role === 'SUPPLIER' && (
-          <div>
-            <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">
-              {t('auth.companyName')}
-            </label>
-            <input
-              required
-              type="text"
-              value={companyName}
-              onChange={(e) => setCompanyName(e.target.value)}
-              placeholder={t('auth.companyNamePlaceholder')}
-              autoComplete="organization"
-              className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all"
-            />
-          </div>
+          <>
+            <div>
+              <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">
+                {t('auth.companyName')}
+              </label>
+              <input
+                required
+                type="text"
+                value={companyName}
+                onChange={(e) => setCompanyName(e.target.value)}
+                placeholder={t('auth.companyNamePlaceholder')}
+                autoComplete="organization"
+                className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">
+                {t('auth.phone')}
+              </label>
+              <input
+                required
+                type="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder={t('auth.phonePlaceholder')}
+                autoComplete="tel"
+                className="w-full p-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-black transition-all"
+              />
+            </div>
+          </>
         )}
         <div>
           <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">

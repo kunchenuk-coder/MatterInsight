@@ -69,10 +69,15 @@
     "emailTaken": "Please try a different email.",
     "companyName": "Supplier account name",
     "companyNamePlaceholder": "Company or brand name",
+    "phone": "Mobile number",
+    "phonePlaceholder": "Enter an 11-digit mobile number",
+    "phoneRequired": "Please enter a mobile number",
+    "phoneInvalid": "Please enter a valid mobile number",
     "businessLicense": "Business license",
     "licenseHint": "Click to upload your business license",
     "companyRequired": "Please enter a supplier account name",
-    "licenseRequired": "Please upload a business license"
+    "licenseRequired": "Please upload a business license",
+    "licenseUploadFailed": "License upload failed. Sign in again to resubmit."
   },
   "resetPassword": {
     "subtitle": "Set new password",

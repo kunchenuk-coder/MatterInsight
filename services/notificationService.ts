@@ -10,7 +10,8 @@ export type NotificationType =
   | 'project_adoption_approved'
   | 'story_pending_review'
   | 'evaluation_added'
-  | 'evaluation_disputed';
+  | 'evaluation_disputed'
+  | 'supplier_pending_review';
 
 export type UnreadNotificationCounts = {
   total: number;
@@ -23,6 +24,7 @@ export type UnreadNotificationCounts = {
   story_pending_review: number;
   evaluation_added: number;
   evaluation_disputed: number;
+  supplier_pending_review: number;
 };
 
 export const EMPTY_UNREAD_COUNTS: UnreadNotificationCounts = {
@@ -36,6 +38,7 @@ export const EMPTY_UNREAD_COUNTS: UnreadNotificationCounts = {
   story_pending_review: 0,
   evaluation_added: 0,
   evaluation_disputed: 0,
+  supplier_pending_review: 0,
 };
 
 function clientFor(portal?: AppPortal) {

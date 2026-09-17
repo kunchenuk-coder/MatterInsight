@@ -2065,6 +2065,10 @@ const App: React.FC = () => {
                     onShipSample={(id) => handleShipSample(id, 'ADMIN')}
                     verificationRequests={verificationRequests}
                     onVerifySupplier={handleVerifySupplier}
+                    unreadDisputedCount={dbUnreadCounts.evaluation_disputed}
+                    onDisputedNotificationsRead={() => {
+                      void refreshUnreadNotifications();
+                    }}
                   />
                 );
               case 'designer':

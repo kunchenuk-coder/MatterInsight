@@ -69,10 +69,15 @@
     "emailTaken": "请更换其他邮箱后再试。",
     "companyName": "供应商账号名",
     "companyNamePlaceholder": "请输入公司或品牌名称",
+    "phone": "联系手机号",
+    "phonePlaceholder": "请输入11位手机号",
+    "phoneRequired": "请填写联系手机号",
+    "phoneInvalid": "请输入有效的手机号",
     "businessLicense": "营业执照",
     "licenseHint": "点击上传营业执照照片",
     "companyRequired": "请填写供应商账号名",
-    "licenseRequired": "请上传营业执照"
+    "licenseRequired": "请上传营业执照",
+    "licenseUploadFailed": "营业执照上传失败，请重新登录后补交"
   },
   "resetPassword": {
     "subtitle": "设置新密码",
